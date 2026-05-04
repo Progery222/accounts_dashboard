@@ -2,6 +2,13 @@
 # База Microsoft Playwright уже содержит Chromium и системные зависимости.
 FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
+# APScheduler и Django USE_TZ используют zoneinfo; без tzdata в образе:
+# «No time zone found with key Europe/Moscow».
+USER root
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -9,7 +16,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DJANGO_SETTINGS_MODULE=config.settings \
     BROWSER_HEADLESS=true \
     RUN_SCHEDULER=true \
-    PORT=8000
+    PORT=8000 \
+    TZ=Europe/Moscow
 
 WORKDIR /app
 

@@ -375,6 +375,9 @@ Frontend — Build Arguments / Variables на этапе build:
      с dev-машины: Railway CLI `railway run` / shell в контейнере / scp через
      одноразовый debug. Без этого refresh по браузерным платформам упадёт.
 
+Если в логах backend: «No time zone found with key Europe/Moscow» — в образе
+  должен быть пакет tzdata (в backend/Dockerfile он ставится явно).
+
 Если healthcheck на /healthz/ падает с «service unavailable»:
   - Чаще всего DisallowedHost: в Variables задайте DEBUG=false и проверьте,
     что в ALLOWED_HOSTS попадает домен Railway (в коде при RAILWAY_* уже
