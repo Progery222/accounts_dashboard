@@ -1,0 +1,13 @@
+---
+description: Перезапуск Django и Vite после правок, влияющих на рантайм
+globs: backend/**, frontend/**
+alwaysApply: false
+---
+
+После изменений в `backend/` (Django, `accounts/`, `config/`, `platforms/` и воркеры Playwright) или `frontend/` (Vite, React, `src/`), когда правки должны отразиться в работающем приложении:
+
+1. **Самостоятельно** останови старые процессы `manage.py runserver` для `dashboard\backend` и dev-сервер фронта (`vite` / `npm run dev` для `dashboard\frontend`).
+2. Запусти снова: из `backend/` — `python manage.py runserver`; из `frontend/` — `npm run dev -- --port 5173` (или порт из проекта).
+3. Не проси пользователя перезапускать вручную, если от тебя ожидается проверка или рабочее состояние после таких правок.
+
+Не перезапускай из‑за чисто косметических правок в README или если пользователь явно просит не трогать серверы.

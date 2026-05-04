@@ -1,0 +1,172 @@
+import atexit
+import json
+import os
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+
+def _backend_dir_for_worker(worker_path: Path) -> Path:
+    """
+    Каталог с manage.py (обычно backend/). Нужен как cwd subprocess: иначе
+    `python .../platforms/threads/worker.py` кладёт в sys.path только .../threads,
+    и строка `from platforms...` падает с ImportError до любого ответа в stdout.
+    """
+    p = worker_path.resolve().parent
+    for _ in range(12):
+        if (p / "manage.py").exists():
+            return p
+        if p == p.parent:
+            break
+        p = p.parent
+    raise RuntimeError(
+        f"Не найден каталог Django (manage.py) над {worker_path}. "
+        "Запускайте manage.py из backend/."
+    )
+
+
+def _worker_subprocess_env(backend_root: str) -> dict:
+    """
+    cwd=backend недостаточно: при `python .../threads/worker.py` Python кладёт в sys.path
+    только каталог скрипта, а не cwd — без PYTHONPATH пакет `platforms` не импортируется.
+    """
+    env = os.environ.copy()
+    prev = (env.get("PYTHONPATH") or "").strip()
+    if prev:
+        parts = [p for p in prev.split(os.pathsep) if p]
+        if backend_root not in parts:
+            env["PYTHONPATH"] = backend_root + os.pathsep + prev
+    else:
+        env["PYTHONPATH"] = backend_root
+    return env
+
+
+class _WorkerHandle:
+    def __init__(self, worker_path: Path):
+        self.worker_path = worker_path
+        self.lock = threading.Lock()
+        self._cwd = str(_backend_dir_for_worker(worker_path))
+        self.proc = subprocess.Popen(
+            [sys.executable, str(worker_path), "--daemon"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=self._cwd,
+            env=_worker_subprocess_env(self._cwd),
+        )
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
+
+    def _drain_stderr(self) -> None:
+        if self.proc.stderr is None:
+            return
+        for line in self.proc.stderr:
+            if line:
+                print(line, end="", file=sys.stderr)
+
+    def call(self, payload: dict) -> dict:
+        if self.proc.poll() is not None:
+            raise ValueError("Фоновый worker завершился, попробуйте обновить еще раз")
+        if self.proc.stdin is None or self.proc.stdout is None:
+            raise ValueError("Worker недоступен")
+
+        with self.lock:
+            self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            line = self.proc.stdout.readline()
+        if not line:
+            raise ValueError("Worker не вернул ответ")
+        try:
+            data = json.loads(line.strip())
+        except Exception:
+            raise ValueError("Ошибка парсинга ответа worker")
+        if "error" in data:
+            raise ValueError(data["error"])
+        return data
+
+    def close(self) -> None:
+        try:
+            if self.proc.poll() is None:
+                self.proc.terminate()
+        except Exception:
+            pass
+
+
+_HANDLES: dict[str, _WorkerHandle] = {}
+_GLOBAL_LOCK = threading.Lock()
+
+
+def _is_recoverable_playwright_error(message: str) -> bool:
+    msg = (message or "").lower()
+    markers = (
+        "target page, context or browser has been closed",
+        "browser has been closed",
+        "context has been closed",
+        "page has been closed",
+        "worker завершился",
+        "worker не вернул ответ",
+    )
+    return any(m in msg for m in markers)
+
+
+def call_worker(worker_path: Path, payload: dict) -> dict:
+    """
+    До 3 попыток при «пустом stdout» / закрытом браузере — при refresh_all по многим
+    аккаунтам один сбой не должен навсегда ломать пул.
+    """
+    key = str(worker_path.resolve())
+    last_exc: BaseException | None = None
+    for attempt in range(3):
+        with _GLOBAL_LOCK:
+            handle = _HANDLES.get(key)
+            dead = handle is None or handle.proc.poll() is not None
+            if dead or attempt > 0:
+                if handle is not None:
+                    try:
+                        handle.close()
+                    except Exception:
+                        pass
+                handle = _WorkerHandle(worker_path)
+                _HANDLES[key] = handle
+        try:
+            return handle.call(payload)
+        except Exception as exc:
+            last_exc = exc
+            if not _is_recoverable_playwright_error(str(exc)):
+                raise
+    assert last_exc is not None
+    raise last_exc
+
+
+def ensure_worker(worker_path: Path) -> None:
+    """
+    Ensure daemon worker process is started and kept in pool.
+    Used for pre-warming browser windows/contexts before bulk refresh.
+    """
+    key = str(worker_path.resolve())
+    with _GLOBAL_LOCK:
+        handle = _HANDLES.get(key)
+        if handle is None or handle.proc.poll() is not None:
+            _HANDLES[key] = _WorkerHandle(worker_path)
+
+
+@atexit.register
+def _shutdown_workers() -> None:
+    for h in list(_HANDLES.values()):
+        h.close()
+
+
+def shutdown_all_workers() -> None:
+    """Закрыть все демоны Playwright — после сброса сессии в настройках."""
+    with _GLOBAL_LOCK:
+        for h in list(_HANDLES.values()):
+            try:
+                h.close()
+            except Exception:
+                pass
+        _HANDLES.clear()
