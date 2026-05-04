@@ -293,43 +293,87 @@ Docker (переписанный под Django):
 
 
 --------------------------------------------------------------------------------
-Фаза 5R — Деплой на Railway (PaaS)
+Фаза 5R — Деплой на Railway (PaaS) — основной сценарий
 --------------------------------------------------------------------------------
 
-Архитектура:
-  - Postgres: Railway plugin (автогенерит DATABASE_URL).
-  - Backend: один сервис (Docker image из backend/Dockerfile),
-    gunicorn --workers 1 + APScheduler в этом же процессе (RUN_SCHEDULER=true)
-    + Volume на /app/.browser-profile под BROWSER_PROFILE_DIR.
-  - Frontend: отдельный сервис (multi-stage Vite → nginx, frontend/Dockerfile),
-    публичный домен Railway.
+Репозиторий (пример): https://github.com/Progery222/accounts_dashboard
 
-Backend env (минимум):
+Архитектура:
+  - Postgres: плагин Railway → переменная DATABASE_URL в сервисе Backend.
+  - Backend: Docker (backend/Dockerfile), gunicorn --workers 1 + APScheduler
+    в одном процессе (RUN_SCHEDULER=true по умолчанию в образе) + Volume
+    /app/.browser-profile (BROWSER_PROFILE_DIR).
+  - Frontend: отдельный сервис, Docker (frontend/Dockerfile), Vite build →
+    nginx. Сборка должна знать публичный URL API (см. VITE_API_URL ниже).
+
+Файлы конфигурации Railway (пути относительно Root Directory сервиса):
+  - Backend:  Root Directory = backend/  → railway.json с dockerfilePath
+    «Dockerfile», healthcheck /healthz/. Старт: CMD из Dockerfile (migrate +
+    gunicorn).
+  - Frontend: Root Directory = frontend/ → railway.json с dockerfilePath
+    «Dockerfile», healthcheck /healthz.
+
+Backend — переменные окружения (Variables), минимум:
   DJANGO_SETTINGS_MODULE=config.settings
-  SECRET_KEY=<свой>
+  SECRET_KEY=<длинный случайный>
   DEBUG=false
-  ALLOWED_HOSTS=<RAILWAY_PUBLIC_DOMAIN авто; добавьте кастомный домен>
-  DB_SSL_REQUIRE=true
+  DB_SSL_REQUIRE=true          # по умолчанию и так true при DATABASE_URL;
+                               # явно не помешает
   BROWSER_HEADLESS=true
   RUN_SCHEDULER=true
   BROWSER_PROFILE_DIR=/app/.browser-profile
+  ALLOWED_HOSTS=               # можно пусто: RAILWAY_PUBLIC_DOMAIN подхватится
+                               # в settings.py автоматически
+  RAILWAY_FRONTEND_PUBLIC_DOMAIN=<хост фронта без пути, см. шаги 6–7>
+  YOUTUBE_API_KEY=             # если нужен YouTube
+  INSTAGRAM_*, TELEGRAM_*, FACEBOOK_* — по необходимости
 
-Frontend build args:
-  VITE_API_URL=https://<railway-public-domain-of-backend>
+Frontend — Build Arguments / Variables на этапе build:
+  VITE_API_URL=https://<публичный-хост-backend>.up.railway.app
+  (без завершающего слэша). Обязательно: иначе axios с пустым baseURL не
+  попадёт на API между двумя разными доменами Railway.
 
-Шаги:
-  1. Создать проект Railway. Подключить GitHub-репозиторий.
-  2. Postgres → Add Plugin → Postgres. Готово, DATABASE_URL появится в backend
-     сервисе автоматически.
-  3. Создать сервис Backend, Root Directory = backend/, Builder = Dockerfile.
-     Подцепится backend/railway.json (healthz + start command).
-  4. В backend сервисе: Volume → mount path /app/.browser-profile (≥ 1 GB).
-  5. Создать сервис Frontend, Root Directory = frontend/, Builder = Dockerfile.
-     В Build args указать VITE_API_URL = публичный URL backend (после п.3).
-  6. Прокинуть {platform}_state.json (TikTok/Instagram/X/Threads/Facebook/Rumble)
-     и при необходимости instagram.session/telegram.session через `railway run`
-     (загрузка с локалки) либо одноразовый scp/curl в /app/.browser-profile.
-  7. Healthcheck: backend → /healthz/, frontend → /healthz.
+Пошагово (с нуля):
+
+  1. railway.app → New Project → Deploy from GitHub → выбрать репозиторий
+     (например Progery222/accounts_dashboard).
+
+  2. В проекте: New → Database → PostgreSQL. Дождаться выдачи DATABASE_URL.
+
+  3. New → GitHub Repo (или Duplicate service) → тот же репозиторий, назвать
+     сервис «backend» (или Dashboard API):
+       Settings → Root Directory → backend
+       Settings → Build → Dockerfile (Railway подхватит backend/railway.json)
+     Вкладка Variables → Add Reference → подключить DATABASE_URL из Postgres
+     к этому сервису (или Railway сделает это автоматически при «Connect»).
+
+  4. Backend → Settings → Networking → Generate Domain (появится публичный
+     URL вида https://xxx.up.railway.app). Скопируйте его — нужен для шага 6.
+
+  5. Backend → Volumes → New Volume → Mount Path = /app/.browser-profile
+     (размер по желанию, ≥ 1 GB для профилей Playwright).
+
+  6. New → GitHub Repo → сервис «frontend»:
+       Root Directory = frontend
+     Variables → вкладка Build (или Docker Build Args):
+       VITE_API_URL = https://<URL из шага 4>   (именно backend URL)
+     Deploy. После деплоя: Networking → Generate Domain для фронта — URL
+     вида https://yyy.up.railway.app
+
+  7. Backend → Variables → добавить:
+       RAILWAY_FRONTEND_PUBLIC_DOMAIN = yyy.up.railway.app
+     (только хост, без https:// — settings.py сам добавит схемы для CORS/CSRF)
+     Либо вместо этого задать CORS_EXTRA_ORIGINS и CSRF_EXTRA_ORIGINS вручную:
+       https://yyy.up.railway.app
+     Redeploy backend после изменения переменных.
+
+  8. Проверка в браузере: открыть URL фронта → список аккаунтов должен
+     грузиться. Backend напрямую: https://xxx.../healthz/ → JSON {"status":"ok"}.
+
+  9. Сессии Playwright: один раз залить в volume /app/.browser-profile файлы
+     *_state.json (и при необходимости instagram.session, telegram.session)
+     с dev-машины: Railway CLI `railway run` / shell в контейнере / scp через
+     одноразовый debug. Без этого refresh по браузерным платформам упадёт.
 
 Ограничения, о которых нельзя забывать:
   - Эфемерный диск: всё, что вне Volume, теряется при редеплое.

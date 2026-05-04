@@ -1,4 +1,7 @@
-# Продовый docker-compose для VPS-деплоя (вариант A: свой порт, не трогаем 80).
+# Продовый docker-compose для VPS (вариант A: свой порт, не трогаем 80).
+# Основной PaaS-деплой проекта — Railway (см. DEPLOY_HEADLESS_PLAN.txt, фаза 5R
+# и backend/frontend/railway.json). Этот файл оставлен для тех, кто поднимает
+# стек на своём VPS через docker compose.
 #
 # Архитектура:
 #   - postgres   — внутри сети compose, наружу не торчит.

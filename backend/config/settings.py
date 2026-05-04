@@ -68,11 +68,15 @@ _database_url = os.getenv("DATABASE_URL", "").strip()
 if _database_url:
     import dj_database_url
 
+    # На Railway Postgres почти всегда требует SSL. Если URL уже содержит
+    # sslmode=require, дублирование не мешает. Локально с DATABASE_URL без SSL
+    # выставьте DB_SSL_REQUIRE=false.
+    _db_ssl_default = "true" if _database_url else "false"
     DATABASES = {
         "default": dj_database_url.parse(
             _database_url,
             conn_max_age=600,
-            ssl_require=os.getenv("DB_SSL_REQUIRE", "false").lower() == "true",
+            ssl_require=os.getenv("DB_SSL_REQUIRE", _db_ssl_default).lower() == "true",
         )
     }
 else:
@@ -117,8 +121,8 @@ CORS_ALLOWED_ORIGINS = [
 ] + _extra_origins
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 
-# CSRF_EXTRA_ORIGINS — публичные origin'ы для VPS-деплоя:
-#   CSRF_EXTRA_ORIGINS=http://146.103.120.54:8080,https://dashboard.example.com
+# CSRF_EXTRA_ORIGINS — публичные origin'ы (VPS, кастомный домен, второй
+# Railway-сервис со SPA).
 _csrf_extra = [o.strip() for o in os.getenv("CSRF_EXTRA_ORIGINS", "").split(",") if o.strip()]
 
 CSRF_TRUSTED_ORIGINS = [
@@ -132,6 +136,31 @@ if _railway_domain:
         CSRF_TRUSTED_ORIGINS.append(railway_https)
     if railway_https not in CORS_ALLOWED_ORIGINS:
         CORS_ALLOWED_ORIGINS.append(railway_https)
+
+# Отдельный публичный домен фронтенда на Railway (второй сервис). Браузер
+# открывает SPA на https://<frontend>, axios ходит на https://<backend>
+# (VITE_API_URL) — без этого origin в CORS/CSRF Django отрежет запросы.
+# Значение: только хост (xxx.up.railway.app) или полный URL с https://
+_railway_fe = os.getenv("RAILWAY_FRONTEND_PUBLIC_DOMAIN", "").strip()
+if _railway_fe:
+    _fe_host = _railway_fe.rstrip("/")
+    for _pfx in ("https://", "http://"):
+        if _fe_host.lower().startswith(_pfx):
+            _fe_host = _fe_host[len(_pfx) :]
+            break
+    _fe_schemes = ("https",) if not DEBUG else ("https", "http")
+    for _sch in _fe_schemes:
+        _fe_origin = f"{_sch}://{_fe_host}"
+        if _fe_origin not in CORS_ALLOWED_ORIGINS:
+            CORS_ALLOWED_ORIGINS.append(_fe_origin)
+        if _fe_origin not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(_fe_origin)
+
+# Railway: TLS на edge, до контейнера — HTTP. Без этого Django считает
+# запросы небезопасными и ломаются редиректы/CSRF для админки.
+if os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip() or os.getenv("RAILWAY_ENVIRONMENT", "").strip():
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
 
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 
