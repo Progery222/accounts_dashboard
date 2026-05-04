@@ -39,6 +39,10 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # Healthcheck-перехватчик ДО SecurityMiddleware: Railway healthcheck
+    # приходит с внутренним Host, которого нет в ALLOWED_HOSTS, и без этого
+    # Django ответит 400 DisallowedHost.
+    "config.health.HealthcheckMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     # WhiteNoise отдаёт статику в проде (Django admin) без отдельного nginx.
