@@ -19,8 +19,10 @@ from accounts.settings_views import (
     rumble_import_cookies,
 )
 from accounts.views import account_avatar
+from .health import healthz
 
 urlpatterns = [
+    path("healthz/", healthz),
     path("admin/", admin.site.urls),
     path("api/accounts/", include("accounts.urls")),
     path("api/tiktok/", include("tiktok_app.urls")),

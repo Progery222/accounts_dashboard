@@ -211,6 +211,58 @@ Docker (переписанный под Django):
 
 
 --------------------------------------------------------------------------------
+Фаза 5R — Деплой на Railway (PaaS)
+--------------------------------------------------------------------------------
+
+Архитектура:
+  - Postgres: Railway plugin (автогенерит DATABASE_URL).
+  - Backend: один сервис (Docker image из backend/Dockerfile),
+    gunicorn --workers 1 + APScheduler в этом же процессе (RUN_SCHEDULER=true)
+    + Volume на /app/.browser-profile под BROWSER_PROFILE_DIR.
+  - Frontend: отдельный сервис (multi-stage Vite → nginx, frontend/Dockerfile),
+    публичный домен Railway.
+
+Backend env (минимум):
+  DJANGO_SETTINGS_MODULE=config.settings
+  SECRET_KEY=<свой>
+  DEBUG=false
+  ALLOWED_HOSTS=<RAILWAY_PUBLIC_DOMAIN авто; добавьте кастомный домен>
+  DB_SSL_REQUIRE=true
+  BROWSER_HEADLESS=true
+  RUN_SCHEDULER=true
+  BROWSER_PROFILE_DIR=/app/.browser-profile
+
+Frontend build args:
+  VITE_API_URL=https://<railway-public-domain-of-backend>
+
+Шаги:
+  1. Создать проект Railway. Подключить GitHub-репозиторий.
+  2. Postgres → Add Plugin → Postgres. Готово, DATABASE_URL появится в backend
+     сервисе автоматически.
+  3. Создать сервис Backend, Root Directory = backend/, Builder = Dockerfile.
+     Подцепится backend/railway.json (healthz + start command).
+  4. В backend сервисе: Volume → mount path /app/.browser-profile (≥ 1 GB).
+  5. Создать сервис Frontend, Root Directory = frontend/, Builder = Dockerfile.
+     В Build args указать VITE_API_URL = публичный URL backend (после п.3).
+  6. Прокинуть {platform}_state.json (TikTok/Instagram/X/Threads/Facebook/Rumble)
+     и при необходимости instagram.session/telegram.session через `railway run`
+     (загрузка с локалки) либо одноразовый scp/curl в /app/.browser-profile.
+  7. Healthcheck: backend → /healthz/, frontend → /healthz.
+
+Ограничения, о которых нельзя забывать:
+  - Эфемерный диск: всё, что вне Volume, теряется при редеплое.
+  - Один Volume на сервис → именно поэтому scheduler крутится в backend, а не
+    в отдельном сервисе.
+  - HTTP таймаут Railway ~5 минут: refresh_all всех аккаунтов лучше не звать
+    как один запрос; на фронте уже разбивается через refreshAccount/Bulk.
+  - Telegram Web (headless=False) на Railway без Xvfb работать не будет.
+    Используйте либо Telethon (MTProto) через TELEGRAM_API_ID/HASH/PHONE
+    (без браузера), либо Telegram отключите.
+  - Rumble + Cloudflare: при стабильных провалах на headless — кандидат на
+    выпил из расписания или замену на Scrapling/CDP.
+
+
+--------------------------------------------------------------------------------
 Критерии готовности
 --------------------------------------------------------------------------------
 
