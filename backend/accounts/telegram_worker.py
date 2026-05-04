@@ -99,10 +99,10 @@ async def main():
     _wu_spec.loader.exec_module(_wu)
 
     async with async_playwright() as pw:
-        # Telegram Web requires a non-headless window for full rendering.
-        # Use --window-position off-screen so the user doesn't see it.
+        # Telegram Web Web K требует «живой» рендеринг.
+        # На сервере без GUI запускайте под Xvfb или TELEGRAM_HEADLESS=false.
         context, _browser = await _wu.launch_context(
-            pw, platform="telegram", headless=False, locale="ru-RU",
+            pw, platform="telegram", locale="ru-RU",
         )
         # Add off-screen args via a workaround: if persistent fallback was used
         # the args were already set in launch_context; for ephemeral context we

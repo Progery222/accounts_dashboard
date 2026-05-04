@@ -398,12 +398,12 @@ async def run_once(arg: dict):
     username = arg["username"].lstrip("@")
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
-        # headless=False — Telegram Web K requires a real rendering context.
-        # force_persistent=True — bypass state-file; Telegram auth is in IndexedDB
-        #                         which is NOT captured by storage_state JSON.
-        # --window-position moves the window off-screen so the user never sees it.
+        # Telegram Web K требует «живой» рендеринг — на сервере без GUI запускайте
+        # под Xvfb или выставьте TELEGRAM_HEADLESS=false (см. DEPLOY_HEADLESS_PLAN.txt).
+        # force_persistent=True — bypass state-file; Telegram auth хранится в
+        # IndexedDB, что НЕ захватывается storage_state JSON.
         context, _browser = await _wu.launch_context(
-            pw, platform="telegram", headless=False,
+            pw, platform="telegram",
             locale="ru-RU", force_persistent=True,
         )
         page = context.pages[0] if context.pages else await context.new_page()
@@ -423,7 +423,7 @@ async def daemon_main() -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="telegram", headless=False,
+            pw, platform="telegram",
             locale="ru-RU", force_persistent=True,
         )
         page = context.pages[0] if context.pages else await context.new_page()

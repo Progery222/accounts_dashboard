@@ -443,7 +443,7 @@ async def run_once_cli(arg: dict) -> dict:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="instagram", headless=False, locale="en-US",
+            pw, platform="instagram", locale="en-US",
             viewport={"width": 1280, "height": 900},
         )
         page = context.pages[0] if context.pages else await context.new_page()
@@ -457,7 +457,7 @@ async def daemon_main() -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="instagram", headless=False, locale="en-US",
+            pw, platform="instagram", locale="en-US",
             viewport={"width": 1280, "height": 900},
         )
         page = context.pages[0] if context.pages else await context.new_page()

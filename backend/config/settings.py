@@ -109,8 +109,9 @@ INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "")
 INSTAGRAM_SESSION_FILE = os.getenv("INSTAGRAM_SESSION_FILE", "")
 
 # ── Facebook ───────────────────────────────────────────────────────────────────
-FACEBOOK_EMAIL    = os.getenv("FACEBOOK_EMAIL",    "asti22297@gmail.com")
-FACEBOOK_PASSWORD = os.getenv("FACEBOOK_PASSWORD", "48792594806a")
+# ВНИМАНИЕ: пароли ТОЛЬКО через .env / переменные окружения. Никаких дефолтов.
+FACEBOOK_EMAIL    = os.getenv("FACEBOOK_EMAIL", "")
+FACEBOOK_PASSWORD = os.getenv("FACEBOOK_PASSWORD", "")
 
 # ── Telegram (Telethon MTProto API) ───────────────────────────────────────────
 # API credentials: https://my.telegram.org → API development tools

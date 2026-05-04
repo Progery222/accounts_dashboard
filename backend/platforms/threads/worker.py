@@ -122,7 +122,7 @@ async def run_once(arg: dict):
 
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="threads", headless=False, locale="en-US",
+            pw, platform="threads", locale="en-US",
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
@@ -623,7 +623,7 @@ async def daemon_main() -> None:
         async with async_playwright() as pw:
             try:
                 context, _browser = await _wu.launch_context(
-                    pw, platform="threads", headless=False, locale="en-US",
+                    pw, platform="threads", locale="en-US",
                 )
             except Exception as exc:
                 _write_response(

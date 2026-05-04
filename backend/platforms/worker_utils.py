@@ -134,12 +134,58 @@ _CHALLENGE_JS = r"""
 """
 
 
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "y"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off", "n"})
+
+
+def _env_bool(name: str, default: bool = False) -> bool | None:
+    """Распарсить env-переменную как bool. Пустое/неустановленное → None."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if s == "":
+        return None
+    if s in _TRUE_VALUES:
+        return True
+    if s in _FALSE_VALUES:
+        return False
+    return default
+
+
+def resolve_headless(
+    *,
+    platform: str | None = None,
+    fallback: bool = False,
+) -> bool:
+    """
+    Решить, запускать ли Chromium в headless для воркера.
+
+    Приоритет:
+      1. Платформенный override `<PLATFORM>_HEADLESS` (например, `TELEGRAM_HEADLESS`).
+      2. Глобальный `BROWSER_HEADLESS`.
+      3. `fallback` (по умолчанию False — как было до правок).
+
+    Это даёт возможность на проде включить headless глобально
+    (`BROWSER_HEADLESS=true`), а отдельные платформы вернуть в headed
+    через `<PLATFORM>_HEADLESS=false` (под Xvfb).
+    """
+    if platform:
+        per_platform = _env_bool(f"{platform.upper()}_HEADLESS")
+        if per_platform is not None:
+            return per_platform
+    glob = _env_bool("BROWSER_HEADLESS")
+    if glob is not None:
+        return glob
+    return fallback
+
+
 async def launch_context(
     pw,
     *,
     platform: str,
     profile_dir: Path | None = None,
-    headless: bool = True,
+    headless: bool | None = None,
     locale: str = "en-US",
     viewport: dict | None = None,
     force_persistent: bool = False,
@@ -166,6 +212,9 @@ async def launch_context(
     """
     if viewport is None:
         viewport = {"width": 1280, "height": 900}
+
+    if headless is None:
+        headless = resolve_headless(platform=platform)
 
     base = profile_dir or default_profile_dir()
     sf = state_file_path(platform, base)

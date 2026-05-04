@@ -527,7 +527,7 @@ async def run_once(arg: dict):
     try:
         async with async_playwright() as pw:
             context, _browser = await _wu.launch_context(
-                pw, platform="facebook", headless=False,
+                pw, platform="facebook",
                 locale="ru-RU", force_persistent=True,
             )
             page = context.pages[0] if context.pages else await context.new_page()
@@ -550,7 +550,7 @@ async def daemon_main() -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="facebook", headless=False,
+            pw, platform="facebook",
             locale="ru-RU", force_persistent=True,
         )
         page = context.pages[0] if context.pages else await context.new_page()

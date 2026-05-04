@@ -1,33 +1,60 @@
+# Продовый docker-compose: Django + Playwright Chromium (headless), Postgres,
+# отдельный scheduler-контейнер, фронтенд (dev по умолчанию).
+#
+# Перед запуском: скопировать .env.example → .env и заполнить секреты.
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-dashboard}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-      POSTGRES_DB: ${POSTGRES_DB:-dashboard}
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${DB_USER:-dashboard}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dashboard}
+      POSTGRES_DB: ${DB_NAME:-dashboard}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dashboard}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dashboard}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   backend:
     build: ./backend
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      BROWSER_HEADLESS: "true"
+      RUN_SCHEDULER: "false"
+      BROWSER_PROFILE_DIR: /app/.browser-profile
     ports:
       - "8000:8000"
-    environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dashboard}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-dashboard}
-      SECRET_KEY: ${SECRET_KEY:-changeme}
+    volumes:
+      - browser_profile:/app/.browser-profile
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  scheduler:
+    build: ./backend
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      BROWSER_HEADLESS: "true"
+      RUN_SCHEDULER: "true"
+      BROWSER_PROFILE_DIR: /app/.browser-profile
+    command: ["python", "manage.py", "run_scheduler"]
     volumes:
-      - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - browser_profile:/app/.browser-profile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   frontend:
     build: ./frontend
@@ -42,3 +69,4 @@ services:
 
 volumes:
   postgres_data:
+  browser_profile:

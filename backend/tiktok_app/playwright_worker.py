@@ -86,23 +86,28 @@ async def main() -> None:
         else:
             _wu = None
 
+        # headless определяется через BROWSER_HEADLESS / TIKTOK_HEADLESS.
+        if _wu is not None and hasattr(_wu, "resolve_headless"):
+            _headless = _wu.resolve_headless(platform="tiktok")
+        else:
+            _headless = (os.environ.get("BROWSER_HEADLESS", "false").strip().lower()
+                         in {"1", "true", "yes", "on", "y"})
+
         if _wu is not None:
             context, _browser = await _wu.launch_context(
                 pw,
                 platform="tiktok",
                 profile_dir=Path(PROFILE_DIR),
-                headless=False,  # visible window — TikTok detects headless; works without auth
                 locale="en-US",
             )
             owns_browser = _browser is not None
             _owned_browser = _browser
-            # Resolve state_path so cookie refresh after a successful run works
             state_path = _wu.state_file_path("tiktok", Path(PROFILE_DIR))
         else:
             # Fallback if worker_utils not found (standalone deployment)
             state_path = Path(STATE_FILE) if STATE_FILE else Path(PROFILE_DIR) / "tiktok_state.json"
             if state_path.exists():
-                browser = await pw.chromium.launch(headless=False)
+                browser = await pw.chromium.launch(headless=_headless)
                 context = await browser.new_context(
                     storage_state=str(state_path),
                     locale="en-US",
@@ -113,7 +118,7 @@ async def main() -> None:
             else:
                 Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
                 context = await pw.chromium.launch_persistent_context(
-                    PROFILE_DIR, headless=False,
+                    PROFILE_DIR, headless=_headless,
                     args=["--disable-blink-features=AutomationControlled"],
                     locale="en-US", viewport={"width": 1280, "height": 900},
                 )

@@ -348,7 +348,7 @@ async def run_once(arg: dict) -> dict:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="x", headless=False, locale="en-US",
+            pw, platform="x", locale="en-US",
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
@@ -367,7 +367,7 @@ async def daemon_main() -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
-            pw, platform="x", headless=False, locale="en-US",
+            pw, platform="x", locale="en-US",
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:

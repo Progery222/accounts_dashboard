@@ -1,22 +1,7 @@
 """
-Shared helpers for all Playwright scraper subprocess workers.
-
-Key problem solved here:
-    All workers previously shared one persistent Chrome profile.  When a platform
-    detected the headless browser it could clear *all* cookies in that profile —
-    wiping sessions for every other platform at once.  Additionally, some workers
-    used channel="chrome" which opened the system Chrome (version > Playwright's
-    Chromium), causing recurring CHROME_DELETE corruption.
-
-Solution:
-    • Each platform imports its cookies to a per-platform JSON state file
-      (e.g. TikStatsChromeProfile/tiktok_state.json).
-    • Workers load that file into an *ephemeral* (non-persistent) context — the
-      platform can't write back to the profile, so it can't clear other sessions.
-    • Fallback: if no state file exists, use the persistent profile as before
-      (with auto-cleanup of CHROME_DELETE artefacts).
-    • channel="chrome" removed everywhere — only Playwright's bundled Chromium is
-      used, eliminating version-mismatch / CHROME_DELETE issues.
+Legacy-копия воркер-утилит для скриптов в backend/accounts/*_worker.py и
+tiktok_app/playwright_worker.py. Единый источник правды — platforms/worker_utils.py;
+эта копия должна оставаться API-совместимой (см. resolve_headless / launch_context).
 """
 import json
 import os
@@ -93,6 +78,36 @@ _COMMON_ARGS = [
     "--disable-default-apps",
 ]
 
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on", "y"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off", "n"})
+
+
+def _env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if s == "":
+        return None
+    if s in _TRUE_VALUES:
+        return True
+    if s in _FALSE_VALUES:
+        return False
+    return None
+
+
+def resolve_headless(*, platform: str | None = None, fallback: bool = False) -> bool:
+    """См. platforms/worker_utils.resolve_headless."""
+    if platform:
+        per_platform = _env_bool(f"{platform.upper()}_HEADLESS")
+        if per_platform is not None:
+            return per_platform
+    glob = _env_bool("BROWSER_HEADLESS")
+    if glob is not None:
+        return glob
+    return fallback
+
 # Injected before every page load to remove automation fingerprints.
 _STEALTH_SCRIPT = """
     (() => {
@@ -117,7 +132,7 @@ async def launch_context(
     *,
     platform: str,
     profile_dir: Path | None = None,
-    headless: bool = True,
+    headless: bool | None = None,
     locale: str = "en-US",
     viewport: dict | None = None,
 ):
@@ -141,6 +156,9 @@ async def launch_context(
     """
     if viewport is None:
         viewport = {"width": 1280, "height": 900}
+
+    if headless is None:
+        headless = resolve_headless(platform=platform)
 
     base = profile_dir or default_profile_dir()
     sf = state_file_path(platform, base)

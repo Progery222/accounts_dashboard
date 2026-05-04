@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -168,16 +169,20 @@ async def main() -> None:
 
     rumble_profile_dir = wu.default_profile_dir() / "rumble_chrome_profile"
 
+    # channel="chrome" требует установленный Google Chrome. На headless-сервере
+    # его обычно нет — по умолчанию используем встроенный Chromium Playwright.
+    # Можно явно задать RUMBLE_BROWSER_CHANNEL=chrome локально.
+    rumble_channel = (os.environ.get("RUMBLE_BROWSER_CHANNEL") or "").strip() or None
+
     async def daemon_loop() -> None:
         async with async_playwright() as pw:
             context, browser = await wu.launch_context(
                 pw,
                 platform="rumble",
                 profile_dir=rumble_profile_dir,
-                headless=False,
                 locale="en-US",
                 force_persistent=True,
-                browser_channel="chrome",
+                browser_channel=rumble_channel,
             )
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
@@ -207,10 +212,9 @@ async def main() -> None:
                 pw,
                 platform="rumble",
                 profile_dir=rumble_profile_dir,
-                headless=False,
                 locale="en-US",
                 force_persistent=True,
-                browser_channel="chrome",
+                browser_channel=rumble_channel,
             )
             page = await context.new_page()
             try:

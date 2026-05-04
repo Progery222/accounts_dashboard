@@ -631,11 +631,23 @@ async def _create_tiktok_context(pw, _wu):
     else:
         state_path = Path(STATE_FILE) if STATE_FILE else profile_base / "tiktok_state.json"
 
+    # headless читается из BROWSER_HEADLESS / TIKTOK_HEADLESS (см. resolve_headless).
+    if _wu is not None and hasattr(_wu, "resolve_headless"):
+        headless = _wu.resolve_headless(platform="tiktok")
+    else:
+        headless = (os.environ.get("BROWSER_HEADLESS", "false").strip().lower()
+                    in {"1", "true", "yes", "on", "y"})
+
+    # channel="chrome" требует системный Google Chrome — на сервере без него.
+    # По умолчанию используем встроенный Chromium Playwright; локально можно
+    # вернуть прежнее поведение через TIKTOK_BROWSER_CHANNEL=chrome.
     launch_kwargs = {
-        "headless": False,
-        "channel": "chrome",
+        "headless": headless,
         "args": ["--disable-blink-features=AutomationControlled"],
     }
+    channel = (os.environ.get("TIKTOK_BROWSER_CHANNEL") or "").strip()
+    if channel:
+        launch_kwargs["channel"] = channel
     browser = await pw.chromium.launch(**launch_kwargs)
     if state_path.exists():
         context = await browser.new_context(

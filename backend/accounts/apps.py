@@ -46,12 +46,50 @@ def apply_schedule_config(config, sched):
                 print(f"[scheduler] invalid time slot {t!r}: {e}")
 
 
+_TRUE = frozenset({"1", "true", "yes", "on", "y"})
+_FALSE = frozenset({"0", "false", "no", "off", "n"})
+
+
+def _scheduler_enabled_from_env() -> bool:
+    """
+    Включать ли scheduler в этом процессе.
+
+    На проде под gunicorn с N воркерами scheduler стартует в каждом воркере,
+    что приводит к дублям задач. Управляем явным env:
+
+      • RUN_SCHEDULER=true  — стартовать (например, в отдельном процессе
+        gunicorn --workers 1 или management-команде).
+      • RUN_SCHEDULER=false — не стартовать (для остальных gunicorn-воркеров).
+
+    Если переменная не задана — поведение как раньше: стартовать.
+    """
+    raw = os.environ.get("RUN_SCHEDULER")
+    if raw is None:
+        return True
+    s = raw.strip().lower()
+    if s in _TRUE:
+        return True
+    if s in _FALSE:
+        return False
+    return True
+
+
 class AccountsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "accounts"
 
     def ready(self):
         if "runserver" in sys.argv and os.environ.get("RUN_MAIN") != "true":
+            return
+        # При management-командах (migrate, makemigrations, test, ...) scheduler
+        # не нужен — может мешать миграциям и валить тесты.
+        if any(a in sys.argv for a in (
+            "migrate", "makemigrations", "collectstatic", "shell",
+            "test", "createsuperuser", "loaddata", "dumpdata",
+        )):
+            return
+        if not _scheduler_enabled_from_env():
+            print("[scheduler] disabled via RUN_SCHEDULER env")
             return
         self._start_scheduler()
 
