@@ -375,6 +375,40 @@ Frontend — Build Arguments / Variables на этапе build:
      с dev-машины: Railway CLI `railway run` / shell в контейнере / scp через
      одноразовый debug. Без этого refresh по браузерным платформам упадёт.
 
+--------------------------------------------------------------------------------
+Railway CLI — смотреть ошибки деплоя из терминала
+--------------------------------------------------------------------------------
+
+Установка (один раз на машине):
+  npm install -g @railway/cli
+
+Авторизация (обязательно, иначе любая команда вернёт Unauthorized):
+  • railway login
+    или  railway login --browserless   (ссылка + код в терминале)
+  • либо переменная окружения RAILWAY_TOKEN:
+      Railway → Account → Tokens → New Token
+      В PowerShell перед командами:
+        $env:RAILWAY_TOKEN="ваш_токен"
+      В Cursor можно добавить токен как секрет в Variables окружения агента,
+      чтобы ассистент мог вызывать `railway logs` без интерактивного login.
+
+Привязка к проекту (в корне клонированного репозитория dashboard):
+  railway link
+    выберите Workspace → Project → Environment → сервис backend (или укажите
+    флаги: railway link -p <projectId> -e production -s backend)
+
+Полезные команды:
+  railway status
+  railway logs -s backend -n 300 -d     # логи runtime (деплой / падения)
+  railway logs -s backend -n 300 -b     # логи сборки Docker-образа
+  railway logs -s frontend -n 200 -b
+  railway up                            # локальный прогон с подстановкой env
+  railway shell                         # shell внутри сервиса (если доступно)
+
+Важно: без RAILWAY_TOKEN или интерактивного `railway login` никто (включая
+CI и ассистента в песочнице) не может «подключиться» к вашему Railway —
+это нормальная изоляция доступа.
+
 Если в логах backend: «No time zone found with key Europe/Moscow» — в образе
   должен быть пакет tzdata (в backend/Dockerfile он ставится явно).
 
