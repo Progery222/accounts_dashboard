@@ -42,9 +42,12 @@ RUN mkdir -p "$BROWSER_PROFILE_DIR" /app/staticfiles
 # manifest не совпадает с рантаймом и WhiteNoise может валить процесс.
 RUN DEBUG=false python manage.py collectstatic --noinput
 
+# EXPOSE — только подсказка для метаданных образа. Реальный порт диктует
+# переменная PORT (Railway инжектит свой PORT). Локально по умолчанию 8000.
 EXPOSE 8000
 
-# На Railway PORT инжектируется при старте; поддерживаем оба варианта.
 # --workers 1 — обязательное условие, если scheduler крутится в этом же
 # процессе (RUN_SCHEDULER=true), иначе APScheduler задублирует задачи.
-CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 600"]
+# --access-logfile - — gunicorn пишет access-лог в stdout, чтобы Railway
+# показывал HTTP-лог healthcheck-ов в Deploy Logs.
+CMD ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi:application --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --timeout 600 --access-logfile -"]
