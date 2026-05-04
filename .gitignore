@@ -6,3 +6,7 @@ node_modules/
 dist/
 .DS_Store
 *.egg-info/
+staticfiles/
+response*.html
+resp*.html
+*.session

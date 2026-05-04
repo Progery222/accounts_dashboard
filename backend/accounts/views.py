@@ -76,7 +76,7 @@ def _scrape(account: Account) -> dict:
             }
             for v in raw.get("videos", [])
         ]
-        return {
+        result = {
             "display_name": raw["nickname"],
             "avatar_url": raw.get("avatar") or None,
             "bio": raw["bio"],
@@ -85,7 +85,16 @@ def _scrape(account: Account) -> dict:
             "like_count": raw["like_count"],
             "post_count": raw["video_count"],
             "_posts": posts,
+            # Пробрасываем флаг авторитетности списка постов из service.py.
+            # Для TikTok пустой `videos` почти всегда — антибот/временная блокировка
+            # API, а не реальное удаление всех постов профиля. В этом случае
+            # service.py выставляет _posts_authoritative=False, и _apply_refresh
+            # сохраняет уже сохранённые в БД посты вместо их удаления.
+            "_posts_authoritative": raw.get("_posts_authoritative", bool(posts)),
         }
+        if raw.get("_partial"):
+            result["_partial"] = True
+        return result
 
     if platform == Platform.TELEGRAM:
         from platforms.telegram.scraper import fetch_telegram_profile
@@ -172,12 +181,20 @@ def _sync_posts(account: Account, posts_data: list) -> None:
         )
 
     # Full sync: remove posts that disappeared from platform (deleted/hidden).
-    # Their historical snapshots stay in DB, but they stop appearing in lists and
-    # are excluded from current aggregate totals.
+    # Их исторические снэпшоты остаются в БД, но из текущих списков и агрегатов
+    # они уходят.
+    #
+    # ВНИМАНИЕ: удалять «всё» при пустом `posts_data` опасно — на скриншоте у
+    # пользователя один сбой парсинга TikTok стирал все ранее сохранённые
+    # посты профиля. Авторитетный пустой список (например, действительно
+    # пустой профиль) обрабатывается выше через `_posts_authoritative=False`
+    # → ветка `_sync_posts` вообще не вызывается, либо явно вызывается с
+    # `posts_data=[]` только когда у нас есть гарантия, что пост-list
+    # действительно пуст.
     if posts_data:
         account.posts.exclude(external_id__in=seen_external_ids).delete()
-    else:
-        # Empty authoritative list means the platform returned no posts.
+    elif account.post_count == 0:
+        # Профиль действительно пуст по счётчику — можно подчистить.
         account.posts.all().delete()
 
 

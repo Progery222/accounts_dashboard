@@ -639,13 +639,16 @@ async def _create_tiktok_context(pw, _wu):
                     in {"1", "true", "yes", "on", "y"})
 
     # channel="chrome" требует системный Google Chrome — на сервере без него.
-    # По умолчанию используем встроенный Chromium Playwright; локально можно
-    # вернуть прежнее поведение через TIKTOK_BROWSER_CHANNEL=chrome.
+    # На Windows/macOS (локалка) по умолчанию используем системный Chrome — это
+    # историческое поведение и оно лучше проходит детект TikTok. На Linux/сервере
+    # дефолт — встроенный Chromium Playwright. Переопределить через
+    # TIKTOK_BROWSER_CHANNEL=chrome|chromium|""(пусто = bundled).
+    _default_channel = "chrome" if sys.platform != "linux" else ""
+    channel = os.environ.get("TIKTOK_BROWSER_CHANNEL", _default_channel).strip()
     launch_kwargs = {
         "headless": headless,
         "args": ["--disable-blink-features=AutomationControlled"],
     }
-    channel = (os.environ.get("TIKTOK_BROWSER_CHANNEL") or "").strip()
     if channel:
         launch_kwargs["channel"] = channel
     browser = await pw.chromium.launch(**launch_kwargs)

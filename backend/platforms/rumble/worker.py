@@ -170,9 +170,13 @@ async def main() -> None:
     rumble_profile_dir = wu.default_profile_dir() / "rumble_chrome_profile"
 
     # channel="chrome" требует установленный Google Chrome. На headless-сервере
-    # его обычно нет — по умолчанию используем встроенный Chromium Playwright.
-    # Можно явно задать RUMBLE_BROWSER_CHANNEL=chrome локально.
-    rumble_channel = (os.environ.get("RUMBLE_BROWSER_CHANNEL") or "").strip() or None
+    # (Linux) его обычно нет — там по умолчанию встроенный Chromium Playwright.
+    # На Windows/macOS оставляем прежнее поведение — системный Chrome.
+    # Переопределить: RUMBLE_BROWSER_CHANNEL=chrome|chromium|"" (пусто = bundled).
+    _rumble_default_channel = "chrome" if sys.platform != "linux" else ""
+    rumble_channel = (
+        os.environ.get("RUMBLE_BROWSER_CHANNEL", _rumble_default_channel).strip() or None
+    )
 
     async def daemon_loop() -> None:
         async with async_playwright() as pw:

@@ -101,7 +101,12 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+# Манифест-хранилище WhiteNoise требует выполненного collectstatic и хеширует
+# имена файлов. На локалке (DEBUG=True) collectstatic не запускают, поэтому
+# подключаем его только в проде, иначе админка падает с "Missing staticfiles
+# manifest entry".
+if not DEBUG:
+    STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # CORS / CSRF
@@ -112,11 +117,15 @@ CORS_ALLOWED_ORIGINS = [
 ] + _extra_origins
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 
+# CSRF_EXTRA_ORIGINS — публичные origin'ы для VPS-деплоя:
+#   CSRF_EXTRA_ORIGINS=http://146.103.120.54:8080,https://dashboard.example.com
+_csrf_extra = [o.strip() for o in os.getenv("CSRF_EXTRA_ORIGINS", "").split(",") if o.strip()]
+
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:8000",
-]
+] + _csrf_extra
 if _railway_domain:
     railway_https = f"https://{_railway_domain}"
     if railway_https not in CSRF_TRUSTED_ORIGINS:

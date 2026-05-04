@@ -18,8 +18,15 @@ FROM nginx:1.27-alpine
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 
-# Railway инжектит $PORT — берётся из шаблона nginx (envsubst).
-ENV PORT=8080
+# PORT          — на каком порту nginx слушает внутри контейнера.
+#                 Railway инжектит свой PORT; для VPS обычно ставим 80, а
+#                 наружу маппим хост-порт (например 8080:80).
+# BACKEND_UPSTREAM — host:port Django backend в той же docker-сети
+#                 (для VPS: "backend:8000"). На Railway фронт обращается к
+#                 backend напрямую через VITE_API_URL, location /api/ не
+#                 используется, но переменная всё равно должна быть задана.
+ENV PORT=8080 \
+    BACKEND_UPSTREAM=backend:8000
 EXPOSE 8080
 
-CMD ["sh", "-c", "envsubst '$$PORT' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]
+CMD ["sh", "-c", "envsubst '$$PORT $$BACKEND_UPSTREAM' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"]

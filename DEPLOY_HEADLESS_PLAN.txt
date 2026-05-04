@@ -211,6 +211,88 @@ Docker (переписанный под Django):
 
 
 --------------------------------------------------------------------------------
+Фаза 5V — Деплой на VPS (вариант A: свой порт, не трогаем 80)
+--------------------------------------------------------------------------------
+
+Контекст:
+  - VPS: 146.103.120.54.
+  - На 80 порту уже работает чужое приложение, не трогаем.
+  - Свой стек поднимаем рядом, на 8080 (или любом другом свободном порту).
+
+Артефакты в репо:
+  - docker-compose.prod.yml     (production-overlay для VPS).
+  - frontend/Dockerfile         (multi-stage: Vite build → nginx).
+  - frontend/nginx.conf         (SPA + proxy /api,/admin,/static на backend).
+  - backend/Dockerfile          (Playwright base + gunicorn).
+
+Архитектура (всё в одной docker-сети `default`):
+  - postgres   — внутри сети, наружу не торчит.
+  - backend    — Django + gunicorn (--workers 1) + APScheduler
+                 (RUN_SCHEDULER=true в этом же процессе) + Playwright Chromium
+                 headless. `expose: 8000` — виден только из docker-сети.
+  - frontend   — nginx со статикой Vite + reverse-proxy /api → backend:8000.
+                 Маппится наружу: 8080 на хосте → 80 в контейнере.
+
+Минимальные шаги на VPS:
+  1. Установить Docker Engine + compose plugin (Ubuntu/Debian):
+       curl -fsSL https://get.docker.com | sh
+       sudo usermod -aG docker $USER && newgrp docker
+  2. Открыть порт в firewall:
+       sudo ufw allow 8080/tcp        # если используется ufw
+  3. Склонировать репо в /srv/dashboard или ~/dashboard:
+       git clone <repo-url> ~/dashboard && cd ~/dashboard
+  4. Заполнить .env на основе .env.example:
+       cp .env.example .env && nano .env
+     Минимум для VPS:
+       SECRET_KEY=<уникальный>
+       DEBUG=false
+       ALLOWED_HOSTS=146.103.120.54,localhost
+       CSRF_EXTRA_ORIGINS=http://146.103.120.54:8080
+       CORS_EXTRA_ORIGINS=http://146.103.120.54:8080
+       DB_*=<свои>
+       BROWSER_HEADLESS=true
+       RUN_SCHEDULER=true
+       BROWSER_PROFILE_DIR=/app/.browser-profile
+       FACEBOOK_EMAIL/PASSWORD, TELEGRAM_API_ID/HASH/PHONE, YOUTUBE_API_KEY,
+       INSTAGRAM_USERNAME/PASSWORD — по необходимости.
+  5. Загрузить state-файлы (cookies) с локалки в volume browser_profile:
+       docker compose -f docker-compose.prod.yml up -d postgres
+       docker compose -f docker-compose.prod.yml run --rm backend bash
+       # внутри: положить tiktok_state.json/instagram_state.json/... в
+       # /app/.browser-profile/ через scp или ручной copy.
+  6. Поднять весь стек:
+       docker compose -f docker-compose.prod.yml up -d --build
+  7. Проверка:
+       curl http://localhost:8080/healthz       # nginx → 200 ok
+       curl http://localhost:8080/healthz/      # backend → 200 {"status":"ok"}
+       curl http://localhost:8080/api/accounts/ # backend через nginx-proxy
+     Извне:  http://146.103.120.54:8080/
+
+Обновление:
+       git pull && docker compose -f docker-compose.prod.yml up -d --build
+
+Если 8080 окажется тоже занят:
+  - В docker-compose.prod.yml поменять "8080:80" на свободный, например
+    "9090:80", и `ufw allow 9090/tcp`. На внутренний порт nginx (80) и
+    BACKEND_UPSTREAM это не влияет.
+
+Если решите подключить домен/HTTPS позже:
+  - Добавить A-запись `dashboard.example.com → 146.103.120.54`.
+  - На хосте поставить системный nginx, проксировать
+    `dashboard.example.com:80/443` → `127.0.0.1:8080`, для HTTPS — certbot.
+    Внутри compose ничего менять не надо, только обновить ALLOWED_HOSTS,
+    CSRF_EXTRA_ORIGINS, CORS_EXTRA_ORIGINS.
+
+Что НЕ делать:
+  - Не выставлять `ports: 8000:8000` для backend — gunicorn должен быть
+    доступен только из docker-сети, чтобы публичные запросы шли через
+    nginx (который проверяет CORS и cap'ает body size).
+  - Не запускать второй контейнер scheduler рядом с backend: оба пишут в
+    один volume browser_profile, persistent profile Chrome не переживёт
+    одновременную работу двух процессов.
+
+
+--------------------------------------------------------------------------------
 Фаза 5R — Деплой на Railway (PaaS)
 --------------------------------------------------------------------------------
 
@@ -260,6 +342,46 @@ Frontend build args:
     (без браузера), либо Telegram отключите.
   - Rumble + Cloudflare: при стабильных провалах на headless — кандидат на
     выпил из расписания или замену на Scrapling/CDP.
+
+
+--------------------------------------------------------------------------------
+Фаза 8 — Локальная разработка (Windows/macOS) после правок Railway
+--------------------------------------------------------------------------------
+
+Главная цель: всё, что добавлено для Railway, не должно ломать классический
+локальный сценарий — `python manage.py runserver` + `npm run dev`.
+
+Что было сделано, чтобы локалка осталась рабочей:
+
+  - settings.py: STATICFILES_STORAGE = "whitenoise...CompressedManifestStaticFilesStorage"
+    подключается ТОЛЬКО при DEBUG=False. В DEBUG=True Django сам отдаёт статику
+    через staticfiles finders, collectstatic не требуется.
+  - settings.py: DATABASES читает DATABASE_URL только если он непустой,
+    иначе остаются прежние DB_* envs из backend/.env (Postgres локально).
+  - apps.py / RUN_SCHEDULER: если переменная не задана, scheduler стартует
+    как и раньше (поведение по умолчанию совместимо).
+  - BROWSER_HEADLESS остаётся управляемым через .env. Локальное .env
+    (BROWSER_HEADLESS=true) продолжает работать как раньше.
+  - tiktok/worker.py и rumble/worker.py: `channel="chrome"` теперь дефолт ТОЛЬКО
+    на Windows/macOS (sys.platform != "linux") — то есть локалка по-прежнему
+    использует системный Google Chrome, а сервер на Linux — встроенный
+    Chromium. Переопределяется через TIKTOK_BROWSER_CHANNEL / RUMBLE_BROWSER_CHANNEL.
+  - frontend: `npm run dev` остаётся источником правды для разработки;
+    vite.config.ts проксирует /api → http://localhost:8000.
+    frontend/Dockerfile (nginx) используется только в проде/Railway.
+
+Smoke-проверка после любых правок «деплойного» слоя:
+
+  1. backend:
+       cd backend
+       .\.venv\Scripts\python.exe manage.py check
+       .\.venv\Scripts\python.exe manage.py runserver
+     Затем `curl.exe http://127.0.0.1:8000/healthz/` → 200,
+     `/admin/login/` → 200, `/api/accounts/` → 200.
+  2. frontend:
+       cd frontend
+       npm run build      # должен собраться без ошибок TS
+       npm run dev        # http://localhost:5173 открывается, /api проксируется
 
 
 --------------------------------------------------------------------------------

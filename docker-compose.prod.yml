@@ -1,0 +1,86 @@
+# Продовый docker-compose для VPS-деплоя (вариант A: свой порт, не трогаем 80).
+#
+# Архитектура:
+#   - postgres   — внутри сети compose, наружу не торчит.
+#   - backend    — Django + APScheduler (RUN_SCHEDULER=true) + Playwright
+#                  Chromium headless. Доступен только из docker-сети по
+#                  имени `backend:8000` (наружу не выпускаем).
+#   - frontend   — nginx со статикой Vite + reverse-proxy для /api, /admin,
+#                  /static, /healthz/ → backend. Слушает 80 внутри
+#                  контейнера, на хосте маппится на порт 8080.
+#
+# Запуск на VPS:
+#     cp .env.example .env  # заполнить SECRET_KEY, DB_*, FACEBOOK_*, и т.п.
+#     docker compose -f docker-compose.prod.yml up -d --build
+#
+# Открыть на сервере: ufw allow 8080/tcp
+# URL: http://146.103.120.54:8080/
+#
+# Если 8080 тоже занят — поменять "8080:80" ниже на любой свободный порт,
+# например "9090:80", и `ufw allow 9090/tcp`. На URL влияет только хост-порт.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dashboard-postgres
+    environment:
+      POSTGRES_USER:     ${DB_USER:-dashboard}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dashboard}
+      POSTGRES_DB:       ${DB_NAME:-dashboard}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dashboard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: dashboard-backend
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DEBUG: "false"
+      # IP сервера + опционально домен. Можно переопределить в .env.
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:-146.103.120.54,localhost,127.0.0.1}"
+      # Чтобы Django принимал POST с публичного origin без CSRF-ошибок.
+      CSRF_EXTRA_ORIGINS: "${CSRF_EXTRA_ORIGINS:-http://146.103.120.54:8080}"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      BROWSER_HEADLESS: "true"
+      RUN_SCHEDULER: "true"
+      BROWSER_PROFILE_DIR: /app/.browser-profile
+      PORT: "8000"
+    expose:
+      - "8000"
+    volumes:
+      - browser_profile:/app/.browser-profile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Пустая строка → axios baseURL пустой → запросы относительные →
+        # попадают на тот же origin (8080) → проксируются nginx-ом на
+        # backend:8000. Не нужно знать публичный URL во время билда.
+        VITE_API_URL: ""
+    container_name: dashboard-frontend
+    environment:
+      PORT: "80"
+      BACKEND_UPSTREAM: "backend:8000"
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  browser_profile:
