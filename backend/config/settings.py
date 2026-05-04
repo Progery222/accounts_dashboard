@@ -16,6 +16,15 @@ _railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
 if _railway_domain and _railway_domain not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(_railway_domain)
 
+# Railway healthcheck и публичный URL всегда идут на хост вида
+# <service>-<id>.up.railway.app. Если RAILWAY_PUBLIC_DOMAIN по какой-то
+# причине не попал в env до первого запроса, без суффикса Django даёт
+# DisallowedHost (400) — в логах Railway это часто выглядит как «service
+# unavailable» на /healthz/.
+_on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"))
+if _on_railway and ".up.railway.app" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(".up.railway.app")
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",

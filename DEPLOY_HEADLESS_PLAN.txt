@@ -375,6 +375,15 @@ Frontend — Build Arguments / Variables на этапе build:
      с dev-машины: Railway CLI `railway run` / shell в контейнере / scp через
      одноразовый debug. Без этого refresh по браузерным платформам упадёт.
 
+Если healthcheck на /healthz/ падает с «service unavailable»:
+  - Чаще всего DisallowedHost: в Variables задайте DEBUG=false и проверьте,
+    что в ALLOWED_HOSTS попадает домен Railway (в коде при RAILWAY_* уже
+    добавляется суффикс «.up.railway.app»).
+  - Первый migrate + старт gunicorn может занять >30s — в backend/railway.json
+    healthcheckTimeout увеличен до 120s.
+  - Логи деплоя: Deployments → последний деплой → View logs (ищите Traceback,
+    «DisallowedHost», ошибки Postgres / SSL).
+
 Ограничения, о которых нельзя забывать:
   - Эфемерный диск: всё, что вне Volume, теряется при редеплое.
   - Один Volume на сервис → именно поэтому scheduler крутится в backend, а не

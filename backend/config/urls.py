@@ -22,6 +22,8 @@ from accounts.views import account_avatar
 from .health import healthz
 
 urlpatterns = [
+    # Оба варианта: без завершающего слэша Railway иногда не делает редирект.
+    path("healthz", healthz),
     path("healthz/", healthz),
     path("admin/", admin.site.urls),
     path("api/accounts/", include("accounts.urls")),

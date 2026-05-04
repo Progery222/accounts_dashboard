@@ -29,8 +29,10 @@ COPY . .
 ENV BROWSER_PROFILE_DIR=/app/.browser-profile
 RUN mkdir -p "$BROWSER_PROFILE_DIR" /app/staticfiles
 
-# Собираем статику Django admin для WhiteNoise.
-RUN python manage.py collectstatic --noinput || true
+# Собираем статику под тем же DEBUG=false, что и на Railway: иначе при
+# DEBUG=True в слое сборки не подключается CompressedManifestStaticFilesStorage,
+# manifest не совпадает с рантаймом и WhiteNoise может валить процесс.
+RUN DEBUG=false python manage.py collectstatic --noinput
 
 EXPOSE 8000
 
