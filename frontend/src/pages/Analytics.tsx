@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   getTopPosts, getInsights,
@@ -8,6 +7,7 @@ import {
 } from "../api/analytics";
 import { getPlatforms, type Platform } from "../api/accounts";
 import PlatformIcon from "../components/PlatformIcon";
+import { IconViews, IconLikes } from "../components/postStatIcons";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -27,7 +27,7 @@ function fmtDelta(n: number): string {
 
 
 const PERIOD_LABELS: Record<Period, string> = {
-  "1d": "Сутки", "7d": "7 дней", "30d": "30 дней", "all": "Всё время",
+  "1d": "Сутки", "7d": "7 дней", "30d": "30 дней",
 };
 
 const SORT_OPTIONS: { value: SortBy; label: string }[] = [
@@ -120,7 +120,7 @@ function PostRow({ post, sortBy }: { post: AnalyticsPost; sortBy: SortBy }) {
       </div>
 
       {/* Stats */}
-      <div className="shrink-0 flex flex-col items-end gap-0.5 min-w-[90px]">
+      <div className="shrink-0 flex flex-col items-end gap-0.5 min-w-[72px] sm:min-w-[90px]">
         {mainValue !== null && (
           <span className={`text-sm font-semibold ${mainValue > 0 ? "text-emerald-400" : mainValue < 0 ? "text-red-400" : "text-white"}`}>
             {sortBy === "er"
@@ -130,9 +130,15 @@ function PostRow({ post, sortBy }: { post: AnalyticsPost; sortBy: SortBy }) {
                 : fmt(mainValue)}
           </span>
         )}
-        <div className="flex gap-2 text-xs text-zinc-600">
-          <span>👁 {fmt(post.view_count)}</span>
-          <span>❤️ {fmt(post.like_count)}</span>
+        <div className="flex items-center gap-2.5 text-xs text-zinc-500">
+          <span className="inline-flex items-center gap-1" title="Просмотры">
+            <IconViews className="w-3.5 h-3.5 shrink-0 text-sky-400/90" />
+            <span className="tabular-nums text-zinc-400">{fmt(post.view_count)}</span>
+          </span>
+          <span className="inline-flex items-center gap-1" title="Лайки">
+            <IconLikes className="w-3.5 h-3.5 shrink-0 text-rose-400/90" />
+            <span className="tabular-nums text-zinc-400">{fmt(post.like_count)}</span>
+          </span>
         </div>
         <span className="text-xs text-zinc-700">ER {post.engagement_rate.toFixed(1)}%</span>
       </div>
@@ -302,7 +308,7 @@ function HourGrid({ data }: { data: HourStat[] }) {
       <div className="flex justify-between text-xs text-zinc-600 mt-1 px-0.5">
         <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:00</span>
       </div>
-      <p className="text-xs text-zinc-600 mt-1">Яркость = avg просмотры. Наведи для деталей.</p>
+      <p className="text-xs text-zinc-600 mt-1">Яркость = avg просмотры. Нажми или наведи для деталей.</p>
     </div>
   );
 }
@@ -380,8 +386,10 @@ export default function Analytics({ accountId }: { accountId?: number }) {
   const [period, setPeriod]       = useState<Period>("1d");
   const [sortBy, setSortBy]       = useState<SortBy>("view_delta");
   const [platform, setPlatform]   = useState<string>("");
+  const [minViews, setMinViews]   = useState<number>(10);
   const [page, setPage]           = useState(1);
   const [selectedHashtag, setSelectedHashtag] = useState<string>("");
+  const isEmbedded = accountId !== undefined;
 
   // Reset page when filters change
   const handlePeriod   = (p: Period)   => { setPeriod(p);   setPage(1); };
@@ -393,11 +401,16 @@ export default function Analytics({ accountId }: { accountId?: number }) {
     period,
     platform: platform || undefined,
     account_id: accountId,
-    min_views: 10,
+    min_views: isEmbedded ? 0 : minViews,
   };
 
-  const { data: topData, isFetching: topLoading } = useQuery({
-    queryKey: ["analytics-top", period, sortBy, platform, accountId, page, selectedHashtag],
+  const {
+    data: topData,
+    isFetching: topLoading,
+    isError: topError,
+    refetch: refetchTop,
+  } = useQuery({
+    queryKey: ["analytics-top", period, sortBy, platform, accountId, minViews, page, selectedHashtag],
     queryFn: () => getTopPosts({
       ...params,
       sort_by: sortBy,
@@ -408,8 +421,13 @@ export default function Analytics({ accountId }: { accountId?: number }) {
     staleTime: 60_000,
   });
 
-  const { data: ins, isFetching: insLoading } = useQuery({
-    queryKey: ["analytics-insights", period, platform, accountId],
+  const {
+    data: ins,
+    isFetching: insLoading,
+    isError: insError,
+    refetch: refetchInsights,
+  } = useQuery({
+    queryKey: ["analytics-insights", period, platform, accountId, minViews],
     queryFn: () => getInsights(params),
     staleTime: 60_000,
   });
@@ -420,20 +438,11 @@ export default function Analytics({ accountId }: { accountId?: number }) {
     staleTime: Infinity,
   });
 
-  const isEmbedded = accountId !== undefined;
-
   return (
     <div className={isEmbedded ? "" : "min-h-screen bg-black text-white"}>
       {!isEmbedded && (
         <header className="sticky top-0 z-10 bg-black/80 backdrop-blur border-b border-zinc-800 px-4 py-3">
-          <div className="max-w-5xl mx-auto flex items-center gap-4">
-            <Link to="/" className="text-zinc-400 hover:text-white transition-colors flex items-center gap-2 text-sm">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
-              </svg>
-              Главная
-            </Link>
-            <span className="text-zinc-600">/</span>
+          <div className="max-w-5xl mx-auto flex items-center">
             <span className="text-zinc-300 font-medium">Аналитика</span>
           </div>
         </header>
@@ -445,7 +454,7 @@ export default function Analytics({ accountId }: { accountId?: number }) {
         <div className="flex flex-wrap gap-3 mb-6 items-center">
           {/* Period */}
           <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-xl p-1">
-            {(["1d", "7d", "30d", "all"] as Period[]).map(p => (
+            {(["1d", "7d", "30d"] as Period[]).map(p => (
               <Pill key={p} active={period === p} onClick={() => handlePeriod(p)}>
                 {PERIOD_LABELS[p]}
               </Pill>
@@ -454,14 +463,45 @@ export default function Analytics({ accountId }: { accountId?: number }) {
 
           {/* Platform filter (only in global mode) */}
           {!isEmbedded && platformList.length > 0 && (
-            <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-xl p-1">
+            <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-xl p-1 overflow-x-auto max-w-full [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               <Pill active={platform === ""} onClick={() => handlePlatform("")}>Все</Pill>
-              {platformList.map(pl => (
-                <Pill key={pl.value} active={platform === pl.value} onClick={() => handlePlatform(pl.value)}>
-                  <PlatformIcon platform={pl.value} className="w-3.5 h-3.5 inline-block mr-1 -mt-0.5" />
-                  {pl.label}
-                </Pill>
+              {platformList.map((pl) => (
+                <button
+                  key={pl.value}
+                  type="button"
+                  onClick={() => handlePlatform(pl.value)}
+                  title={pl.label}
+                  aria-label={pl.label}
+                  className={`inline-flex items-center justify-center min-w-[40px] h-8 md:min-w-0 md:h-auto md:px-3 md:py-1 rounded-lg text-sm font-medium transition-colors shrink-0 ${
+                    platform === pl.value
+                      ? "bg-white text-black"
+                      : "bg-zinc-800 text-zinc-400 hover:text-white hover:bg-zinc-700"
+                  }`}
+                >
+                  <PlatformIcon platform={pl.value} className="w-4 h-4 md:w-3.5 md:h-3.5" />
+                  <span className="hidden md:inline md:ml-1.5">{pl.label}</span>
+                </button>
               ))}
+            </div>
+          )}
+
+          {/* Min views threshold (only in global mode) */}
+          {!isEmbedded && (
+            <div className="flex items-center justify-between gap-2 bg-zinc-900 border border-zinc-800 rounded-xl px-2 py-1.5 w-full sm:w-auto">
+              <span className="text-xs text-zinc-500">Мин. просмотров</span>
+              <select
+                value={minViews}
+                onChange={(e) => {
+                  const parsed = Number(e.target.value);
+                  setMinViews(Number.isFinite(parsed) ? parsed : 10);
+                  setPage(1);
+                }}
+                className="bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-zinc-500"
+              >
+                <option value={0}>0</option>
+                <option value={10}>10</option>
+                <option value={50}>50</option>
+              </select>
             </div>
           )}
         </div>
@@ -484,7 +524,7 @@ export default function Analytics({ accountId }: { accountId?: number }) {
             <select
               value={sortBy}
               onChange={e => handleSort(e.target.value as SortBy)}
-              className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:border-zinc-500"
+              className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-1.5 text-sm text-zinc-300 focus:outline-none focus:border-zinc-500 w-full sm:w-auto"
             >
               {SORT_OPTIONS.map(o => (
                 <option key={o.value} value={o.value}>{o.label}</option>
@@ -495,6 +535,19 @@ export default function Analytics({ accountId }: { accountId?: number }) {
           {topLoading && !topData && (
             <div className="flex justify-center py-10">
               <div className="w-6 h-6 border-2 border-zinc-600 border-t-transparent rounded-full animate-spin" />
+            </div>
+          )}
+
+          {topError && !topData && (
+            <div className="px-4 py-8 text-center">
+              <p className="text-red-300 text-sm mb-3">Не удалось загрузить топ постов</p>
+              <button
+                type="button"
+                onClick={() => void refetchTop()}
+                className="px-3 py-1.5 rounded-lg text-xs bg-zinc-800 border border-zinc-700 text-zinc-200 hover:bg-zinc-700"
+              >
+                Повторить запрос
+              </button>
             </div>
           )}
 
@@ -522,10 +575,20 @@ export default function Analytics({ accountId }: { accountId?: number }) {
         {!isEmbedded && (
           <section className="bg-zinc-900 border border-zinc-800 rounded-2xl px-5 py-4 mb-5">
             <SectionTitle>Сравнение платформ</SectionTitle>
-            {insLoading && !ins
-              ? <div className="text-zinc-600 text-sm">Загрузка...</div>
-              : <PlatformTable data={ins?.platform_comparison ?? []} />
-            }
+            {insLoading && !ins && <div className="text-zinc-600 text-sm">Загрузка...</div>}
+            {insError && !ins && (
+              <div className="text-sm">
+                <p className="text-red-300 mb-2">Не удалось загрузить сравнение платформ</p>
+                <button
+                  type="button"
+                  onClick={() => void refetchInsights()}
+                  className="px-3 py-1.5 rounded-lg text-xs bg-zinc-800 border border-zinc-700 text-zinc-200 hover:bg-zinc-700"
+                >
+                  Повторить запрос
+                </button>
+              </div>
+            )}
+            {!insError && <PlatformTable data={ins?.platform_comparison ?? []} />}
           </section>
         )}
 
@@ -539,14 +602,25 @@ export default function Analytics({ accountId }: { accountId?: number }) {
               </span>
             )}
           </SectionTitle>
-          {insLoading && !ins
-            ? <div className="text-zinc-600 text-sm">Загрузка...</div>
-            : <HashtagCloud
-                data={ins?.top_hashtags ?? []}
-                selected={selectedHashtag}
-                onSelect={handleHashtag}
-              />
-          }
+          {insLoading && !ins && <div className="text-zinc-600 text-sm">Загрузка...</div>}
+          {insError && !ins ? (
+            <div className="text-sm">
+              <p className="text-red-300 mb-2">Не удалось загрузить статистику хэштегов</p>
+              <button
+                type="button"
+                onClick={() => void refetchInsights()}
+                className="px-3 py-1.5 rounded-lg text-xs bg-zinc-800 border border-zinc-700 text-zinc-200 hover:bg-zinc-700"
+              >
+                Повторить запрос
+              </button>
+            </div>
+          ) : (
+            <HashtagCloud
+              data={ins?.top_hashtags ?? []}
+              selected={selectedHashtag}
+              onSelect={handleHashtag}
+            />
+          )}
         </section>
 
         {/* ── Best time ── */}
@@ -554,6 +628,17 @@ export default function Analytics({ accountId }: { accountId?: number }) {
           <SectionTitle>Лучшее время для постинга</SectionTitle>
           {insLoading && !ins ? (
             <div className="text-zinc-600 text-sm">Загрузка...</div>
+          ) : insError && !ins ? (
+            <div className="text-sm">
+              <p className="text-red-300 mb-2">Не удалось загрузить рекомендации по времени</p>
+              <button
+                type="button"
+                onClick={() => void refetchInsights()}
+                className="px-3 py-1.5 rounded-lg text-xs bg-zinc-800 border border-zinc-700 text-zinc-200 hover:bg-zinc-700"
+              >
+                Повторить запрос
+              </button>
+            </div>
           ) : ins ? (
             <div className="grid md:grid-cols-2 gap-8">
               <div>

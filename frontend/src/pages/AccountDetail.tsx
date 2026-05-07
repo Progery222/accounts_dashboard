@@ -5,6 +5,7 @@ import { getAccount, getAccountPosts, refreshAccount, deleteAccount, updateAccou
 import { getProfiles, type Profile } from "../api/profiles";
 import Analytics from "./Analytics";
 import PlatformIcon from "../components/PlatformIcon";
+import { IconViews, IconLikes, IconComments, IconRepost } from "../components/postStatIcons";
 import { externalProfileUrl } from "../utils/platformUrls";
 
 // Which stats are meaningful for each platform
@@ -86,11 +87,20 @@ export default function AccountDetail() {
   const qc = useQueryClient();
   const navigate = useNavigate();
 
+  const [avatarFailed, setAvatarFailed] = useState(false);
+
   const { data: account, isLoading: accLoading, isError: accError } = useQuery({
     queryKey: ["account", accountId],
     queryFn: () => getAccount(accountId),
     enabled: isValidAccountId,
   });
+
+  useEffect(() => {
+    setAvatarFailed(false);
+  }, [accountId, account?.avatar_url]);
+
+  const tryAvatarViaProxy =
+    !!account?.avatar_url || account?.platform === "tiktok";
 
   const { data: posts = [], isLoading: postsLoading, refetch: refetchPosts } = useQuery({
     queryKey: ["account-posts", accountId],
@@ -100,7 +110,7 @@ export default function AccountDetail() {
 
   const { data: profiles = [] } = useQuery({
     queryKey: ["profiles"],
-    queryFn: getProfiles,
+    queryFn: () => getProfiles(),
     staleTime: 30_000,
   });
 
@@ -203,12 +213,12 @@ export default function AccountDetail() {
             {/* Account header */}
             <div className="flex flex-col sm:flex-row gap-6 items-start sm:items-center mb-8">
               <div className="shrink-0">
-                {account.avatar_url ? (
+                {tryAvatarViaProxy && !avatarFailed ? (
                   <img
-                    src={`/api/accounts/${account.id}/avatar/`}
+                    src={`/api/accounts/${account.id}/avatar/?v=${encodeURIComponent(account.avatar_url)}`}
                     alt={account.username}
                     className="w-20 h-20 rounded-full object-cover border-2 border-zinc-700"
-                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                    onError={() => setAvatarFailed(true)}
                   />
                 ) : (
                   <div className="w-20 h-20 rounded-full bg-zinc-800 flex items-center justify-center">
@@ -238,14 +248,14 @@ export default function AccountDetail() {
                       />
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex w-full sm:w-auto flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <button
                       onClick={() => {
                         if (refreshMutation.isPending) return;
                         refreshMutation.mutate();
                       }}
                       disabled={refreshMutation.isPending}
-                      className="flex items-center gap-1.5 text-sm text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 px-3 py-1.5 rounded-xl transition-colors disabled:opacity-40"
+                      className="flex items-center justify-center gap-1.5 text-sm text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 px-3 py-1.5 rounded-xl transition-colors disabled:opacity-40"
                     >
                       <RefreshIcon spinning={refreshMutation.isPending} />
                       {refreshMutation.isPending ? "Обновляю…" : "Обновить"}
@@ -255,7 +265,7 @@ export default function AccountDetail() {
                         if (confirm(`Удалить ${displayHandle(account.platform, account.username)}?`)) deleteMutation.mutate();
                       }}
                       disabled={deleteMutation.isPending}
-                      className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-red-400 border border-zinc-800 hover:border-red-900 px-3 py-1.5 rounded-xl transition-colors disabled:opacity-40"
+                      className="flex items-center justify-center gap-1.5 text-sm text-zinc-500 hover:text-red-400 border border-zinc-800 hover:border-red-900 px-3 py-1.5 rounded-xl transition-colors disabled:opacity-40"
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -306,7 +316,7 @@ export default function AccountDetail() {
             )}
 
             {/* Tabs */}
-            <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-xl p-1 w-fit mb-6">
+            <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-xl p-1 w-full sm:w-fit mb-6">
               {(["posts", "analytics"] as const).map(t => (
                 <button
                   key={t}
@@ -521,10 +531,7 @@ function PostCard({ post, platform }: { post: Post; platform: string }) {
         {/* View count overlay */}
         {post.view_count > 0 && (
           <div className="absolute bottom-1 left-1 right-1 flex items-center gap-1 text-xs text-white bg-black/60 rounded px-1.5 py-0.5">
-            <svg className="w-3 h-3 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-              <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
-              <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clipRule="evenodd" />
-            </svg>
+            <IconViews className="w-3.5 h-3.5 shrink-0 opacity-95" />
             <span className="font-medium">{fmt(post.view_count)}</span>
             <Delta value={post.view_delta} />
           </div>
@@ -538,30 +545,30 @@ function PostCard({ post, platform }: { post: Post; platform: string }) {
         )}
         <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-xs text-zinc-500 mt-auto">
           {post.view_count > 0 && hasThumbnail === false && (
-            <span className="flex items-center gap-0.5">
-              <span>👁</span>
-              <span className="text-zinc-300">{fmt(post.view_count)}</span>
+            <span className="inline-flex items-center gap-1">
+              <IconViews className="w-3.5 h-3.5 shrink-0 text-sky-400/90" />
+              <span className="text-zinc-300 tabular-nums">{fmt(post.view_count)}</span>
               <Delta value={post.view_delta} />
             </span>
           )}
           {post.like_count > 0 && (
-            <span className="flex items-center gap-0.5">
-              <span>❤️</span>
-              <span className="text-zinc-300">{fmt(post.like_count)}</span>
+            <span className="inline-flex items-center gap-1">
+              <IconLikes className="w-3.5 h-3.5 shrink-0 text-rose-400/90" />
+              <span className="text-zinc-300 tabular-nums">{fmt(post.like_count)}</span>
               <Delta value={post.like_delta} />
             </span>
           )}
           {post.comment_count > 0 && (
-            <span className="flex items-center gap-0.5">
-              <span>💬</span>
-              <span className="text-zinc-300">{fmt(post.comment_count)}</span>
+            <span className="inline-flex items-center gap-1">
+              <IconComments className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
+              <span className="text-zinc-300 tabular-nums">{fmt(post.comment_count)}</span>
               <Delta value={post.comment_delta} />
             </span>
           )}
           {post.share_count > 0 && (
-            <span className="flex items-center gap-0.5">
-              <span>↗</span>
-              <span className="text-zinc-300">{fmt(post.share_count)}</span>
+            <span className="inline-flex items-center gap-1">
+              <IconRepost className="w-3.5 h-3.5 shrink-0 text-zinc-400" />
+              <span className="text-zinc-300 tabular-nums">{fmt(post.share_count)}</span>
             </span>
           )}
           {post.posted_at && (

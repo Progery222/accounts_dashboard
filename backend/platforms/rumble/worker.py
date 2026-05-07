@@ -68,6 +68,13 @@ def _normalize_username(raw: str) -> str:
     return parts[0].strip()
 
 
+def _merge_quality_flags(base: dict, extra: dict) -> dict:
+    out = dict(base or {})
+    for k, v in (extra or {}).items():
+        out[k] = v
+    return out
+
+
 async def main() -> None:
     wu_path = Path(__file__).parent.parent / "worker_utils.py"
     if not wu_path.exists():
@@ -156,7 +163,7 @@ async def main() -> None:
         display_name = info.get("displayName") or username
         if "just a moment" in title_text or "challenge" in page_href:
             raise ValueError("Rumble временно недоступен (антибот-челлендж), попробуйте обновить еще раз")
-        return {
+        about_data = {
             "display_name": display_name,
             "avatar_url": info.get("avatar") or "",
             "bio": info.get("bio") or "",
@@ -164,7 +171,102 @@ async def main() -> None:
             "like_count": 0,
             "view_count": view_count,
             "post_count": post_count,
-            "_posts": [],
+        }
+
+        posts: list[dict] = []
+        quality_flags = {
+            "about_parsed": True,
+            "feed_parsed": False,
+            "partial_posts": True,
+            "anti_bot_detected": False,
+        }
+        try:
+            await page.goto(f"https://rumble.com/c/{username}", wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            await page.wait_for_timeout(2000)
+            await wu.wait_for_anti_bot_clear(page, platform="rumble", timeout_ms=20_000)
+            posts_raw = await page.evaluate(
+                """() => {
+                    function parseNum(text) {
+                        const raw = (text || '').replace(/\\s+/g, ' ').trim();
+                        if (!raw) return 0;
+                        const m = raw.match(/([0-9][0-9,\\.\\s]*)([KMBkmb]?)/);
+                        if (!m) return 0;
+                        let num = (m[1] || '').replace(/\\s/g, '');
+                        if (num.includes(',') && num.includes('.')) num = num.replace(/,/g, '');
+                        else if (num.includes(',') && num.split(',').length === 2 && num.split(',')[1].length !== 3) num = num.replace(',', '.');
+                        else num = num.replace(/,/g, '');
+                        let v = Number.parseFloat(num);
+                        if (!Number.isFinite(v)) return 0;
+                        const s = (m[2] || '').toUpperCase();
+                        if (s === 'K') v *= 1000;
+                        else if (s === 'M') v *= 1000000;
+                        else if (s === 'B') v *= 1000000000;
+                        return Math.round(v);
+                    }
+                    function extId(url) {
+                        const m = (url || '').match(/\\/([a-z0-9]+)-/i);
+                        if (m) return m[1].toLowerCase();
+                        const n = (url || '').match(/\\/([a-z0-9]+)(?:$|[/?#])/i);
+                        return n ? n[1].toLowerCase() : (url || '');
+                    }
+
+                    const out = [];
+                    const seen = new Set();
+                    const links = Array.from(document.querySelectorAll('a[href]'))
+                        .map(a => a.getAttribute('href') || '')
+                        .filter(h => /^\\/(?:v|embed)\\//i.test(h) || /^https?:\\/\\/rumble\\.com\\/(?:v|embed)\\//i.test(h));
+                    for (const href of links) {
+                        let url = href.startsWith('http') ? href : ('https://rumble.com' + href);
+                        if (seen.has(url)) continue;
+                        seen.add(url);
+                        const a = document.querySelector(`a[href="${href.replace(/"/g, '\\"')}"]`);
+                        const card = a ? (a.closest('article, li, .video-item, .video-listing-entry, .video-stream') || a.parentElement) : null;
+                        const text = (card ? card.textContent : a?.textContent || '').replace(/\\s+/g, ' ').trim();
+
+                        const titleEl = card?.querySelector('h1, h2, h3, .video-item--title, .video-item__title') || a;
+                        const title = (titleEl?.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 500);
+
+                        const img = card?.querySelector('img[src], img[data-src]');
+                        const thumb = (img?.getAttribute('src') || img?.getAttribute('data-src') || '').trim();
+
+                        let views = 0;
+                        let comments = 0;
+                        const viewsMatch = text.match(/([0-9][0-9,\\.\\s]*[KMBkmb]?)\\s+views?/i);
+                        if (viewsMatch) views = parseNum(viewsMatch[1]);
+                        const commentsMatch = text.match(/([0-9][0-9,\\.\\s]*[KMBkmb]?)\\s+comments?/i);
+                        if (commentsMatch) comments = parseNum(commentsMatch[1]);
+
+                        out.push({
+                            external_id: extId(url),
+                            description: title,
+                            thumbnail_url: thumb,
+                            post_url: url,
+                            view_count: views,
+                            like_count: 0,
+                            comment_count: comments,
+                            share_count: 0,
+                            posted_at: null,
+                        });
+                        if (out.length >= 30) break;
+                    }
+                    return out;
+                }"""
+            )
+            if isinstance(posts_raw, list) and posts_raw:
+                posts = posts_raw
+                quality_flags = _merge_quality_flags(
+                    quality_flags,
+                    {"feed_parsed": True, "partial_posts": False}
+                )
+        except Exception:
+            # Keep about metrics even when channel feed parsing fails.
+            pass
+
+        return {
+            **about_data,
+            "_posts": posts,
+            "_source": "worker",
+            "_quality_flags": quality_flags,
         }
 
     rumble_profile_dir = wu.default_profile_dir() / "rumble_chrome_profile"

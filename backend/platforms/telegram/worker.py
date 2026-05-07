@@ -66,6 +66,13 @@ def _parse_views(text: str) -> int:
     return int(num * {'K': 1_000, 'M': 1_000_000, 'B': 1_000_000_000}.get(suffix, 1))
 
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
 # ── Auth detection JS ─────────────────────────────────────────────────────────
 
 # Returns "auth"      → QR / login page is visible   → fail fast
@@ -342,6 +349,7 @@ async def _run_with_page(username: str, page, _wu):
     posts = []
     real_ids: list[int] = []
 
+    fallback_views_applied = 0
     for p in posts_raw:
         mid = str(p.get("mid", "")).strip()
         if not mid:
@@ -366,13 +374,21 @@ async def _run_with_page(username: str, page, _wu):
         except ValueError:
             post_url = ""
 
+        parsed_views = _parse_views(p.get("views", ""))
+        parsed_reactions = max(0, _safe_int(p.get("reactions", 0), 0))
+        if parsed_views <= 0 and parsed_reactions > 0:
+            # Safe fallback: reactions are lower-bound engagement; better than
+            # hard zero views for partially rendered Telegram Web states.
+            parsed_views = parsed_reactions
+            fallback_views_applied += 1
+
         posts.append({
             "external_id":   mid,
             "description":   p.get("text", ""),
             "thumbnail_url": p.get("thumb", ""),
             "post_url":      post_url,
-            "view_count":    _parse_views(p.get("views", "")),
-            "like_count":    p.get("reactions", 0),
+            "view_count":    parsed_views,
+            "like_count":    parsed_reactions,
             "comment_count": 0,
             "share_count":   0,
             "posted_at":     posted_at,
@@ -390,6 +406,12 @@ async def _run_with_page(username: str, page, _wu):
         "like_count":     0,       # aggregated from posts in _apply_refresh
         "post_count":     post_count_estimate,
         "_posts":         posts,
+        "_source":        "webk",
+        "_quality_flags": {
+            "partial_posts": len(posts) == 0,
+            "views_fallback_from_reactions": fallback_views_applied > 0,
+            "fallback_posts_count": fallback_views_applied,
+        },
     }
 
 

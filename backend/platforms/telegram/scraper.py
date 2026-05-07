@@ -59,6 +59,37 @@ def _parse_tg_views(text: str) -> int:
     return int(num * {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(suffix, 1))
 
 
+def _merge_posts(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    """
+    Merge post lists by stable key (external_id/post_url), preferring non-empty
+    fields and max metrics where it is safe.
+    """
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
+
+    def _key(p: dict) -> str:
+        return str(p.get("external_id") or p.get("post_url") or "").strip()
+
+    def _merge_into(cur: dict, other: dict) -> None:
+        for f in ("description", "thumbnail_url", "post_url", "posted_at"):
+            if not cur.get(f) and other.get(f):
+                cur[f] = other[f]
+        for f in ("view_count", "like_count", "comment_count", "share_count"):
+            cur[f] = max(int(cur.get(f) or 0), int(other.get(f) or 0))
+
+    for src in (primary or []), (secondary or []):
+        for p in src:
+            k = _key(p)
+            if not k:
+                continue
+            if k not in by_key:
+                by_key[k] = dict(p)
+                order.append(k)
+            else:
+                _merge_into(by_key[k], p)
+    return [by_key[k] for k in order]
+
+
 def fetch_telegram_profile(username: str) -> dict:
     """
     Fetch Telegram channel data.
@@ -84,7 +115,14 @@ def fetch_telegram_profile(username: str) -> dict:
     # ── 1. Telethon ───────────────────────────────────────────────────────────
     if api_id and api_hash and session_file and Path(session_file).with_suffix(".session").exists():
         try:
-            return _fetch_telegram_telethon(username, int(api_id), api_hash, session_file)
+            out = _fetch_telegram_telethon(username, int(api_id), api_hash, session_file)
+            out["_source"] = "telethon"
+            out["_quality_flags"] = {
+                "partial_posts": not bool(out.get("_posts")),
+                "views_from": "telethon",
+                "reactions_from": "telethon",
+            }
+            return out
         except Exception as e:
             print(f"[telegram] Telethon error for @{username}: {e}", file=sys.stderr)
 
@@ -121,20 +159,36 @@ def fetch_telegram_profile(username: str) -> dict:
         "follower_count": 0, "following_count": 0,
         "like_count": 0, "post_count": 0, "_posts": [],
     }
+    source = "httpx" if httpx_data else "webk"
+    quality = {
+        "partial_posts": not bool(base.get("_posts")),
+        "views_from": "httpx" if httpx_data and base.get("_posts") else "",
+        "reactions_from": "httpx" if httpx_data and base.get("_posts") else "",
+    }
 
     if pw_data:
         # Always prefer Playwright's subscriber count (more reliable than httpx).
         if pw_data.get("follower_count"):
             base["follower_count"] = pw_data["follower_count"]
+            if source == "httpx":
+                source = "mixed"
 
         # Use Playwright's display_name if httpx didn't get one.
         if pw_data.get("display_name") and not base.get("display_name"):
             base["display_name"] = pw_data["display_name"]
 
-        # If httpx returned no posts (channel has web preview disabled) but
-        # Playwright managed to extract messages, use those instead.
-        if not base.get("_posts") and pw_data.get("_posts"):
-            base["_posts"] = pw_data["_posts"]
+        # Merge posts from both sources instead of replacing one by another.
+        # httpx provides stable post URLs/ids on /s/, webk may provide reactions
+        # for channels where web preview is limited.
+        if pw_data.get("_posts"):
+            base["_posts"] = _merge_posts(base.get("_posts") or [], pw_data["_posts"])
+            if not quality.get("views_from"):
+                quality["views_from"] = "webk"
+            quality["reactions_from"] = "webk"
+            if source == "httpx":
+                source = "mixed"
+            elif source != "mixed":
+                source = "webk"
 
         # post_count: prefer the larger of the two estimates.
         # httpx uses max(message_id) from t.me/s/ stream; Playwright uses
@@ -144,6 +198,13 @@ def fetch_telegram_profile(username: str) -> dict:
         if pw_pc and pw_pc > base_pc:
             base["post_count"] = pw_pc
 
+    quality["partial_posts"] = not bool(base.get("_posts"))
+    if not quality.get("views_from"):
+        quality["views_from"] = "unknown"
+    if not quality.get("reactions_from"):
+        quality["reactions_from"] = "unknown"
+    base["_source"] = source
+    base["_quality_flags"] = quality
     return base
 
 

@@ -115,6 +115,11 @@ def _run_worker(username: str, timeout: int = 120) -> dict:
         raise ValueError(data["error"])
     if "_posts" not in data:
         data["_posts"] = []
+    data.setdefault("_source", "worker")
+    data.setdefault(
+        "_quality_flags",
+        {"about_parsed": False, "feed_parsed": bool(data.get("_posts")), "partial_posts": not bool(data.get("_posts"))},
+    )
     return data
 
 
@@ -157,6 +162,8 @@ def fetch_rumble_profile(username: str) -> dict:
     # Primary path: Playwright worker (bypasses Cloudflare challenge).
     try:
         worker_data = _run_worker(username)
+        quality_flags = dict(worker_data.get("_quality_flags") or {})
+        source = str(worker_data.get("_source") or "worker")
         try:
             about_metrics = _fetch_about_metrics(username)
             # About page metrics are the source of truth for channel-level counters.
@@ -166,11 +173,19 @@ def fetch_rumble_profile(username: str) -> dict:
                 worker_data["view_count"] = about_metrics["view_count"]
             if about_metrics["post_count"] > 0:
                 worker_data["post_count"] = about_metrics["post_count"]
+            quality_flags["about_http_refined"] = True
+            if source == "worker":
+                source = "mixed"
         except Exception as em:
             print(f"[rumble] about metrics refine failed for @{username}: {em}", file=sys.stderr)
+            quality_flags["about_http_refined"] = False
+        quality_flags["partial_posts"] = not bool(worker_data.get("_posts"))
+        worker_data["_source"] = source
+        worker_data["_quality_flags"] = quality_flags
         return worker_data
     except Exception as e:
         msg = str(e)
+        anti_bot = ("антибот" in msg.lower()) or ("challenge" in msg.lower())
         if "антибот" in msg.lower() or "challenge" in msg.lower():
             print(
                 f"[rumble] anti-bot loop for @{username}; falling back to HTTP parser",
@@ -242,4 +257,12 @@ def fetch_rumble_profile(username: str) -> dict:
         "view_count": channel_view_count,
         "post_count": post_count,
         "_posts": videos,
+        "_source": "httpx",
+        "_quality_flags": {
+            "anti_bot_detected": anti_bot,
+            "about_parsed": bool(about_html),
+            "feed_parsed": bool(feed_html),
+            "partial_posts": not bool(videos),
+            "jsonld_posts_used": bool(videos),
+        },
     }
