@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from django.apps import AppConfig
+from django.db.models import Sum
 
 _scheduler = None
 _auto_refresh_lock = threading.Lock()
@@ -142,7 +143,13 @@ class AccountsConfig(AppConfig):
 def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
     from django.utils import timezone
     from .auto_refresh_csv import build_auto_refresh_report_csv
-    from .models import Account, AutoRefreshState, RefreshScheduleConfig, GlobalVisibilityConfig
+    from .models import (
+        Account,
+        AutoRefreshPoint,
+        AutoRefreshState,
+        RefreshScheduleConfig,
+        GlobalVisibilityConfig,
+    )
     from .views import (
         _apply_refresh,
         _mark_profile_unavailable_if_applicable,
@@ -170,6 +177,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             accounts_qs = accounts_qs.exclude(platform__in=hidden_platforms)
     if not bool(getattr(cfg, "include_hidden_profile_accounts", False)):
         accounts_qs = accounts_qs.exclude(profile__is_hidden=True)
+    if not bool(getattr(cfg, "include_unavailable_accounts", False)):
+        accounts_qs = accounts_qs.exclude(profile_unavailable=True)
     accounts = list(accounts_qs)
 
     def _interleave_accounts_by_platform(items: list) -> list:
@@ -325,16 +334,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 row_started = time.perf_counter()
 
                 if stop_requested.is_set():
-                    report_by_index[idx] = {
-                        **_empty_metrics_row(
-                            account,
-                            "не выполнено",
-                            "остановка до обработки этого аккаунта",
-                        ),
-                        "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
-                    }
-                    _mark_progress(success=False, failed=False)
-                    continue
+                    # Hard-stop mode: do not continue queued accounts.
+                    return
 
                 with state_lock:
                     state.refresh_from_db(fields=["cancel_requested"])
@@ -344,16 +345,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         state.save(update_fields=["last_error", "updated_at"])
                 if cancelled:
                     stop_requested.set()
-                    report_by_index[idx] = {
-                        **_empty_metrics_row(
-                            account,
-                            "не выполнено",
-                            "остановка до обработки этого аккаунта",
-                        ),
-                        "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
-                    }
-                    _mark_progress(success=False, failed=False)
-                    continue
+                    # Hard-stop mode: stop worker immediately.
+                    return
 
                 platform_sem = platform_semaphores.get(account.platform)
                 attempted_network = False
@@ -365,6 +358,15 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
                 with platform_sem:
                     while True:
+                        if stop_requested.is_set():
+                            return
+                        with state_lock:
+                            state.refresh_from_db(fields=["cancel_requested"])
+                            if bool(state.cancel_requested):
+                                state.last_error = "Автообновление остановлено пользователем."
+                                state.save(update_fields=["last_error", "updated_at"])
+                                stop_requested.set()
+                                return
                         with cooldown_lock:
                             wait_sec = platform_next_allowed_at.get(account.platform, 0.0) - time.monotonic()
                         if wait_sec <= 0:
@@ -376,6 +378,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         state.save(update_fields=["current_account", "updated_at"])
 
                     try:
+                        if stop_requested.is_set():
+                            return
                         if cutoff is not None and account.updated_at and account.updated_at >= cutoff:
                             report_by_index[idx] = {
                                 **_empty_metrics_row(
@@ -489,4 +493,53 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             state.last_report_generated_at = finished
             save_fields.extend(["last_report_csv", "last_report_generated_at"])
         state.save(update_fields=save_fields)
+        try:
+            def _to_int(v):
+                try:
+                    if v is None:
+                        return None
+                    if isinstance(v, bool):
+                        return int(v)
+                    if isinstance(v, (int, float)):
+                        return int(v)
+                    s = str(v).strip()
+                    if not s:
+                        return None
+                    return int(float(s))
+                except Exception:
+                    return None
+
+            current_total_views = int(Account.objects.aggregate(total=Sum("view_count")).get("total") or 0)
+            local_dt = timezone.localtime(finished)
+            local_date = local_dt.date()
+            prev_point = AutoRefreshPoint.objects.filter(
+                measured_at__lt=finished,
+            ).order_by("-measured_at").first()
+            first_today = AutoRefreshPoint.objects.filter(
+                local_date=local_date,
+            ).order_by("measured_at").first()
+            prev_total = int(prev_point.view_count_total) if prev_point else current_total_views
+            day_start_total = int(first_today.view_count_total) if first_today else current_total_views
+            slot_label = local_dt.strftime("%H:%M")
+            platform_deltas: dict[str, int] = {}
+            for row in report_rows:
+                platform = str(row.get("platform") or "").strip().lower()
+                if not platform:
+                    continue
+                before_v = _to_int(row.get("view_before"))
+                after_v = _to_int(row.get("view_after"))
+                if before_v is None or after_v is None:
+                    continue
+                platform_deltas[platform] = int(platform_deltas.get(platform, 0) + (after_v - before_v))
+            AutoRefreshPoint.objects.create(
+                local_date=local_date,
+                source=source or "scheduler",
+                slot_label=slot_label,
+                view_count_total=current_total_views,
+                view_delta_from_prev_point=current_total_views - prev_total,
+                view_delta_from_day_start=current_total_views - day_start_total,
+                platform_deltas=platform_deltas,
+            )
+        except Exception as e:
+            print(f"[scheduled_refresh] failed to persist AutoRefreshPoint: {e}")
         _auto_refresh_lock.release()

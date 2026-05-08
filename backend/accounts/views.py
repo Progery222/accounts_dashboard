@@ -30,7 +30,7 @@ from rest_framework.decorators import api_view, action
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
 from .models import (
-    Account, Platform, Post, Profile, AccountSnapshot, PostSnapshot, AutoRefreshState,
+    Account, Platform, Post, Profile, AccountSnapshot, PostSnapshot, AutoRefreshPoint, AutoRefreshState,
     GlobalVisibilityConfig,
 )
 from .serializers import AccountSerializer, PostSerializer, ProfileSerializer
@@ -627,38 +627,105 @@ class AccountViewSet(viewsets.ModelViewSet):
         if not ordered:
             return Response({"detail": "Аккаунты не найдены"}, status=status.HTTP_404_NOT_FOUND)
 
-        _prewarm_workers(ordered)
+        state = AutoRefreshState.get()
+        if state.is_running:
+            return Response(
+                {"detail": "Сейчас уже выполняется другое автообновление/обновление."},
+                status=status.HTTP_409_CONFLICT,
+            )
+        state.is_running = True
+        state.source = "bulk_refresh"
+        state.cancel_requested = False
+        state.total_accounts = len(ordered)
+        state.processed_accounts = 0
+        state.success_accounts = 0
+        state.failed_accounts = 0
+        state.current_account = ""
+        state.last_error = ""
+        state.started_at = timezone.now()
+        state.finished_at = None
+        state.save(update_fields=[
+            "is_running", "source", "cancel_requested", "total_accounts",
+            "processed_accounts", "success_accounts", "failed_accounts",
+            "current_account", "last_error", "started_at", "finished_at", "updated_at",
+        ])
 
-        ig_accounts = [a for a in ordered if a.platform == Platform.INSTAGRAM]
-        preload: dict[str, dict] = {}
-        if len(ig_accounts) > 1:
-            try:
-                from platforms.instagram.scraper import fetch_instagram_profiles_bulk
+        try:
+            _prewarm_workers(ordered)
 
-                preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
-            except Exception as e:
-                print(f"[bulk_refresh] instagram bulk prefetch failed: {e}", file=sys.stderr)
-                preload = {}
+            ig_accounts = [a for a in ordered if a.platform == Platform.INSTAGRAM]
+            preload: dict[str, dict] = {}
+            if len(ig_accounts) > 1:
+                try:
+                    from platforms.instagram.scraper import fetch_instagram_profiles_bulk
 
-        accounts_out: list[dict] = []
-        errors_out: list[dict] = []
-        for a in ordered:
-            with _account_refresh_mutex(a.id):
-                key = _normalize_instagram_username_key(a.username)
-                scraped = None
-                if (
-                    a.platform == Platform.INSTAGRAM
-                    and len(ig_accounts) > 1
-                    and key in preload
-                ):
-                    scraped = preload[key]
-                account, detail, _ = _refresh_account_for_api(a, scraped=scraped)
-            if account is not None:
-                accounts_out.append(AccountSerializer(account).data)
-            else:
-                errors_out.append({"id": a.id, "detail": detail})
+                    preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
+                except Exception as e:
+                    print(f"[bulk_refresh] instagram bulk prefetch failed: {e}", file=sys.stderr)
+                    preload = {}
 
-        return Response({"accounts": accounts_out, "errors": errors_out})
+            accounts_out: list[dict] = []
+            errors_out: list[dict] = []
+            stop_requested = threading.Event()
+            state_lock = threading.Lock()
+
+            for a in ordered:
+                if stop_requested.is_set():
+                    break
+                with state_lock:
+                    state.refresh_from_db(fields=["cancel_requested"])
+                    if state.cancel_requested:
+                        stop_requested.set()
+                        state.last_error = "Обновление остановлено пользователем."
+                        state.save(update_fields=["last_error", "updated_at"])
+                        break
+                    state.current_account = f"{a.platform}/@{a.username}"
+                    state.save(update_fields=["current_account", "updated_at"])
+
+                with _account_refresh_mutex(a.id):
+                    key = _normalize_instagram_username_key(a.username)
+                    scraped = None
+                    if (
+                        a.platform == Platform.INSTAGRAM
+                        and len(ig_accounts) > 1
+                        and key in preload
+                    ):
+                        scraped = preload[key]
+                    account, detail, _ = _refresh_account_for_api(a, scraped=scraped)
+
+                with state_lock:
+                    state.processed_accounts += 1
+                    if account is not None:
+                        state.success_accounts += 1
+                    else:
+                        state.failed_accounts += 1
+                        state.last_error = str(detail or "")
+                    state.save(update_fields=[
+                        "processed_accounts", "success_accounts", "failed_accounts",
+                        "last_error", "updated_at",
+                    ])
+
+                if account is not None:
+                    accounts_out.append(AccountSerializer(account).data)
+                else:
+                    errors_out.append({"id": a.id, "detail": detail})
+
+            return Response({
+                "accounts": accounts_out,
+                "errors": errors_out,
+                "cancelled": bool(stop_requested.is_set()),
+            })
+        finally:
+            finished = timezone.now()
+            state.refresh_from_db()
+            state.is_running = False
+            state.cancel_requested = False
+            state.current_account = ""
+            state.finished_at = finished
+            state.save(update_fields=[
+                "is_running", "cancel_requested", "current_account",
+                "finished_at", "updated_at",
+            ])
 
     @action(detail=False, methods=["get"], url_path="export-snapshot")
     def export_snapshot(self, request):
@@ -1090,6 +1157,9 @@ def _schedule_to_dict(config) -> dict:
         "include_hidden_profile_accounts": bool(
             getattr(config, "include_hidden_profile_accounts", False),
         ),
+        "include_unavailable_accounts": bool(
+            getattr(config, "include_unavailable_accounts", False),
+        ),
         "times": config.times,
     }
 
@@ -1199,6 +1269,8 @@ def refresh_schedule(request):
             config.include_hidden_platform_accounts = _coerce_bool(data["include_hidden_platform_accounts"])
         if "include_hidden_profile_accounts" in data:
             config.include_hidden_profile_accounts = _coerce_bool(data["include_hidden_profile_accounts"])
+        if "include_unavailable_accounts" in data:
+            config.include_unavailable_accounts = _coerce_bool(data["include_unavailable_accounts"])
         if "times" in data and isinstance(data["times"], list):
             valid = []
             for t in data["times"]:
@@ -1216,6 +1288,42 @@ def refresh_schedule(request):
             apply_schedule_config(config, sched)
 
         return Response(_schedule_to_dict(config))
+    except (ProgrammingError, OperationalError) as exc:
+        return _schedule_db_error_response(exc)
+
+
+@api_view(["GET"])
+def auto_refresh_series(request):
+    """Time series of auto-refresh points for a specific local date."""
+    try:
+        date_raw = (request.query_params.get("date") or "").strip()
+        if date_raw:
+            try:
+                target_date = datetime.date.fromisoformat(date_raw)
+            except ValueError:
+                return Response(
+                    {"detail": "Неверный параметр date. Используйте формат YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            target_date = timezone.localtime(timezone.now()).date()
+
+        points_qs = AutoRefreshPoint.objects.filter(local_date=target_date).order_by("measured_at")
+        points = list(points_qs.values(
+            "id",
+            "measured_at",
+            "slot_label",
+            "source",
+            "view_count_total",
+            "view_delta_from_prev_point",
+            "view_delta_from_day_start",
+            "platform_deltas",
+        ))
+        return Response({
+            "date": str(target_date),
+            "count": len(points),
+            "points": points,
+        })
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)
 

@@ -7,6 +7,10 @@ class Profile(models.Model):
     description = models.TextField(blank=True)
     color = models.CharField(max_length=7, default="#6366f1")  # hex
     avatar_url = models.URLField(max_length=1024, blank=True)
+    is_hidden = models.BooleanField(
+        default=False,
+        help_text="Скрыть профиль и его аккаунты на главном экране для всех пользователей.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -26,6 +30,23 @@ class RefreshScheduleConfig(models.Model):
         default="interval",
     )
     interval_hours = models.IntegerField(default=6)
+    skip_recent_hours = models.IntegerField(default=0)
+    auto_refresh_csv_report = models.BooleanField(
+        default=False,
+        help_text="После завершения автообновления сохранять CSV-отчёт для скачивания в интерфейсе.",
+    )
+    include_hidden_platform_accounts = models.BooleanField(
+        default=False,
+        help_text="В автообновлении учитывать аккаунты скрытых платформ.",
+    )
+    include_hidden_profile_accounts = models.BooleanField(
+        default=False,
+        help_text="В автообновлении учитывать аккаунты скрытых профилей.",
+    )
+    include_unavailable_accounts = models.BooleanField(
+        default=False,
+        help_text="В автообновлении учитывать недоступные аккаунты.",
+    )
     times = models.JSONField(default=list)  # e.g. ["09:00", "21:00"]
 
     class Meta:
@@ -35,7 +56,78 @@ class RefreshScheduleConfig(models.Model):
     def get(cls):
         obj, _ = cls.objects.get_or_create(
             pk=1,
-            defaults={"enabled": False, "mode": "interval", "interval_hours": 6, "times": []},
+            defaults={
+                "enabled": False,
+                "mode": "interval",
+                "interval_hours": 6,
+                "skip_recent_hours": 0,
+                "auto_refresh_csv_report": False,
+                "include_hidden_platform_accounts": False,
+                "include_hidden_profile_accounts": False,
+                "include_unavailable_accounts": False,
+                "times": [],
+            },
+        )
+        return obj
+
+
+class GlobalVisibilityConfig(models.Model):
+    """Singleton (pk=1). Stores globally hidden platforms."""
+
+    hidden_platforms = models.JSONField(default=list)
+
+    class Meta:
+        verbose_name = "Глобальная видимость платформ"
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={"hidden_platforms": []},
+        )
+        return obj
+
+
+class AutoRefreshState(models.Model):
+    """Singleton (pk=1). Stores current/last auto-refresh execution state."""
+
+    is_running = models.BooleanField(default=False)
+    source = models.CharField(max_length=32, blank=True, default="scheduler")
+    cancel_requested = models.BooleanField(default=False)
+    total_accounts = models.IntegerField(default=0)
+    processed_accounts = models.IntegerField(default=0)
+    success_accounts = models.IntegerField(default=0)
+    failed_accounts = models.IntegerField(default=0)
+    current_account = models.CharField(max_length=255, blank=True, default="")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+    last_report_csv = models.TextField(blank=True, default="")
+    last_report_generated_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Состояние автообновления"
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "is_running": False,
+                "source": "scheduler",
+                "cancel_requested": False,
+                "total_accounts": 0,
+                "processed_accounts": 0,
+                "success_accounts": 0,
+                "failed_accounts": 0,
+                "current_account": "",
+                "started_at": None,
+                "finished_at": None,
+                "last_error": "",
+                "last_report_csv": "",
+                "last_report_generated_at": None,
+            },
         )
         return obj
 
@@ -49,6 +141,7 @@ class Platform(models.TextChoices):
     THREADS   = "threads",   "Threads"
     FACEBOOK  = "facebook",  "Facebook"
     RUMBLE    = "rumble",    "Rumble"
+    REDDIT    = "reddit",    "Reddit"
 
 
 class Account(models.Model):
@@ -156,3 +249,26 @@ class PostSnapshot(models.Model):
     class Meta:
         unique_together = [("post", "date")]
         ordering = ["-date"]
+
+    def __str__(self):
+        return f"{self.post} @ {self.date}"
+
+
+class AutoRefreshPoint(models.Model):
+    measured_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    local_date = models.DateField(db_index=True)
+    source = models.CharField(max_length=32, default="scheduler")
+    slot_label = models.CharField(max_length=32, blank=True, default="")
+    view_count_total = models.BigIntegerField(default=0)
+    view_delta_from_prev_point = models.BigIntegerField(default=0)
+    view_delta_from_day_start = models.BigIntegerField(default=0)
+    platform_deltas = models.JSONField(
+        default=dict,
+        help_text="Дельты просмотров по платформам для этого прогона, например {'tiktok': 1200}.",
+    )
+
+    class Meta:
+        ordering = ["measured_at"]
+        indexes = [
+            models.Index(fields=["local_date", "measured_at"]),
+        ]
