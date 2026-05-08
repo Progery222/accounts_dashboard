@@ -17,14 +17,18 @@ from accounts.settings_views import (
     facebook_import_cookies,
     rumble_start_auth,
     rumble_import_cookies,
+    reddit_start_auth,
+    reddit_import_cookies,
 )
 from accounts.views import account_avatar
-from .health import healthz
+from .health import healthz, healthz_ready
 
 urlpatterns = [
     # Оба варианта: без завершающего слэша Railway иногда не делает редирект.
     path("healthz", healthz),
     path("healthz/", healthz),
+    path("healthz/ready", healthz_ready),
+    path("healthz/ready/", healthz_ready),
     path("admin/", admin.site.urls),
     path("api/accounts/", include("accounts.urls")),
     path("api/tiktok/", include("tiktok_app.urls")),
@@ -47,4 +51,6 @@ urlpatterns = [
     path("api/settings/facebook/import-cookies/",    facebook_import_cookies),
     path("api/settings/rumble/start-auth/",          rumble_start_auth),
     path("api/settings/rumble/import-cookies/",      rumble_import_cookies),
+    path("api/settings/reddit/start-auth/",          reddit_start_auth),
+    path("api/settings/reddit/import-cookies/",      reddit_import_cookies),
 ]

@@ -13,21 +13,34 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Account, Platform, Post, Profile
+from .models import Account, Platform, Post, Profile, AccountSnapshot, PostSnapshot
 
 SECTION_ACCOUNTS = "ACCOUNTS"
 SECTION_POSTS = "POSTS"
+SECTION_PROFILES = "PROFILES"
+SECTION_ACCOUNT_SNAPSHOTS = "ACCOUNT_SNAPSHOTS"
+SECTION_POST_SNAPSHOTS = "POST_SNAPSHOTS"
 
 
 def build_snapshot_csv() -> bytes:
-    """UTF-8 с BOM, секции # ACCOUNTS и # POSTS."""
+    """UTF-8 с BOM, секции # PROFILES, # ACCOUNTS, # POSTS и исторические snapshots."""
     out = io.StringIO(newline="")
     out.write("\ufeff")
 
+    # —— PROFILES ——
+    out.write(f"# {SECTION_PROFILES}\n")
+    prof_headers = ["id", "name", "color"]
+    w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+    w.writerow(prof_headers)
+    for p in Profile.objects.order_by("id"):
+        w.writerow([p.id, p.name, p.color])
+
+    out.write("\n")
     # —— ACCOUNTS ——
     out.write(f"# {SECTION_ACCOUNTS}\n")
     acc_headers = [
-        "id", "username", "platform", "profile_id", "display_name", "avatar_url", "bio",
+        "id", "username", "platform", "profile_id", "profile_name", "profile_color",
+        "display_name", "avatar_url", "bio",
         "follower_count", "like_count", "view_count", "post_count",
     ]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
@@ -38,6 +51,8 @@ def build_snapshot_csv() -> bytes:
             a.username,
             a.platform,
             a.profile_id or "",
+            (a.profile.name if a.profile else ""),
+            (a.profile.color if a.profile else ""),
             a.display_name,
             a.avatar_url,
             a.bio,
@@ -73,42 +88,85 @@ def build_snapshot_csv() -> bytes:
             posted,
         ])
 
+    out.write(f"\n# {SECTION_ACCOUNT_SNAPSHOTS}\n")
+    acc_snap_headers = [
+        "account_platform", "account_username", "date",
+        "follower_count", "like_count", "view_count", "post_count",
+    ]
+    w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+    w.writerow(acc_snap_headers)
+    for s in AccountSnapshot.objects.select_related("account").order_by("account_id", "date"):
+        a = s.account
+        w.writerow([
+            a.platform,
+            a.username,
+            s.date.isoformat(),
+            s.follower_count,
+            s.like_count,
+            s.view_count,
+            s.post_count,
+        ])
+
+    out.write(f"\n# {SECTION_POST_SNAPSHOTS}\n")
+    post_snap_headers = [
+        "account_platform", "account_username", "post_external_id", "date",
+        "view_count", "like_count", "comment_count",
+    ]
+    w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+    w.writerow(post_snap_headers)
+    for s in PostSnapshot.objects.select_related("post__account").order_by("post_id", "date"):
+        p = s.post
+        a = p.account
+        w.writerow([
+            a.platform,
+            a.username,
+            p.external_id,
+            s.date.isoformat(),
+            s.view_count,
+            s.like_count,
+            s.comment_count,
+        ])
+
     return out.getvalue().encode("utf-8")
 
 
 def _parse_sections(text: str) -> dict[str, list[list[str]]]:
     lines = text.splitlines()
-    # strip BOM
     if lines and lines[0].startswith("\ufeff"):
         lines[0] = lines[0].lstrip("\ufeff")
 
-    sections: dict[str, list[list[str]]] = {}
+    # Keep raw section text first, then parse each section with csv.reader over
+    # the full block. This preserves multiline quoted cells.
+    raw_sections: dict[str, list[str]] = {}
     current: str | None = None
-    rows: list[list[str]] = []
 
     for line in lines:
-        s = line.strip()
-        if not s:
-            continue
-        if s.startswith("#"):
-            if current is not None:
-                sections[current] = rows
-            # # ACCOUNTS
-            part = s.lstrip("#").strip().upper()
-            if part == SECTION_ACCOUNTS or part == SECTION_POSTS:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            part = stripped.lstrip("#").strip().upper()
+            if part in {
+                SECTION_PROFILES,
+                SECTION_ACCOUNTS,
+                SECTION_POSTS,
+                SECTION_ACCOUNT_SNAPSHOTS,
+                SECTION_POST_SNAPSHOTS,
+            }:
                 current = part
-                rows = []
+                raw_sections.setdefault(current, [])
             else:
                 current = None
-                rows = []
             continue
-        if current is None:
-            continue
-        r = next(csv.reader([line]))
-        rows.append(r)
+        if current is not None:
+            raw_sections[current].append(line)
 
-    if current is not None:
-        sections[current] = rows
+    sections: dict[str, list[list[str]]] = {}
+    for sec, raw_lines in raw_sections.items():
+        block = "\n".join(raw_lines).strip()
+        if not block:
+            sections[sec] = []
+            continue
+        reader = csv.reader(io.StringIO(block))
+        sections[sec] = [row for row in reader if row and any((c or "").strip() for c in row)]
 
     return sections
 
@@ -133,6 +191,35 @@ def _parse_profile_id(v: str) -> int | None:
     return pid
 
 
+def _resolve_profile(*, profile_id_raw: str, profile_name_raw: str, profile_color_raw: str) -> int | None:
+    """
+    Resolve profile for account import:
+      1) existing profile by id,
+      2) existing profile by name,
+      3) create profile by name/color.
+    Returns profile_id or None.
+    """
+    pid = _parse_profile_id(profile_id_raw)
+    if pid is not None:
+        return pid
+
+    name = (profile_name_raw or "").strip()
+    if not name:
+        return None
+    color = (profile_color_raw or "").strip() or "#71717a"
+
+    existing = Profile.objects.filter(name=name).order_by("id").first()
+    if existing:
+        # Keep color in sync if imported color differs.
+        if color and existing.color != color:
+            existing.color = color
+            existing.save(update_fields=["color"])
+        return existing.id
+
+    created = Profile.objects.create(name=name, color=color)
+    return created.id
+
+
 def _parse_hashtags(cell: str) -> list[str]:
     cell = (cell or "").strip()
     if not cell:
@@ -151,6 +238,16 @@ def _parse_posted_at(cell: str):
     cell = (cell or "").strip()
     if not cell:
         return None
+
+
+def _parse_date(cell: str):
+    cell = (cell or "").strip()
+    if not cell:
+        return None
+    try:
+        return datetime.fromisoformat(cell).date()
+    except ValueError:
+        return None
     try:
         dt = datetime.fromisoformat(cell.replace("Z", "+00:00"))
         if timezone.is_naive(dt):
@@ -168,25 +265,68 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
         text = raw.decode("cp1251", errors="replace")
 
     sections = _parse_sections(text)
+    prof_rows = sections.get(SECTION_PROFILES, [])
     acc_rows = sections.get(SECTION_ACCOUNTS, [])
     post_rows = sections.get(SECTION_POSTS, [])
+    acc_snap_rows = sections.get(SECTION_ACCOUNT_SNAPSHOTS, [])
+    post_snap_rows = sections.get(SECTION_POST_SNAPSHOTS, [])
 
     result: dict[str, Any] = {
         "accounts_created": 0,
         "accounts_updated": 0,
         "posts_created": 0,
         "posts_updated": 0,
+        "account_snapshots_upserted": 0,
+        "post_snapshots_upserted": 0,
         "errors": [],
     }
 
-    if not acc_rows and not post_rows:
-        result["errors"].append({"section": "", "row": 0, "message": "Нет секций ACCOUNTS или POSTS в файле"})
+    if not prof_rows and not acc_rows and not post_rows and not acc_snap_rows and not post_snap_rows:
+        result["errors"].append(
+            {
+                "section": "",
+                "row": 0,
+                "message": "Нет секций PROFILES/ACCOUNTS/POSTS/ACCOUNT_SNAPSHOTS/POST_SNAPSHOTS в файле",
+            }
+        )
         return result
 
     today = timezone.now().date()
 
     def row_err(section: str, row_idx: int, msg: str):
         result["errors"].append({"section": section, "row": row_idx, "message": msg})
+
+    # ── PROFILES ──
+    if prof_rows:
+        header = [c.strip() for c in prof_rows[0]]
+        hmap = {h.lower(): i for i, h in enumerate(header)}
+        if "name" not in hmap:
+            row_err(SECTION_PROFILES, 1, "В шапке PROFILES нужна колонка name")
+        else:
+            with transaction.atomic():
+                for rnum, row in enumerate(prof_rows[1:], start=2):
+                    if not row or not any((c or "").strip() for c in row):
+                        continue
+
+                    def col(name: str, default="") -> str:
+                        j = hmap.get(name.lower())
+                        if j is None or j >= len(row):
+                            return default
+                        return row[j] if row[j] is not None else default
+
+                    name = (col("name") or "").strip()
+                    color = (col("color") or "").strip() or "#71717a"
+                    if not name:
+                        row_err(SECTION_PROFILES, rnum, "Пустое имя профиля")
+                        continue
+                    obj = Profile.objects.filter(name=name).order_by("id").first()
+                    created = False
+                    if obj is None:
+                        obj = Profile.objects.create(name=name, color=color)
+                        created = True
+                    if (not created) and color and obj.color != color:
+                        obj.color = color
+                        obj.save(update_fields=["color"])
 
     # ── ACCOUNTS (первая строка — заголовок) ──
     if acc_rows:
@@ -220,7 +360,11 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         row_err(SECTION_ACCOUNTS, rnum, f"Неизвестная платформа: {platform}")
                         continue
 
-                    prof = _parse_profile_id(col("profile_id"))
+                    prof = _resolve_profile(
+                        profile_id_raw=col("profile_id"),
+                        profile_name_raw=col("profile_name"),
+                        profile_color_raw=col("profile_color"),
+                    )
                     display_name = col("display_name")
                     avatar_url = col("avatar_url")
                     bio = col("bio")
@@ -351,5 +495,136 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         like_count=post.like_count,
                         comment_count=post.comment_count,
                     )
+
+    # ── ACCOUNT_SNAPSHOTS ──
+    if acc_snap_rows:
+        header = [c.strip() for c in acc_snap_rows[0]]
+        hmap = {h.lower(): i for i, h in enumerate(header)}
+        missing = [k for k in ("account_platform", "account_username", "date") if k not in hmap]
+        if missing:
+            row_err(
+                SECTION_ACCOUNT_SNAPSHOTS,
+                1,
+                f"В шапке ACCOUNT_SNAPSHOTS не хватает колонок: {', '.join(missing)}",
+            )
+        else:
+            with transaction.atomic():
+                for rnum, row in enumerate(acc_snap_rows[1:], start=2):
+                    if not row or not any(c.strip() for c in row):
+                        continue
+
+                    def col(name: str, default="") -> str:
+                        j = hmap.get(name.lower())
+                        if j is None or j >= len(row):
+                            return default
+                        return row[j] if row[j] is not None else default
+
+                    pl = col("account_platform").strip().lower()
+                    un = col("account_username").lstrip("@").strip()
+                    snap_date = _parse_date(col("date"))
+                    if not pl or not un or snap_date is None:
+                        row_err(
+                            SECTION_ACCOUNT_SNAPSHOTS,
+                            rnum,
+                            "Пустые/некорректные account_platform, account_username или date",
+                        )
+                        continue
+                    try:
+                        acc = Account.objects.get(username=un, platform=pl)
+                    except Account.DoesNotExist:
+                        row_err(SECTION_ACCOUNT_SNAPSHOTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
+                        continue
+
+                    try:
+                        fc = _parse_int(col("follower_count"))
+                        lc = _parse_int(col("like_count"))
+                        vc = _parse_int(col("view_count"))
+                        pc = _parse_int(col("post_count"))
+                    except ValueError as e:
+                        row_err(SECTION_ACCOUNT_SNAPSHOTS, rnum, f"Некорректное число: {e}")
+                        continue
+
+                    AccountSnapshot.objects.update_or_create(
+                        account=acc,
+                        date=snap_date,
+                        defaults={
+                            "follower_count": fc,
+                            "like_count": lc,
+                            "view_count": vc,
+                            "post_count": pc,
+                        },
+                    )
+                    result["account_snapshots_upserted"] += 1
+
+    # ── POST_SNAPSHOTS ──
+    if post_snap_rows:
+        header = [c.strip() for c in post_snap_rows[0]]
+        hmap = {h.lower(): i for i, h in enumerate(header)}
+        missing = [
+            k for k in ("account_platform", "account_username", "post_external_id", "date")
+            if k not in hmap
+        ]
+        if missing:
+            row_err(
+                SECTION_POST_SNAPSHOTS,
+                1,
+                f"В шапке POST_SNAPSHOTS не хватает колонок: {', '.join(missing)}",
+            )
+        else:
+            with transaction.atomic():
+                for rnum, row in enumerate(post_snap_rows[1:], start=2):
+                    if not row or not any(c.strip() for c in row):
+                        continue
+
+                    def col(name: str, default="") -> str:
+                        j = hmap.get(name.lower())
+                        if j is None or j >= len(row):
+                            return default
+                        return row[j] if row[j] is not None else default
+
+                    pl = col("account_platform").strip().lower()
+                    un = col("account_username").lstrip("@").strip()
+                    ext = col("post_external_id").strip()
+                    snap_date = _parse_date(col("date"))
+                    if not pl or not un or not ext or snap_date is None:
+                        row_err(
+                            SECTION_POST_SNAPSHOTS,
+                            rnum,
+                            "Пустые/некорректные account_platform, account_username, post_external_id или date",
+                        )
+                        continue
+                    try:
+                        acc = Account.objects.get(username=un, platform=pl)
+                    except Account.DoesNotExist:
+                        row_err(SECTION_POST_SNAPSHOTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
+                        continue
+                    try:
+                        post = Post.objects.get(account=acc, external_id=ext)
+                    except Post.DoesNotExist:
+                        row_err(
+                            SECTION_POST_SNAPSHOTS,
+                            rnum,
+                            f"Пост не найден: {pl}/@{un}/{ext}",
+                        )
+                        continue
+
+                    try:
+                        vc = _parse_int(col("view_count"))
+                        lc = _parse_int(col("like_count"))
+                        cc = _parse_int(col("comment_count"))
+                    except ValueError as e:
+                        row_err(SECTION_POST_SNAPSHOTS, rnum, f"Некорректное число: {e}")
+                        continue
+
+                    PostSnapshot.objects.update_or_create(
+                        post=post,
+                        date=snap_date,
+                        defaults={
+                            "view_count": vc,
+                            "like_count": lc,
+                            "comment_count": cc,
+                        },
+                    )
+                    result["post_snapshots_upserted"] += 1
 
     return result

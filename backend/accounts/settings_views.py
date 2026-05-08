@@ -11,8 +11,10 @@ import asyncio
 import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,30 +115,50 @@ def _read_tiktok_cookies() -> list[dict]:
 
 
 def _tiktok_has_session() -> bool:
-    """Return True only if a valid sessionid cookie exists (user is actually logged in)."""
+    """Return True if TikTok auth session cookie exists in profile."""
     profile_dir = _get_profile_dir()
     db_path = Path(profile_dir) / "Default" / "Network" / "Cookies"
-    if not db_path.exists():
-        return False
-    tmp = tempfile.mktemp(suffix=".db")
-    try:
-        shutil.copy2(str(db_path), tmp)
-        conn = sqlite3.connect(tmp)
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT name FROM cookies
-            WHERE host_key LIKE '%tiktok%' AND name = 'sessionid'
-        """)
-        row = cur.fetchone()
-        conn.close()
-        return row is not None
-    except Exception:
-        return False
-    finally:
+    if db_path.exists():
+        tmp = tempfile.mktemp(suffix=".db")
         try:
-            os.unlink(tmp)
+            shutil.copy2(str(db_path), tmp)
+            conn = sqlite3.connect(tmp)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT name FROM cookies
+                WHERE host_key LIKE '%tiktok%'
+                  AND (name = 'sessionid' OR name = 'sessionid_ss')
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+            conn.close()
+            if row is not None:
+                return True
         except Exception:
             pass
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+    # Fallback: when Chromium profile cookie DB is missing/unreadable, accept
+    # session from exported Playwright state file.
+    try:
+        state_path = Path(profile_dir) / "tiktok_state.json"
+        if state_path.exists():
+            data = _json.loads(state_path.read_text(encoding="utf-8"))
+            cookies = data.get("cookies") if isinstance(data, dict) else []
+            if isinstance(cookies, list):
+                for c in cookies:
+                    if not isinstance(c, dict):
+                        continue
+                    name = str(c.get("name", ""))
+                    domain = str(c.get("domain", "")).lower()
+                    if name in {"sessionid", "sessionid_ss"} and "tiktok" in domain:
+                        return True
+    except Exception:
+        pass
+    return False
 
 
 # ── Status endpoints ──────────────────────────────────────────────────────────
@@ -145,7 +167,7 @@ def _tiktok_status() -> dict:
     cookies = _read_tiktok_cookies()
     has_session = _tiktok_has_session()  # requires sessionid cookie
     if not cookies:
-        return {"has_session": False, "cookies": [], "min_expires": None, "min_expires_name": None}
+        return {"has_session": has_session, "cookies": [], "min_expires": None, "min_expires_name": None}
 
     with_expiry = [(c["expires_ts"], c["expires"], c["name"]) for c in cookies if c["expires_ts"]]
     if with_expiry:
@@ -249,6 +271,15 @@ def _rumble_status() -> dict:
     return {"has_session": _rumble_has_session()}
 
 
+def _reddit_has_session() -> bool:
+    # Reddit web auth footprint in Chromium profile.
+    return _check_cookie_in_profile(["reddit.com"], ["reddit_session"])
+
+
+def _reddit_status() -> dict:
+    return {"has_session": _reddit_has_session()}
+
+
 @api_view(["GET"])
 def auth_status(request):
     return Response({
@@ -259,6 +290,7 @@ def auth_status(request):
         "threads":   _threads_status(),
         "facebook":  _facebook_status(),
         "rumble":    _rumble_status(),
+        "reddit":    _reddit_status(),
     })
 
 
@@ -270,6 +302,7 @@ _LOGOUT_COOKIE_HOST_NEEDLES: dict[str, list[str]] = {
     "threads":   ["threads.net", "threads.com"],
     "facebook":  ["facebook.com", "m.facebook.com", "fb.com"],
     "rumble":    ["rumble.com"],
+    "reddit":    ["reddit.com"],
 }
 
 
@@ -405,62 +438,149 @@ def job_status(request, job_id: str):
 
 # ── TikTok browser auth ───────────────────────────────────────────────────────
 
+def _start_xvfb_if_needed() -> subprocess.Popen | None:
+    """
+    Start Xvfb only for Linux server environments when there is no active DISPLAY.
+    Returns process handle if started by this function, otherwise None.
+    """
+    # Local desktop flows (Windows/macOS) should open a normal browser window
+    # and must not require Xvfb.
+    if os.name == "nt" or os.uname().sysname.lower() == "darwin":
+        return None
+
+    display = os.environ.get("DISPLAY") or _get_setting("BROWSER_DISPLAY", ":99")
+    disp_num = display.lstrip(":").split(".")[0]
+    x11_socket = Path("/tmp/.X11-unix") / f"X{disp_num}"
+    if x11_socket.exists():
+        return None
+
+    cmd = ["Xvfb", display, "-screen", "0", "1366x768x24", "-nolisten", "tcp", "-ac"]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # Give Xvfb a moment to initialize.
+    time.sleep(0.8)
+    if proc.poll() is not None:
+        raise RuntimeError("Не удалось запустить Xvfb для браузерной авторизации.")
+    os.environ["DISPLAY"] = display
+    return proc
+
+
+def _release_chrome_profile_lock(profile_dir: str) -> None:
+    """Best-effort release of Chromium profile locks before headed auth."""
+    base = Path(profile_dir)
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = base / name
+        try:
+            if p.exists() or p.is_symlink():
+                p.unlink()
+        except Exception:
+            pass
+
+    # Linux: terminate stale Chromium processes bound to this user-data-dir.
+    try:
+        subprocess.run(
+            ["pkill", "-f", f"--user-data-dir={profile_dir}"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def _run_tiktok_auth(job_id: str) -> None:
     profile_dir = _get_profile_dir()
     username = _get_setting("TIKTOK_USERNAME")
     password = _get_setting("TIKTOK_PASSWORD")
+    autofill_enabled = _get_setting("TIKTOK_AUTH_AUTOFILL", "false").strip().lower() in {
+        "1", "true", "yes", "on", "y",
+    }
 
     async def _async():
         from playwright.async_api import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
+        xvfb_proc = None
 
-        async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="en-US",
-                viewport={"width": 1280, "height": 900},
-            )
-            try:
-                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        try:
+            xvfb_proc = _start_xvfb_if_needed()
+            if xvfb_proc is not None:
+                _set_job(job_id, "pending", "Запущен Xvfb, открываю TikTok…")
+            _release_chrome_profile_lock(profile_dir)
 
-                _set_job(job_id, "pending", "Открываю TikTok…")
-                await page.goto("https://www.tiktok.com/login/phone-or-email/email",
-                                wait_until="domcontentloaded", timeout=30_000)
-                await page.wait_for_timeout(1500)
-
-                # Auto-fill credentials (best-effort)
-                if username and password:
+            async with async_playwright() as pw:
+                ctx = None
+                for _attempt in range(2):
                     try:
-                        await page.fill('input[name="username"]', username, timeout=4000)
-                        await page.wait_for_timeout(400)
-                        await page.fill('input[type="password"]', password, timeout=4000)
-                        await page.wait_for_timeout(400)
-                        await page.click('button[type="submit"]', timeout=4000)
-                    except Exception:
-                        pass  # user fills manually
-
-                _set_job(job_id, "pending", "Войдите в TikTok в открытом окне браузера…")
-
-                # Poll until sessionid cookie appears in the profile DB (up to 3 min)
-                for _ in range(180):
-                    await asyncio.sleep(1)
-                    if _tiktok_has_session():
+                        ctx = await pw.chromium.launch_persistent_context(
+                            profile_dir,
+                            headless=False,
+                            args=["--disable-blink-features=AutomationControlled"],
+                            locale="en-US",
+                            viewport={"width": 1280, "height": 900},
+                        )
                         break
-                else:
-                    raise TimeoutError("Время ожидания входа истекло (3 мин).")
+                    except Exception as _launch_exc:
+                        if _attempt == 0:
+                            _cleanup_chrome_artifacts(profile_dir)
+                            await asyncio.sleep(0.8)
+                        else:
+                            raise _launch_exc
+                try:
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
-                # Export state so the worker can use a non-persistent context
-                state_path = Path(profile_dir) / "tiktok_state.json"
-                await ctx.storage_state(path=str(state_path))
-                _set_job(job_id, "done", "Вход в TikTok выполнен успешно!")
-            except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
-            finally:
-                await ctx.close()
+                    _set_job(job_id, "pending", "Открываю TikTok…")
+                    await page.goto("https://www.tiktok.com/login",
+                                    wait_until="domcontentloaded", timeout=30_000)
+                    await page.wait_for_timeout(1500)
+
+                    # Optional autofill only; never auto-submit to avoid triggering
+                    # TikTok "maximum login attempts" lockouts.
+                    if autofill_enabled and username and password:
+                        try:
+                            await page.fill(
+                                'input[name="username"], input[placeholder*="email" i], input[autocomplete="username"]',
+                                username,
+                                timeout=4000,
+                            )
+                            await page.wait_for_timeout(400)
+                            await page.fill('input[type="password"]', password, timeout=4000)
+                        except Exception:
+                            pass  # user fills manually
+
+                    _set_job(job_id, "pending", "Войдите в TikTok в открытом окне браузера (лучше через QR/2FA)…")
+
+                    # Poll until sessionid cookie appears in the profile DB (up to 3 min)
+                    for _ in range(180):
+                        await asyncio.sleep(1)
+                        if _tiktok_has_session():
+                            break
+                    else:
+                        raise TimeoutError("Время ожидания входа истекло (3 мин).")
+
+                    # Export state so the worker can use a non-persistent context
+                    state_path = Path(profile_dir) / "tiktok_state.json"
+                    await ctx.storage_state(path=str(state_path))
+                    _set_job(job_id, "done", "Вход в TikTok выполнен успешно!")
+                except Exception as e:
+                    _set_job(job_id, "error", f"Ошибка: {e}")
+                finally:
+                    await ctx.close()
+        except FileNotFoundError:
+            _set_job(job_id, "error", "Xvfb не установлен на сервере. Установите пакет xvfb.")
+        except Exception as e:
+            _set_job(job_id, "error", f"Ошибка: {e}")
+        finally:
+            if xvfb_proc is not None:
+                xvfb_proc.terminate()
+                try:
+                    xvfb_proc.wait(timeout=5)
+                except Exception:
+                    xvfb_proc.kill()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -654,8 +774,32 @@ def tiktok_import_cookies(request):
     raw = (request.data.get("cookies") or "").strip()
     if not raw:
         return Response({"error": "Поле cookies обязательно"}, status=400)
+    is_probably_json = raw.startswith("[")
     try:
-        pw_cookies = _parse_cookies_generic(raw, ["tiktok"], "sessionid", ".tiktok.com")
+        if is_probably_json:
+            pw_cookies = _parse_cookies_generic(raw, ["tiktok"], "sessionid", ".tiktok.com")
+        else:
+            # Raw value fallback: try both commonly seen TikTok session cookie names.
+            pw_cookies = [
+                {
+                    "name": "sessionid",
+                    "value": raw,
+                    "domain": ".tiktok.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "sameSite": "None",
+                },
+                {
+                    "name": "sessionid_ss",
+                    "value": raw,
+                    "domain": ".tiktok.com",
+                    "path": "/",
+                    "secure": True,
+                    "httpOnly": True,
+                    "sameSite": "None",
+                },
+            ]
     except ValueError as e:
         return Response({"error": str(e)}, status=400)
     if not pw_cookies:
@@ -668,7 +812,8 @@ def tiktok_import_cookies(request):
         args=(
             job_id, pw_cookies, _tiktok_has_session,
             f"Готово! Импортировано {len(pw_cookies)} кук(ов). Авторизация TikTok активна.",
-            "sessionid не найден после импорта. Скопируйте куки с tiktok.com в залогиненном состоянии.",
+            "Не найдена TikTok-сессия после импорта (ожидались sessionid/sessionid_ss). "
+            "Скопируйте куки с tiktok.com в залогиненном состоянии.",
         ),
         kwargs={"state_export_path": state_path},
         daemon=True,
@@ -1470,6 +1615,99 @@ def rumble_import_cookies(request):
             job_id, pw_cookies, _rumble_has_session,
             f"Готово! Импортировано {len(pw_cookies)} кук(ов). Авторизация Rumble активна.",
             "Cookies rumble.com не обнаружены после импорта. Скопируйте куки с rumble.com в залогиненном состоянии.",
+        ),
+        kwargs={"state_export_path": state_path},
+        daemon=True,
+    )
+    t.start()
+    return Response({"job_id": job_id})
+
+
+# ── Reddit browser auth ────────────────────────────────────────────────────────
+
+def _run_reddit_auth(job_id: str) -> None:
+    profile_dir = _get_profile_dir()
+
+    async def _async():
+        from playwright.async_api import async_playwright
+
+        _set_job(job_id, "pending", "Запускаю браузер…")
+        Path(profile_dir).mkdir(parents=True, exist_ok=True)
+
+        async with async_playwright() as pw:
+            ctx = await pw.chromium.launch_persistent_context(
+                profile_dir,
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+                locale="ru-RU",
+                viewport={"width": 1280, "height": 900},
+            )
+            try:
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                _set_job(job_id, "pending", "Открываю Reddit…")
+                await page.goto("https://www.reddit.com/login/", wait_until="domcontentloaded", timeout=30_000)
+                await page.wait_for_timeout(2000)
+
+                _set_job(
+                    job_id,
+                    "pending",
+                    "Войдите в Reddit в открытом окне (если требуется 2FA/капча)…",
+                )
+
+                for _ in range(180):
+                    await asyncio.sleep(1)
+                    if _reddit_has_session():
+                        break
+                else:
+                    raise TimeoutError("Время ожидания истекло (3 мин). Не обнаружена сессия Reddit.")
+
+                state_path = Path(profile_dir) / "reddit_state.json"
+                await ctx.storage_state(path=str(state_path))
+                _set_job(job_id, "done", "Авторизация Reddit сохранена успешно!")
+            except Exception as e:
+                _set_job(job_id, "error", f"Ошибка: {e}")
+            finally:
+                await ctx.close()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_async())
+    finally:
+        loop.close()
+
+
+@api_view(["POST"])
+def reddit_start_auth(request):
+    job_id = _new_job()
+    t = threading.Thread(target=_run_reddit_auth, args=(job_id,), daemon=True)
+    t.start()
+    return Response({"job_id": job_id})
+
+
+@api_view(["POST"])
+def reddit_import_cookies(request):
+    raw = (request.data.get("cookies") or "").strip()
+    if not raw:
+        return Response({"error": "Поле cookies обязательно"}, status=400)
+    try:
+        pw_cookies = _parse_cookies_generic(raw, ["reddit.com"], "reddit_session", ".reddit.com")
+    except ValueError as e:
+        return Response({"error": str(e)}, status=400)
+    if not pw_cookies:
+        return Response(
+            {"error": "Не найдено Reddit-куков (нужен домен reddit.com)"},
+            status=400,
+        )
+
+    state_path = str(Path(_get_profile_dir()) / "reddit_state.json")
+    job_id = _new_job()
+    t = threading.Thread(
+        target=_run_platform_cookie_import,
+        args=(
+            job_id, pw_cookies, _reddit_has_session,
+            f"Готово! Импортировано {len(pw_cookies)} кук(ов). Авторизация Reddit активна.",
+            "reddit_session не найден после импорта. Скопируйте куки с reddit.com в залогиненном состоянии.",
         ),
         kwargs={"state_export_path": state_path},
         daemon=True,

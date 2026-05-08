@@ -4,9 +4,13 @@ __pycache__/
 .venv/
 node_modules/
 dist/
+**/dist/
+**/__pycache__/
+*.tsbuildinfo
 .DS_Store
 *.egg-info/
 staticfiles/
 response*.html
 resp*.html
 *.session
+tiktok_state.json

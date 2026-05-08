@@ -74,7 +74,7 @@ export interface InsightsResult {
   best_weekdays: WeekdayStat[];
 }
 
-export type Period = "1d" | "7d" | "30d" | "all";
+export type Period = "1d" | "7d" | "30d";
 export type SortBy = "views" | "likes" | "comments" | "shares" | "er" | "view_delta" | "like_delta";
 
 export interface TopPostsParams {

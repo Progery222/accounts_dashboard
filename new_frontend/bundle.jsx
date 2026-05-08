@@ -1,0 +1,2094 @@
+
+// ===== tweaks-panel.jsx =====
+
+// tweaks-panel.jsx
+// Reusable Tweaks shell + form-control helpers.
+//
+// Owns the host protocol (listens for __activate_edit_mode / __deactivate_edit_mode,
+// posts __edit_mode_available / __edit_mode_set_keys / __edit_mode_dismissed) so
+// individual prototypes don't re-roll it. Ships a consistent set of controls so you
+// don't hand-draw <input type="range">, segmented radios, steppers, etc.
+//
+// Usage (in an HTML file that loads React + Babel):
+//
+//   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+//     "primaryColor": "#D97757",
+//     "palette": ["#D97757", "#29261b", "#f6f4ef"],
+//     "fontSize": 16,
+//     "density": "regular",
+//     "dark": false
+//   }/*EDITMODE-END*/;
+//
+//   function App() {
+//     const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+//     return (
+//       <div style={{ fontSize: t.fontSize, color: t.primaryColor }}>
+//         Hello
+//         <TweaksPanel>
+//           <TweakSection label="Typography" />
+//           <TweakSlider label="Font size" value={t.fontSize} min={10} max={32} unit="px"
+//                        onChange={(v) => setTweak('fontSize', v)} />
+//           <TweakRadio  label="Density" value={t.density}
+//                        options={['compact', 'regular', 'comfy']}
+//                        onChange={(v) => setTweak('density', v)} />
+//           <TweakSection label="Theme" />
+//           <TweakColor  label="Primary" value={t.primaryColor}
+//                        options={['#D97757', '#2A6FDB', '#1F8A5B', '#7A5AE0']}
+//                        onChange={(v) => setTweak('primaryColor', v)} />
+//           <TweakColor  label="Palette" value={t.palette}
+//                        options={[['#D97757', '#29261b', '#f6f4ef'],
+//                                  ['#475569', '#0f172a', '#f1f5f9']]}
+//                        onChange={(v) => setTweak('palette', v)} />
+//           <TweakToggle label="Dark mode" value={t.dark}
+//                        onChange={(v) => setTweak('dark', v)} />
+//         </TweaksPanel>
+//       </div>
+//     );
+//   }
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+const __TWEAKS_STYLE = `
+  .twk-panel{position:fixed;right:16px;bottom:16px;z-index:2147483646;width:280px;
+    max-height:calc(100vh - 32px);display:flex;flex-direction:column;
+    transform:scale(var(--dc-inv-zoom,1));transform-origin:bottom right;
+    background:rgba(250,249,247,.78);color:#29261b;
+    -webkit-backdrop-filter:blur(24px) saturate(160%);backdrop-filter:blur(24px) saturate(160%);
+    border:.5px solid rgba(255,255,255,.6);border-radius:14px;
+    box-shadow:0 1px 0 rgba(255,255,255,.5) inset,0 12px 40px rgba(0,0,0,.18);
+    font:11.5px/1.4 ui-sans-serif,system-ui,-apple-system,sans-serif;overflow:hidden}
+  .twk-hd{display:flex;align-items:center;justify-content:space-between;
+    padding:10px 8px 10px 14px;cursor:move;user-select:none}
+  .twk-hd b{font-size:12px;font-weight:600;letter-spacing:.01em}
+  .twk-x{appearance:none;border:0;background:transparent;color:rgba(41,38,27,.55);
+    width:22px;height:22px;border-radius:6px;cursor:default;font-size:13px;line-height:1}
+  .twk-x:hover{background:rgba(0,0,0,.06);color:#29261b}
+  .twk-body{padding:2px 14px 14px;display:flex;flex-direction:column;gap:10px;
+    overflow-y:auto;overflow-x:hidden;min-height:0;
+    scrollbar-width:thin;scrollbar-color:rgba(0,0,0,.15) transparent}
+  .twk-body::-webkit-scrollbar{width:8px}
+  .twk-body::-webkit-scrollbar-track{background:transparent;margin:2px}
+  .twk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);border-radius:4px;
+    border:2px solid transparent;background-clip:content-box}
+  .twk-body::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.25);
+    border:2px solid transparent;background-clip:content-box}
+  .twk-row{display:flex;flex-direction:column;gap:5px}
+  .twk-row-h{flex-direction:row;align-items:center;justify-content:space-between;gap:10px}
+  .twk-lbl{display:flex;justify-content:space-between;align-items:baseline;
+    color:rgba(41,38,27,.72)}
+  .twk-lbl>span:first-child{font-weight:500}
+  .twk-val{color:rgba(41,38,27,.5);font-variant-numeric:tabular-nums}
+
+  .twk-sect{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;
+    color:rgba(41,38,27,.45);padding:10px 0 0}
+  .twk-sect:first-child{padding-top:0}
+
+  .twk-field{appearance:none;width:100%;height:26px;padding:0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;
+    background:rgba(255,255,255,.6);color:inherit;font:inherit;outline:none}
+  .twk-field:focus{border-color:rgba(0,0,0,.25);background:rgba(255,255,255,.85)}
+  select.twk-field{padding-right:22px;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path fill='rgba(0,0,0,.5)' d='M0 0h10L5 6z'/></svg>");
+    background-repeat:no-repeat;background-position:right 8px center}
+
+  .twk-slider{appearance:none;-webkit-appearance:none;width:100%;height:4px;margin:6px 0;
+    border-radius:999px;background:rgba(0,0,0,.12);outline:none}
+  .twk-slider::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+    width:14px;height:14px;border-radius:50%;background:#fff;
+    border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+  .twk-slider::-moz-range-thumb{width:14px;height:14px;border-radius:50%;
+    background:#fff;border:.5px solid rgba(0,0,0,.12);box-shadow:0 1px 3px rgba(0,0,0,.2);cursor:default}
+
+  .twk-seg{position:relative;display:flex;padding:2px;border-radius:8px;
+    background:rgba(0,0,0,.06);user-select:none}
+  .twk-seg-thumb{position:absolute;top:2px;bottom:2px;border-radius:6px;
+    background:rgba(255,255,255,.9);box-shadow:0 1px 2px rgba(0,0,0,.12);
+    transition:left .15s cubic-bezier(.3,.7,.4,1),width .15s}
+  .twk-seg.dragging .twk-seg-thumb{transition:none}
+  .twk-seg button{appearance:none;position:relative;z-index:1;flex:1;border:0;
+    background:transparent;color:inherit;font:inherit;font-weight:500;min-height:22px;
+    border-radius:6px;cursor:default;padding:4px 6px;line-height:1.2;
+    overflow-wrap:anywhere}
+
+  .twk-toggle{position:relative;width:32px;height:18px;border:0;border-radius:999px;
+    background:rgba(0,0,0,.15);transition:background .15s;cursor:default;padding:0}
+  .twk-toggle[data-on="1"]{background:#34c759}
+  .twk-toggle i{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;
+    background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .15s}
+  .twk-toggle[data-on="1"] i{transform:translateX(14px)}
+
+  .twk-num{display:flex;align-items:center;height:26px;padding:0 0 0 8px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:7px;background:rgba(255,255,255,.6)}
+  .twk-num-lbl{font-weight:500;color:rgba(41,38,27,.6);cursor:ew-resize;
+    user-select:none;padding-right:8px}
+  .twk-num input{flex:1;min-width:0;height:100%;border:0;background:transparent;
+    font:inherit;font-variant-numeric:tabular-nums;text-align:right;padding:0 8px 0 0;
+    outline:none;color:inherit;-moz-appearance:textfield}
+  .twk-num input::-webkit-inner-spin-button,.twk-num input::-webkit-outer-spin-button{
+    -webkit-appearance:none;margin:0}
+  .twk-num-unit{padding-right:8px;color:rgba(41,38,27,.45)}
+
+  .twk-btn{appearance:none;height:26px;padding:0 12px;border:0;border-radius:7px;
+    background:rgba(0,0,0,.78);color:#fff;font:inherit;font-weight:500;cursor:default}
+  .twk-btn:hover{background:rgba(0,0,0,.88)}
+  .twk-btn.secondary{background:rgba(0,0,0,.06);color:inherit}
+  .twk-btn.secondary:hover{background:rgba(0,0,0,.1)}
+
+  .twk-swatch{appearance:none;-webkit-appearance:none;width:56px;height:22px;
+    border:.5px solid rgba(0,0,0,.1);border-radius:6px;padding:0;cursor:default;
+    background:transparent;flex-shrink:0}
+  .twk-swatch::-webkit-color-swatch-wrapper{padding:0}
+  .twk-swatch::-webkit-color-swatch{border:0;border-radius:5.5px}
+  .twk-swatch::-moz-color-swatch{border:0;border-radius:5.5px}
+
+  .twk-chips{display:flex;gap:6px}
+  .twk-chip{position:relative;appearance:none;flex:1;min-width:0;height:46px;
+    padding:0;border:0;border-radius:6px;overflow:hidden;cursor:default;
+    box-shadow:0 0 0 .5px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.06);
+    transition:transform .12s cubic-bezier(.3,.7,.4,1),box-shadow .12s}
+  .twk-chip:hover{transform:translateY(-1px);
+    box-shadow:0 0 0 .5px rgba(0,0,0,.18),0 4px 10px rgba(0,0,0,.12)}
+  .twk-chip[data-on="1"]{box-shadow:0 0 0 1.5px rgba(0,0,0,.85),
+    0 2px 6px rgba(0,0,0,.15)}
+  .twk-chip>span{position:absolute;top:0;bottom:0;right:0;width:34%;
+    display:flex;flex-direction:column;box-shadow:-1px 0 0 rgba(0,0,0,.1)}
+  .twk-chip>span>i{flex:1;box-shadow:0 -1px 0 rgba(0,0,0,.1)}
+  .twk-chip>span>i:first-child{box-shadow:none}
+  .twk-chip svg{position:absolute;top:6px;left:6px;width:13px;height:13px;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.3))}
+`;
+
+// ── useTweaks ───────────────────────────────────────────────────────────────
+// Single source of truth for tweak values. setTweak persists via the host
+// (__edit_mode_set_keys → host rewrites the EDITMODE block on disk).
+function useTweaks(defaults) {
+  const [values, setValues] = React.useState(defaults);
+  // Accepts either setTweak('key', value) or setTweak({ key: value, ... }) so a
+  // useState-style call doesn't write a "[object Object]" key into the persisted
+  // JSON block.
+  const setTweak = React.useCallback((keyOrEdits, val) => {
+    const edits = typeof keyOrEdits === 'object' && keyOrEdits !== null
+      ? keyOrEdits : { [keyOrEdits]: val };
+    setValues((prev) => ({ ...prev, ...edits }));
+    window.parent.postMessage({ type: '__edit_mode_set_keys', edits }, '*');
+    // Same-window signal so in-page listeners (deck-stage rail thumbnails)
+    // can react — the parent message only reaches the host, not peers.
+    window.dispatchEvent(new CustomEvent('tweakchange', { detail: edits }));
+  }, []);
+  return [values, setTweak];
+}
+
+// ── TweaksPanel ─────────────────────────────────────────────────────────────
+// Floating shell. Registers the protocol listener BEFORE announcing
+// availability — if the announce ran first, the host's activate could land
+// before our handler exists and the toolbar toggle would silently no-op.
+// The close button posts __edit_mode_dismissed so the host's toolbar toggle
+// flips off in lockstep; the host echoes __deactivate_edit_mode back which
+// is what actually hides the panel.
+function TweaksPanel({ title = 'Tweaks', noDeckControls = false, children }) {
+  const [open, setOpen] = React.useState(false);
+  const dragRef = React.useRef(null);
+  // Auto-inject a rail toggle when a <deck-stage> is on the page. The
+  // toggle drives the deck's per-viewer _railVisible via window message;
+  // state is mirrored from the same localStorage key the deck reads so
+  // the control reflects reality across reloads. The mechanism is the
+  // message — authors who want custom placement can post it directly
+  // and pass noDeckControls to suppress this one.
+  const hasDeckStage = React.useMemo(
+    () => typeof document !== 'undefined' && !!document.querySelector('deck-stage'),
+    [],
+  );
+  // Hide the toggle until the host has actually enabled the rail (the
+  // __omelette_rail_enabled window message, posted only when the
+  // omelette_deck_rail_enabled flag is on for this user). The initial read
+  // covers TweaksPanel mounting after the message already arrived; the
+  // listener covers the common case of mounting first.
+  const [railEnabled, setRailEnabled] = React.useState(
+    () => hasDeckStage && !!document.querySelector('deck-stage')?._railEnabled,
+  );
+  React.useEffect(() => {
+    if (!hasDeckStage || railEnabled) return undefined;
+    const onMsg = (e) => {
+      if (e.data && e.data.type === '__omelette_rail_enabled') setRailEnabled(true);
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [hasDeckStage, railEnabled]);
+  const [railVisible, setRailVisible] = React.useState(() => {
+    try { return localStorage.getItem('deck-stage.railVisible') !== '0'; } catch (e) { return true; }
+  });
+  const toggleRail = (on) => {
+    setRailVisible(on);
+    window.postMessage({ type: '__deck_rail_visible', on }, '*');
+  };
+  const offsetRef = React.useRef({ x: 16, y: 16 });
+  const PAD = 16;
+
+  const clampToViewport = React.useCallback(() => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const w = panel.offsetWidth, h = panel.offsetHeight;
+    const maxRight = Math.max(PAD, window.innerWidth - w - PAD);
+    const maxBottom = Math.max(PAD, window.innerHeight - h - PAD);
+    offsetRef.current = {
+      x: Math.min(maxRight, Math.max(PAD, offsetRef.current.x)),
+      y: Math.min(maxBottom, Math.max(PAD, offsetRef.current.y)),
+    };
+    panel.style.right = offsetRef.current.x + 'px';
+    panel.style.bottom = offsetRef.current.y + 'px';
+  }, []);
+
+  React.useEffect(() => {
+    if (!open) return;
+    clampToViewport();
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', clampToViewport);
+      return () => window.removeEventListener('resize', clampToViewport);
+    }
+    const ro = new ResizeObserver(clampToViewport);
+    ro.observe(document.documentElement);
+    return () => ro.disconnect();
+  }, [open, clampToViewport]);
+
+  React.useEffect(() => {
+    const onMsg = (e) => {
+      const t = e?.data?.type;
+      if (t === '__activate_edit_mode') setOpen(true);
+      else if (t === '__deactivate_edit_mode') setOpen(false);
+    };
+    window.addEventListener('message', onMsg);
+    window.parent.postMessage({ type: '__edit_mode_available' }, '*');
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const dismiss = () => {
+    setOpen(false);
+    window.parent.postMessage({ type: '__edit_mode_dismissed' }, '*');
+  };
+
+  const onDragStart = (e) => {
+    const panel = dragRef.current;
+    if (!panel) return;
+    const r = panel.getBoundingClientRect();
+    const sx = e.clientX, sy = e.clientY;
+    const startRight = window.innerWidth - r.right;
+    const startBottom = window.innerHeight - r.bottom;
+    const move = (ev) => {
+      offsetRef.current = {
+        x: startRight - (ev.clientX - sx),
+        y: startBottom - (ev.clientY - sy),
+      };
+      clampToViewport();
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  if (!open) return null;
+  return (
+    <>
+      <style>{__TWEAKS_STYLE}</style>
+      <div ref={dragRef} className="twk-panel" data-noncommentable=""
+           style={{ right: offsetRef.current.x, bottom: offsetRef.current.y }}>
+        <div className="twk-hd" onMouseDown={onDragStart}>
+          <b>{title}</b>
+          <button className="twk-x" aria-label="Close tweaks"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={dismiss}>✕</button>
+        </div>
+        <div className="twk-body">
+          {children}
+          {hasDeckStage && railEnabled && !noDeckControls && (
+            <TweakSection label="Deck">
+              <TweakToggle label="Thumbnail rail" value={railVisible} onChange={toggleRail} />
+            </TweakSection>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Layout helpers ──────────────────────────────────────────────────────────
+
+function TweakSection({ label, children }) {
+  return (
+    <>
+      <div className="twk-sect">{label}</div>
+      {children}
+    </>
+  );
+}
+
+function TweakRow({ label, value, children, inline = false }) {
+  return (
+    <div className={inline ? 'twk-row twk-row-h' : 'twk-row'}>
+      <div className="twk-lbl">
+        <span>{label}</span>
+        {value != null && <span className="twk-val">{value}</span>}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+function TweakSlider({ label, value, min = 0, max = 100, step = 1, unit = '', onChange }) {
+  return (
+    <TweakRow label={label} value={`${value}${unit}`}>
+      <input type="range" className="twk-slider" min={min} max={max} step={step}
+             value={value} onChange={(e) => onChange(Number(e.target.value))} />
+    </TweakRow>
+  );
+}
+
+function TweakToggle({ label, value, onChange }) {
+  return (
+    <div className="twk-row twk-row-h">
+      <div className="twk-lbl"><span>{label}</span></div>
+      <button type="button" className="twk-toggle" data-on={value ? '1' : '0'}
+              role="switch" aria-checked={!!value}
+              onClick={() => onChange(!value)}><i /></button>
+    </div>
+  );
+}
+
+function TweakRadio({ label, value, options, onChange }) {
+  const trackRef = React.useRef(null);
+  const [dragging, setDragging] = React.useState(false);
+  // The active value is read by pointer-move handlers attached for the lifetime
+  // of a drag — ref it so a stale closure doesn't fire onChange for every move.
+  const valueRef = React.useRef(value);
+  valueRef.current = value;
+
+  // Segments wrap mid-word once per-segment width runs out. The track is
+  // ~248px (280 panel − 28 body pad − 4 seg pad), each button loses 12px
+  // to its own padding, and 11.5px system-ui averages ~6.3px/char — so 2
+  // options fit ~16 chars each, 3 fit ~10. Past that (or >3 options), fall
+  // back to a dropdown rather than wrap.
+  const labelLen = (o) => String(typeof o === 'object' ? o.label : o).length;
+  const maxLen = options.reduce((m, o) => Math.max(m, labelLen(o)), 0);
+  const fitsAsSegments = maxLen <= ({ 2: 16, 3: 10 }[options.length] ?? 0);
+  if (!fitsAsSegments) {
+    // <select> emits strings — map back to the original option value so the
+    // fallback stays type-preserving (numbers, booleans) like the segment path.
+    const resolve = (s) => {
+      const m = options.find((o) => String(typeof o === 'object' ? o.value : o) === s);
+      return m === undefined ? s : typeof m === 'object' ? m.value : m;
+    };
+    return <TweakSelect label={label} value={value} options={options}
+                        onChange={(s) => onChange(resolve(s))} />;
+  }
+  const opts = options.map((o) => (typeof o === 'object' ? o : { value: o, label: o }));
+  const idx = Math.max(0, opts.findIndex((o) => o.value === value));
+  const n = opts.length;
+
+  const segAt = (clientX) => {
+    const r = trackRef.current.getBoundingClientRect();
+    const inner = r.width - 4;
+    const i = Math.floor(((clientX - r.left - 2) / inner) * n);
+    return opts[Math.max(0, Math.min(n - 1, i))].value;
+  };
+
+  const onPointerDown = (e) => {
+    setDragging(true);
+    const v0 = segAt(e.clientX);
+    if (v0 !== valueRef.current) onChange(v0);
+    const move = (ev) => {
+      if (!trackRef.current) return;
+      const v = segAt(ev.clientX);
+      if (v !== valueRef.current) onChange(v);
+    };
+    const up = () => {
+      setDragging(false);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  return (
+    <TweakRow label={label}>
+      <div ref={trackRef} role="radiogroup" onPointerDown={onPointerDown}
+           className={dragging ? 'twk-seg dragging' : 'twk-seg'}>
+        <div className="twk-seg-thumb"
+             style={{ left: `calc(2px + ${idx} * (100% - 4px) / ${n})`,
+                      width: `calc((100% - 4px) / ${n})` }} />
+        {opts.map((o) => (
+          <button key={o.value} type="button" role="radio" aria-checked={o.value === value}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakSelect({ label, value, options, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <select className="twk-field" value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => {
+          const v = typeof o === 'object' ? o.value : o;
+          const l = typeof o === 'object' ? o.label : o;
+          return <option key={v} value={v}>{l}</option>;
+        })}
+      </select>
+    </TweakRow>
+  );
+}
+
+function TweakText({ label, value, placeholder, onChange }) {
+  return (
+    <TweakRow label={label}>
+      <input className="twk-field" type="text" value={value} placeholder={placeholder}
+             onChange={(e) => onChange(e.target.value)} />
+    </TweakRow>
+  );
+}
+
+function TweakNumber({ label, value, min, max, step = 1, unit = '', onChange }) {
+  const clamp = (n) => {
+    if (min != null && n < min) return min;
+    if (max != null && n > max) return max;
+    return n;
+  };
+  const startRef = React.useRef({ x: 0, val: 0 });
+  const onScrubStart = (e) => {
+    e.preventDefault();
+    startRef.current = { x: e.clientX, val: value };
+    const decimals = (String(step).split('.')[1] || '').length;
+    const move = (ev) => {
+      const dx = ev.clientX - startRef.current.x;
+      const raw = startRef.current.val + dx * step;
+      const snapped = Math.round(raw / step) * step;
+      onChange(clamp(Number(snapped.toFixed(decimals))));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className="twk-num">
+      <span className="twk-num-lbl" onPointerDown={onScrubStart}>{label}</span>
+      <input type="number" value={value} min={min} max={max} step={step}
+             onChange={(e) => onChange(clamp(Number(e.target.value)))} />
+      {unit && <span className="twk-num-unit">{unit}</span>}
+    </div>
+  );
+}
+
+// Relative-luminance contrast pick — checkmarks drawn over a swatch need to
+// read on both #111 and #fafafa without per-option configuration. Hex input
+// only (#rgb / #rrggbb); named or rgb()/hsl() colors fall through to "light".
+function __twkIsLight(hex) {
+  const h = String(hex).replace('#', '');
+  const x = h.length === 3 ? h.replace(/./g, (c) => c + c) : h.padEnd(6, '0');
+  const n = parseInt(x.slice(0, 6), 16);
+  if (Number.isNaN(n)) return true;
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return r * 299 + g * 587 + b * 114 > 148000;
+}
+
+const __TwkCheck = ({ light }) => (
+  <svg viewBox="0 0 14 14" aria-hidden="true">
+    <path d="M3 7.2 5.8 10 11 4.2" fill="none" strokeWidth="2.2"
+          strokeLinecap="round" strokeLinejoin="round"
+          stroke={light ? 'rgba(0,0,0,.78)' : '#fff'} />
+  </svg>
+);
+
+// TweakColor — curated color/palette picker. Each option is either a single
+// hex string or an array of 1-5 hex strings; the card adapts — a lone color
+// renders solid, a palette renders colors[0] as the hero (left ~2/3) with the
+// rest stacked in a sharp column on the right. onChange emits the
+// option in the shape it was passed (string stays string, array stays array).
+// Without options it falls back to the native color input for back-compat.
+function TweakColor({ label, value, options, onChange }) {
+  if (!options || !options.length) {
+    return (
+      <div className="twk-row twk-row-h">
+        <div className="twk-lbl"><span>{label}</span></div>
+        <input type="color" className="twk-swatch" value={value}
+               onChange={(e) => onChange(e.target.value)} />
+      </div>
+    );
+  }
+  // Native <input type=color> emits lowercase hex per the HTML spec, so
+  // compare case-insensitively. String() guards JSON.stringify(undefined),
+  // which returns the primitive undefined (no .toLowerCase).
+  const key = (o) => String(JSON.stringify(o)).toLowerCase();
+  const cur = key(value);
+  return (
+    <TweakRow label={label}>
+      <div className="twk-chips" role="radiogroup">
+        {options.map((o, i) => {
+          const colors = Array.isArray(o) ? o : [o];
+          const [hero, ...rest] = colors;
+          const sup = rest.slice(0, 4);
+          const on = key(o) === cur;
+          return (
+            <button key={i} type="button" className="twk-chip" role="radio"
+                    aria-checked={on} data-on={on ? '1' : '0'}
+                    aria-label={colors.join(', ')} title={colors.join(' · ')}
+                    style={{ background: hero }}
+                    onClick={() => onChange(o)}>
+              {sup.length > 0 && (
+                <span>
+                  {sup.map((c, j) => <i key={j} style={{ background: c }} />)}
+                </span>
+              )}
+              {on && <__TwkCheck light={__twkIsLight(hero)} />}
+            </button>
+          );
+        })}
+      </div>
+    </TweakRow>
+  );
+}
+
+function TweakButton({ label, onClick, secondary = false }) {
+  return (
+    <button type="button" className={secondary ? 'twk-btn secondary' : 'twk-btn'}
+            onClick={onClick}>{label}</button>
+  );
+}
+
+Object.assign(window, {
+  useTweaks, TweaksPanel, TweakSection, TweakRow,
+  TweakSlider, TweakToggle, TweakRadio, TweakSelect,
+  TweakText, TweakNumber, TweakColor, TweakButton,
+});
+
+
+// ===== data.jsx =====
+// Mock data + helpers shared across screens.
+
+const TOTAL = {
+  followers: { value: 150, delta: 33 },
+  views: { value: 232600, delta: 12500 },
+  likes: { value: 3700, delta: 151 },
+  posts: { value: 1700, delta: 93 },
+  accounts: 163,
+};
+
+const PLATFORMS = [
+  { id: 'tiktok',    label: 'TikTok',     color: '#ff2d55', share: 0.62, accounts: 101 },
+  { id: 'instagram', label: 'Instagram',  color: '#ec4899', share: 0.18, accounts: 29 },
+  { id: 'youtube',   label: 'YouTube',    color: '#ff4444', share: 0.09, accounts: 14 },
+  { id: 'twitter',   label: 'X (Twitter)',color: '#dddddd', share: 0.05, accounts: 9 },
+  { id: 'threads',   label: 'Threads',    color: '#9aa0aa', share: 0.04, accounts: 7 },
+  { id: 'telegram',  label: 'Telegram',   color: '#26a5e4', share: 0.02, accounts: 3 },
+];
+
+const PROFILES = [
+  { id: 'fil',     label: 'Фил',         color: '#4ade80', accounts: 90 },
+  { id: 'sport',   label: 'Спорт Завод', color: '#fb923c', accounts: 14 },
+  { id: 'music',   label: 'Музыка',      color: '#ec4899', accounts: 58 },
+];
+
+const ACCOUNTS = [
+  { name: 'thecapitolverdict', handle: '@thecapitolverdict', platform: 'tiktok',    profile: 'fil',   followers: null, views: 14300, dViews: 1200, likes: 222, dLikes: 29, posts: 24, dPosts: 2,  updated: '07.05, 14:05' },
+  { name: 'capital.watch4',    handle: '@capital.watch4',    platform: 'tiktok',    profile: 'fil',   followers: null, views: 8800,  dViews: 545,  likes: 15,  dLikes: 0,  posts: 21, dPosts: 2,  updated: '07.05, 13:50' },
+  { name: 'yllazenspace',      handle: '@yllazenspace',      platform: 'tiktok',    profile: 'music', followers: null, views: 8700,  dViews: 589,  likes: 379, dLikes: 33, posts: 31, dPosts: 0,  updated: '07.05, 10:43' },
+  { name: 'yllazenx',          handle: '@yllazenx',          platform: 'tiktok',    profile: 'music', followers: 1,    views: 8100,  dViews: 402,  likes: 188, dLikes: 0,  posts: 23, dPosts: 1,  updated: '07.05, 13:33' },
+  { name: 'yllazen.music',     handle: '@yllazen.music',     platform: 'tiktok',    profile: 'music', followers: null, views: 8000,  dViews: 125,  likes: 101, dLikes: 1,  posts: 24, dPosts: 0,  updated: '07.05, 06:26' },
+  { name: 'yllazenera',        handle: '@yllazenera',        platform: 'tiktok',    profile: 'music', followers: null, views: 7700,  dViews: 269,  likes: 99,  dLikes: 1,  posts: 31, dPosts: 2,  updated: '07.05, 06:25' },
+  { name: 'yllazen.officiall', handle: '@yllazen.officiall', platform: 'tiktok',    profile: 'music', followers: null, views: 6800,  dViews: 97,   likes: 178, dLikes: 4,  posts: 27, dPosts: 1,  updated: '07.05, 06:27' },
+  { name: 'yllazensound',      handle: '@yllazensound',      platform: 'tiktok',    profile: 'music', followers: null, views: 6700,  dViews: 583,  likes: 145, dLikes: 3,  posts: 22, dPosts: 1,  updated: '07.05, 06:24' },
+  { name: 'saint_f1_news',     handle: '@saint_f1_news',     platform: 'tiktok',    profile: 'sport', followers: 5,    views: 6500,  dViews: 65,   likes: 454, dLikes: -1, posts: 11, dPosts: 1,  updated: '07.05, 06:08' },
+  { name: 'yllazenlab',        handle: '@yllazenlab',        platform: 'tiktok',    profile: 'music', followers: 2,    views: 6200,  dViews: 21,   likes: 224, dLikes: 1,  posts: 30, dPosts: 0,  updated: '07.05, 06:25' },
+  { name: 'phil.cuts',         handle: '@phil.cuts',         platform: 'tiktok',    profile: 'fil',   followers: 4,    views: 5900,  dViews: 0,    likes: 26,  dLikes: 0,  posts: 11, dPosts: 0,  updated: '07.05, 13:42' },
+  { name: 'phil.highlights6',  handle: '@phil.highlights6',  platform: 'tiktok',    profile: 'fil',   followers: 5,    views: 5400,  dViews: 1,    likes: 32,  dLikes: 0,  posts: 11, dPosts: 0,  updated: '07.05, 13:41' },
+  { name: 'phil.redpill',      handle: '@phil.redpill',      platform: 'instagram', profile: 'fil',   followers: 12,   views: 4800,  dViews: 354,  likes: 48,  dLikes: 6,  posts: 18, dPosts: 1,  updated: '07.05, 12:18' },
+  { name: 'phil.daily',        handle: '@phil.daily',        platform: 'youtube',   profile: 'fil',   followers: 8,    views: 4100,  dViews: 87,   likes: 22,  dLikes: 1,  posts: 9,  dPosts: 0,  updated: '07.05, 09:55' },
+];
+
+const POSTS = [
+  { handle: '@phil.redpill',     platform: 'instagram', date: '06.05.26', text: 'Uncensored truth. Search "Phil Godlewski" on Rumble.', delta: 354, views: 370, likes: 0,  er: 0.0 },
+  { handle: '@yllazenspace',     platform: 'tiktok',    date: '06.05.26', text: 'why is nobody talking about this — Ylla Zen — Light It Up', delta: 279, views: 324, likes: 17, er: 5.3 },
+  { handle: '@yllazenspace',     platform: 'tiktok',    date: '06.05.26', text: 'why is nobody talking about this — Ylla Zen — Light It Up', delta: 202, views: 210, likes: 9,  er: 4.3 },
+  { handle: '@yllazenera',       platform: 'tiktok',    date: '06.05.26', text: 'why is nobody talking about this save this one — Ylla Zen — You', delta: 179, views: 191, likes: 0,  er: 0.0 },
+  { handle: '@capital.watch4',   platform: 'tiktok',    date: '06.05.26', text: 'Uncensored truth. Search "Phil Godlewski" on Rumble.', delta: 135, views: 274, likes: 0,  er: 0.0 },
+  { handle: '@yllazensound',     platform: 'tiktok',    date: '06.05.26', text: "underrated banger alert — 'Secret.' by Ylla Zen", delta: 131, views: 317, likes: 2,  er: 0.6 },
+  { handle: '@thecapitolverdict',platform: 'instagram', date: '05.05.26', text: 'Uncensored truth. Search "Phil Godlewski" on Rumble.', delta: 127, views: 387, likes: 0,  er: 0.0 },
+  { handle: '@yllazen.music',    platform: 'tiktok',    date: '06.05.26', text: "POV: you just found Ylla Zen's 'Silence' before everyone else", delta: 121, views: 318, likes: 3,  er: 0.9 },
+];
+
+// 24h sparkline samples
+const TREND_24H = [120,140,135,180,210,250,230,260,310,360,340,380,420,460,440,490,520,580,610,640,680,720,760,810];
+const TREND_7D  = [3200,3800,4100,4400,4800,5200,5600];
+
+function fmt(n){
+  if (n == null) return '—';
+  if (Math.abs(n) >= 1000000) return (n/1000000).toFixed(1).replace('.0','') + 'M';
+  if (Math.abs(n) >= 1000) return (n/1000).toFixed(1).replace('.0','') + 'K';
+  return String(n);
+}
+function fmtSign(n){ if (n == null) return ''; return (n > 0 ? '+' : '') + fmt(n); }
+
+const PLATFORM_META = Object.fromEntries(PLATFORMS.map(p => [p.id, p]));
+const PROFILE_META  = Object.fromEntries(PROFILES.map(p  => [p.id, p]));
+
+Object.assign(window, { TOTAL, PLATFORMS, PROFILES, ACCOUNTS, POSTS, TREND_24H, TREND_7D, fmt, fmtSign, PLATFORM_META, PROFILE_META });
+
+
+// ===== atomic.jsx =====
+// Atomic-themed visual primitives: orbits, particles, sparklines, dials, tickers.
+// Uses pure SVG/CSS for crisp scaling on TVs.
+
+const { useEffect, useRef, useState, useMemo } = React;
+
+// ────────────────────────────────────────────────────────────
+// Orbit system: a nucleus surrounded by rotating particles. Used as the
+// hero metaphor — each orbit ring represents a metric (followers/views/likes/posts).
+// ────────────────────────────────────────────────────────────
+function OrbitSystem({ size = 720, rings, label, value, sub, color = '#6aa9ff' }) {
+  const cx = size / 2, cy = size / 2;
+  return (
+    <svg viewBox={`0 0 ${size} ${size}`} style={{ width: '100%', height: '100%', display: 'block' }}>
+      <defs>
+        <radialGradient id="nuc-glow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor={color} stopOpacity="0.65" />
+          <stop offset="60%" stopColor={color} stopOpacity="0.08" />
+          <stop offset="100%" stopColor={color} stopOpacity="0" />
+        </radialGradient>
+        <filter id="nuc-blur"><feGaussianBlur stdDeviation="3" /></filter>
+      </defs>
+      {/* Nucleus glow */}
+      <circle cx={cx} cy={cy} r={size * 0.18} fill="url(#nuc-glow)" />
+      {/* Rings */}
+      {rings.map((r, i) => {
+        const rx = r.rx * (size / 720);
+        const ry = r.ry * (size / 720);
+        const dur = r.dur || (28 + i * 6);
+        const rot = r.rot || 0;
+        return (
+          <g key={i} transform={`rotate(${rot} ${cx} ${cy})`}>
+            <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill="none" stroke={r.color || color} strokeOpacity={r.opacity ?? 0.28} strokeWidth="1" strokeDasharray={r.dash || ''} />
+            {/* particle */}
+            <g>
+              <animateTransform attributeName="transform" type="rotate" from={`0 ${cx} ${cy}`} to={`360 ${cx} ${cy}`} dur={`${dur}s`} repeatCount="indefinite" />
+              <circle cx={cx + rx} cy={cy} r={r.particleR || 5} fill={r.color || color}>
+                <animate attributeName="r" values={`${(r.particleR||5)*0.7};${(r.particleR||5)*1.1};${(r.particleR||5)*0.7}`} dur="2.4s" repeatCount="indefinite" />
+              </circle>
+              <circle cx={cx + rx} cy={cy} r={(r.particleR || 5) * 2.4} fill={r.color || color} opacity="0.18" filter="url(#nuc-blur)" />
+            </g>
+          </g>
+        );
+      })}
+      {/* Nucleus core */}
+      <circle cx={cx} cy={cy} r={size * 0.04} fill={color} />
+      <circle cx={cx} cy={cy} r={size * 0.025} fill="#fff" opacity="0.9" />
+      {/* Center label */}
+      {label && (
+        <g>
+          <text x={cx} y={cy - size * 0.13} textAnchor="middle" fill="rgba(255,255,255,0.5)" fontFamily="JetBrains Mono, monospace" fontSize={size * 0.022} letterSpacing="0.2em">{label}</text>
+        </g>
+      )}
+      {value && (
+        <text x={cx} y={cy + size * 0.32} textAnchor="middle" fill="#fff" fontFamily="Space Grotesk, sans-serif" fontWeight="700" fontSize={size * 0.075}>{value}</text>
+      )}
+      {sub && (
+        <text x={cx} y={cy + size * 0.38} textAnchor="middle" fill={color} fontFamily="JetBrains Mono, monospace" fontSize={size * 0.028}>{sub}</text>
+      )}
+    </svg>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Sparkline — minimalist, atomic, with optional area fill.
+// ────────────────────────────────────────────────────────────
+function Sparkline({ data, color = '#6aa9ff', width = 240, height = 60, fill = true, dot = true, strokeWidth = 1.6 }) {
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = Math.max(1, max - min);
+  const stepX = width / (data.length - 1);
+  const points = data.map((v, i) => [i * stepX, height - ((v - min) / range) * (height - 6) - 3]);
+  const path = points.map((p, i) => (i === 0 ? `M${p[0].toFixed(1)},${p[1].toFixed(1)}` : `L${p[0].toFixed(1)},${p[1].toFixed(1)}`)).join(' ');
+  const areaPath = `${path} L${width},${height} L0,${height} Z`;
+  const last = points[points.length - 1];
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} style={{ display: 'block' }} width={width} height={height} preserveAspectRatio="none">
+      {fill && (
+        <>
+          <defs>
+            <linearGradient id={`sparkfill-${color.replace('#','')}`} x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.35" />
+              <stop offset="100%" stopColor={color} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path d={areaPath} fill={`url(#sparkfill-${color.replace('#','')})`} />
+        </>
+      )}
+      <path d={path} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+      {dot && <circle cx={last[0]} cy={last[1]} r={3} fill={color} stroke="#0a0c12" strokeWidth="2" />}
+    </svg>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Radial dial — used for percentages or composition.
+// ────────────────────────────────────────────────────────────
+function RadialDial({ value = 0.5, size = 120, color = '#6aa9ff', track = 'rgba(255,255,255,0.06)', strokeWidth = 8, label, sub }) {
+  const r = (size - strokeWidth) / 2;
+  const c = 2 * Math.PI * r;
+  const offset = c * (1 - value);
+  return (
+    <div style={{ position: 'relative', width: size, height: size }}>
+      <svg viewBox={`0 0 ${size} ${size}`} width={size} height={size} style={{ transform: 'rotate(-90deg)' }}>
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={track} strokeWidth={strokeWidth} />
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeDasharray={c} strokeDashoffset={offset} style={{ transition: 'stroke-dashoffset 1.2s cubic-bezier(.4,0,.2,1)' }} />
+      </svg>
+      <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', textAlign: 'center' }}>
+        {label && <div style={{ fontFamily: 'Space Grotesk', fontWeight: 700, fontSize: size * 0.22, color: '#fff', lineHeight: 1 }}>{label}</div>}
+        {sub && <div className="mono" style={{ fontSize: size * 0.09, color: 'rgba(255,255,255,0.5)', marginTop: 4, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Particle field background — ambient atomic dust.
+// ────────────────────────────────────────────────────────────
+function ParticleField({ count = 60, color = '#6aa9ff', opacity = 0.5 }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let raf;
+    const resize = () => {
+      const r = canvas.getBoundingClientRect();
+      canvas.width = r.width * devicePixelRatio;
+      canvas.height = r.height * devicePixelRatio;
+      ctx.scale(devicePixelRatio, devicePixelRatio);
+    };
+    resize();
+    window.addEventListener('resize', resize);
+    const particles = Array.from({ length: count }, () => ({
+      x: Math.random(),
+      y: Math.random(),
+      vx: (Math.random() - 0.5) * 0.0006,
+      vy: (Math.random() - 0.5) * 0.0006,
+      r: Math.random() * 1.2 + 0.3,
+      a: Math.random() * 0.5 + 0.15,
+    }));
+    const tick = () => {
+      const w = canvas.width / devicePixelRatio, h = canvas.height / devicePixelRatio;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = color;
+      particles.forEach(p => {
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0 || p.x > 1) p.vx *= -1;
+        if (p.y < 0 || p.y > 1) p.vy *= -1;
+        ctx.globalAlpha = p.a * opacity;
+        ctx.beginPath();
+        ctx.arc(p.x * w, p.y * h, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', resize); };
+  }, [count, color, opacity]);
+  return <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }} />;
+}
+
+// ────────────────────────────────────────────────────────────
+// AtomicGrid — subtle technical grid background.
+// ────────────────────────────────────────────────────────────
+function AtomicGrid({ opacity = 0.05, size = 48 }) {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, pointerEvents: 'none',
+      backgroundImage: `linear-gradient(rgba(255,255,255,${opacity}) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,${opacity}) 1px, transparent 1px)`,
+      backgroundSize: `${size}px ${size}px`,
+      maskImage: 'radial-gradient(ellipse at center, #000 30%, transparent 80%)',
+      WebkitMaskImage: 'radial-gradient(ellipse at center, #000 30%, transparent 80%)',
+    }} />
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Animated count-up
+// ────────────────────────────────────────────────────────────
+function useCountUp(target, duration = 1200) {
+  const [v, setV] = useState(0);
+  const startRef = useRef(0);
+  const fromRef = useRef(0);
+  useEffect(() => {
+    fromRef.current = v;
+    startRef.current = performance.now();
+    let raf;
+    const tick = (t) => {
+      const p = Math.min(1, (t - startRef.current) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setV(fromRef.current + (target - fromRef.current) * eased);
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+    // eslint-disable-next-line
+  }, [target]);
+  return v;
+}
+
+// ────────────────────────────────────────────────────────────
+// PlatformGlyph — atomic-style platform pill (replaces brand icons).
+// We use a neutral letter glyph + colored dot to avoid recreating brand marks.
+// ────────────────────────────────────────────────────────────
+function PlatformGlyph({ id, size = 18 }) {
+  const meta = PLATFORM_META[id];
+  if (!meta) return null;
+  const letter = meta.label.charAt(0);
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      fontFamily: 'JetBrains Mono, monospace', fontSize: size * 0.7, letterSpacing: '0.05em',
+    }}>
+      <span style={{
+        width: size, height: size, borderRadius: 4, background: 'rgba(255,255,255,0.04)',
+        border: `1px solid ${meta.color}55`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        color: meta.color, fontWeight: 700,
+      }}>{letter}</span>
+      {meta.label}
+    </span>
+  );
+}
+
+function ProfileBadge({ id, dense = false }) {
+  const p = PROFILE_META[id];
+  if (!p) return null;
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6, padding: dense ? '2px 8px' : '4px 10px',
+      borderRadius: 999, background: `${p.color}1a`, color: p.color, fontSize: 12, fontWeight: 500,
+      border: `1px solid ${p.color}33`,
+    }}>
+      <span style={{ width: 6, height: 6, borderRadius: 999, background: p.color }} />
+      {p.label}
+    </span>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Stat tile with delta
+// ────────────────────────────────────────────────────────────
+function StatTile({ label, value, delta, color = '#6aa9ff', size = 'lg', spark }) {
+  const sizes = {
+    sm:  { label: 11, value: 28, delta: 13, pad: 16, lh: 1 },
+    md:  { label: 12, value: 44, delta: 15, pad: 20, lh: 1 },
+    lg:  { label: 13, value: 72, delta: 18, pad: 28, lh: 1 },
+    xl:  { label: 14, value: 124, delta: 22, pad: 36, lh: 0.95 },
+    xxl: { label: 16, value: 168, delta: 26, pad: 44, lh: 0.92 },
+  };
+  const s = sizes[size];
+  return (
+    <div style={{
+      position: 'relative', padding: s.pad, borderRadius: 16,
+      background: 'linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.01))',
+      border: '1px solid var(--line)', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${color}, transparent)`, opacity: 0.5 }} />
+      <div className="mono" style={{ fontSize: s.label, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.18em' }}>{label}</div>
+      <div className="tnum" style={{ fontSize: s.value, fontWeight: 700, color: '#fff', lineHeight: s.lh, marginTop: 8, letterSpacing: '-0.02em' }}>{value}</div>
+      {delta != null && (
+        <div className="mono tnum" style={{ marginTop: 8, fontSize: s.delta, color: delta >= 0 ? 'var(--accent-2)' : 'var(--danger)', fontWeight: 500 }}>
+          {delta >= 0 ? '▲' : '▼'} {delta >= 0 ? '+' : ''}{fmt(delta)} <span style={{ color: 'var(--ink-mute)', fontWeight: 400 }}>/24h</span>
+        </div>
+      )}
+      {spark && <div style={{ marginTop: 12, opacity: 0.9 }}>{spark}</div>}
+    </div>
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Section header (used across screens)
+// ────────────────────────────────────────────────────────────
+function SectionHeader({ kicker, title, right }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', marginBottom: 18 }}>
+      <div>
+        {kicker && <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', textTransform: 'uppercase', letterSpacing: '0.22em', marginBottom: 6 }}>{kicker}</div>}
+        <div style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{title}</div>
+      </div>
+      {right}
+    </div>
+  );
+}
+
+Object.assign(window, { OrbitSystem, Sparkline, RadialDial, ParticleField, AtomicGrid, useCountUp, PlatformGlyph, ProfileBadge, StatTile, SectionHeader });
+
+
+// ===== screen-tv.jsx =====
+// TV broadcast screen — auto-cycling fullscreen views.
+// Three "scenes": Hero Atom, Platform Constellation, Top Accounts Leaderboard.
+// All-data, no-input, transitions between scenes every 12s.
+
+const { useEffect: useEffectTV, useState: useStateTV, useRef: useRefTV, useMemo: useMemoTV } = React;
+
+function TVScreen({ tweaks, onExit }) {
+  const mood = tweaks.tv_mood || 'mission';   // mission | bloomberg | calm
+  const accent = tweaks.accent || '#6aa9ff';
+  const accentSecondary = '#4ade80';
+
+  const [scene, setScene] = useStateTV(0);
+  const [now, setNow] = useStateTV(new Date());
+  const [pulse, setPulse] = useStateTV(0);
+
+  const SCENES = ['atom', 'pulse', 'top'];
+
+  useEffectTV(() => {
+    const id = setInterval(() => setScene(s => (s + 1) % SCENES.length), 14000);
+    return () => clearInterval(id);
+  }, []);
+  useEffectTV(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  useEffectTV(() => {
+    const id = setInterval(() => setPulse(p => p + 1), 2200);
+    return () => clearInterval(id);
+  }, []);
+
+  const moodTone = mood === 'bloomberg'
+    ? { bg: '#000', accent: '#ffb000', surface: 'rgba(255,255,255,0.02)' }
+    : mood === 'calm'
+    ? { bg: '#070a10', accent: '#a8c9ff', surface: 'rgba(255,255,255,0.02)' }
+    : { bg: '#050608', accent: accent, surface: 'rgba(255,255,255,0.025)' };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: moodTone.bg, color: '#fff', overflow: 'hidden', fontFamily: 'Space Grotesk, sans-serif' }} data-screen-label="TV Broadcast">
+      <ParticleField count={mood === 'calm' ? 80 : 50} color={moodTone.accent} opacity={mood === 'bloomberg' ? 0.25 : 0.6} />
+      <AtomicGrid opacity={mood === 'bloomberg' ? 0.025 : 0.04} size={64} />
+
+      <TVHeader now={now} accent={moodTone.accent} mood={mood} onExit={onExit} />
+
+      <div style={{ position: 'absolute', top: 110, left: 0, right: 0, bottom: 110 }}>
+        <SceneSwitch scene={SCENES[scene]} accent={moodTone.accent} mood={mood} pulse={pulse} />
+      </div>
+
+      <TVTicker accent={moodTone.accent} />
+      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} />
+    </div>
+  );
+}
+
+// ── Header: brand, time, autoupdate state ──────────────────
+function TVHeader({ now, accent, mood, onExit }) {
+  const t = now.toTimeString().slice(0, 8);
+  const d = now.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', weekday: 'long' });
+  return (
+    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, padding: '32px 56px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', zIndex: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+        <AtomLogo size={44} accent={accent} />
+        <div>
+          <div style={{ fontSize: 26, fontWeight: 600, letterSpacing: '-0.01em' }}>AccountsStats <span style={{ color: accent }}>/</span> Live</div>
+          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.18em', textTransform: 'uppercase', marginTop: 2 }}>BROADCAST · 163 ACCOUNTS · 6 PLATFORMS</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 32 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ width: 9, height: 9, borderRadius: 999, background: accent, boxShadow: `0 0 14px ${accent}` }} className="pulse-dot" />
+          <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)', letterSpacing: '0.2em' }}>AUTO · 06:00 / 12:00 / 18:00</span>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div className="mono tnum" style={{ fontSize: 30, fontWeight: 500, color: '#fff', letterSpacing: '0.02em' }}>{t}</div>
+          <div className="mono" style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', letterSpacing: '0.18em', textTransform: 'uppercase', marginTop: 2 }}>{d} · MSK</div>
+        </div>
+        <button onClick={onExit} style={{
+          padding: '10px 18px', borderRadius: 999, background: 'rgba(255,255,255,0.04)',
+          border: '1px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.7)',
+          fontSize: 12, letterSpacing: '0.16em', textTransform: 'uppercase', cursor: 'pointer',
+          fontFamily: 'JetBrains Mono, monospace',
+        }}>Exit TV</button>
+      </div>
+      <style>{`
+        .pulse-dot { animation: pulseDot 1.6s ease-in-out infinite; }
+        @keyframes pulseDot { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
+      `}</style>
+    </div>
+  );
+}
+
+function AtomLogo({ size = 44, accent = '#6aa9ff' }) {
+  return (
+    <svg viewBox="0 0 100 100" width={size} height={size}>
+      <ellipse cx="50" cy="50" rx="42" ry="16" fill="none" stroke={accent} strokeWidth="1.5" opacity="0.7" />
+      <ellipse cx="50" cy="50" rx="42" ry="16" fill="none" stroke={accent} strokeWidth="1.5" opacity="0.7" transform="rotate(60 50 50)" />
+      <ellipse cx="50" cy="50" rx="42" ry="16" fill="none" stroke={accent} strokeWidth="1.5" opacity="0.7" transform="rotate(-60 50 50)" />
+      <circle cx="50" cy="50" r="6" fill={accent} />
+      <circle cx="50" cy="50" r="3" fill="#fff" />
+    </svg>
+  );
+}
+
+// ── Scene switcher ─────────────────────────────────────────
+function SceneSwitch({ scene, accent, mood, pulse }) {
+  return (
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div key={scene} style={{ position: 'absolute', inset: 0, animation: 'sceneIn .9s cubic-bezier(.4,0,.2,1)' }}>
+        {scene === 'atom' && <SceneAtom accent={accent} mood={mood} />}
+        {scene === 'pulse' && <ScenePulse accent={accent} mood={mood} pulse={pulse} />}
+        {scene === 'top' && <SceneTop accent={accent} mood={mood} />}
+      </div>
+      <style>{`
+        @keyframes sceneIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+      `}</style>
+    </div>
+  );
+}
+
+// ── SCENE 1: Hero atom + 4 totals around ───────────────────
+function SceneAtom({ accent, mood }) {
+  const orbits = [
+    { rx: 220, ry: 80,  rot: 0,    color: '#4ade80', opacity: 0.5, dur: 32, particleR: 9 },
+    { rx: 220, ry: 80,  rot: 60,   color: '#ec4899', opacity: 0.5, dur: 26, particleR: 8 },
+    { rx: 220, ry: 80,  rot: -60,  color: '#f59e0b', opacity: 0.5, dur: 38, particleR: 7 },
+    { rx: 290, ry: 110, rot: 30,   color: accent,   opacity: 0.3, dur: 48, particleR: 5, dash: '2 8' },
+  ];
+  const items = [
+    { label: 'ПОДПИСЧИКИ',  value: TOTAL.followers.value,  delta: TOTAL.followers.delta,  color: '#4ade80', spark: TREND_24H.map(v => v * 0.18) },
+    { label: 'ПРОСМОТРЫ',   value: TOTAL.views.value,      delta: TOTAL.views.delta,      color: '#ec4899', spark: TREND_24H },
+    { label: 'ЛАЙКИ',       value: TOTAL.likes.value,      delta: TOTAL.likes.delta,      color: '#f59e0b', spark: TREND_24H.map(v => v * 0.5) },
+    { label: 'ПУБЛИКАЦИИ',  value: TOTAL.posts.value,      delta: TOTAL.posts.delta,      color: accent,    spark: TREND_24H.map(v => v * 0.3) },
+  ];
+  return (
+    <div style={{ width: '100%', height: '100%', display: 'grid', gridTemplateColumns: '1fr 1.3fr 1fr', gridTemplateRows: '1fr 1fr', gap: 28, padding: '0 56px' }}>
+      {/* Top-left */}
+      <BigStat {...items[0]} align="right" />
+      {/* Center spans both rows */}
+      <div style={{ gridRow: '1 / span 2', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ width: 720, height: 720, maxWidth: '100%', maxHeight: '100%' }}>
+          <OrbitSystem size={720} rings={orbits} color={accent}
+            label="TOTAL ENGAGEMENT"
+            value={fmt(TOTAL.views.value + TOTAL.likes.value + TOTAL.posts.value)}
+            sub={`+${fmt(TOTAL.views.delta + TOTAL.likes.delta + TOTAL.posts.delta)} / 24H`}
+          />
+        </div>
+        <div style={{ position: 'absolute', bottom: -10, left: 0, right: 0, textAlign: 'center' }}>
+          <div className="mono" style={{ fontSize: 11, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.3em' }}>NUCLEUS · 163 ACCOUNTS</div>
+        </div>
+      </div>
+      {/* Top-right */}
+      <BigStat {...items[1]} align="left" />
+      {/* Bottom-left */}
+      <BigStat {...items[2]} align="right" />
+      {/* Bottom-right */}
+      <BigStat {...items[3]} align="left" />
+    </div>
+  );
+}
+
+function BigStat({ label, value, delta, color, spark, align }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', justifyContent: 'center',
+      padding: '28px 36px', borderRadius: 20,
+      background: 'linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.005))',
+      border: '1px solid rgba(255,255,255,0.06)',
+      textAlign: align === 'right' ? 'right' : 'left',
+      position: 'relative', overflow: 'hidden',
+    }}>
+      <div className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em' }}>{label}</div>
+      <div className="tnum" style={{ fontSize: 96, fontWeight: 700, color: '#fff', lineHeight: 0.95, letterSpacing: '-0.03em', marginTop: 8 }}>{fmt(value)}</div>
+      <div className="mono tnum" style={{ marginTop: 8, fontSize: 22, color: color, fontWeight: 500 }}>
+        ▲ +{fmt(delta)} <span style={{ color: 'rgba(255,255,255,0.35)', fontWeight: 400 }}>/24H</span>
+      </div>
+      <div style={{ marginTop: 14, height: 50, display: 'flex', justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>
+        <Sparkline data={spark} color={color} width={280} height={50} />
+      </div>
+    </div>
+  );
+}
+
+// ── SCENE 2: Pulse / dynamics — sparklines per platform & profile ──
+function ScenePulse({ accent, mood, pulse }) {
+  return (
+    <div style={{ width: '100%', height: '100%', padding: '0 56px', display: 'grid', gridTemplateColumns: '1.4fr 1fr', gap: 28 }}>
+      {/* Left: big trend chart */}
+      <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 32, display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em' }}>VIEWS · LAST 24H</div>
+            <div className="tnum" style={{ fontSize: 88, fontWeight: 700, marginTop: 8, lineHeight: 0.95, letterSpacing: '-0.03em' }}>+{fmt(TOTAL.views.delta)}</div>
+            <div className="mono" style={{ fontSize: 16, color: '#4ade80', marginTop: 6 }}>▲ 5.7% vs prev. day</div>
+          </div>
+          <div style={{ display: 'flex', gap: 24 }}>
+            {[
+              { k: 'PEAK', v: '14:00', c: accent },
+              { k: 'TROUGH', v: '04:00', c: 'rgba(255,255,255,0.4)' },
+              { k: 'AVG/H', v: '521', c: '#4ade80' },
+            ].map(s => (
+              <div key={s.k} style={{ textAlign: 'right' }}>
+                <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.4)', letterSpacing: '0.24em' }}>{s.k}</div>
+                <div className="tnum" style={{ fontSize: 22, fontWeight: 600, color: s.c, marginTop: 2 }}>{s.v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{ flex: 1, marginTop: 24, position: 'relative', minHeight: 0 }}>
+          <BigChart accent={accent} />
+        </div>
+      </div>
+      {/* Right: per-platform pulses */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 4 }}>PLATFORM PULSE</div>
+        {PLATFORMS.slice(0, 5).map((p, i) => {
+          const value = Math.round(TOTAL.views.delta * p.share);
+          const data = TREND_24H.map((v, idx) => v * (p.share + 0.4) + Math.sin(idx + i) * 30);
+          return (
+            <div key={p.id} style={{
+              display: 'grid', gridTemplateColumns: '110px 1fr 110px', alignItems: 'center', gap: 16,
+              padding: '14px 18px', borderRadius: 14, background: 'rgba(255,255,255,0.015)',
+              border: '1px solid rgba(255,255,255,0.05)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 999, background: p.color, boxShadow: `0 0 10px ${p.color}` }} />
+                <span style={{ fontSize: 15, fontWeight: 500 }}>{p.label}</span>
+              </div>
+              <div style={{ height: 32 }}><Sparkline data={data} color={p.color} width={300} height={32} dot={false} fill /></div>
+              <div className="mono tnum" style={{ fontSize: 18, color: p.color, textAlign: 'right', fontWeight: 600 }}>+{fmt(value)}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function BigChart({ accent }) {
+  const w = 800, h = 320;
+  const data = TREND_24H;
+  const max = Math.max(...data);
+  const stepX = w / (data.length - 1);
+  const points = data.map((v, i) => [i * stepX, h - (v / max) * (h - 30) - 10]);
+  const path = points.map((p, i) => i === 0 ? `M${p[0]},${p[1]}` : `L${p[0]},${p[1]}`).join(' ');
+  const areaPath = `${path} L${w},${h} L0,${h} Z`;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: '100%', height: '100%' }}>
+      <defs>
+        <linearGradient id="bigfill" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={accent} stopOpacity="0.5" />
+          <stop offset="100%" stopColor={accent} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {/* gridlines */}
+      {[0.25, 0.5, 0.75].map(y => (
+        <line key={y} x1="0" x2={w} y1={h * y} y2={h * y} stroke="rgba(255,255,255,0.05)" strokeDasharray="2 6" />
+      ))}
+      {/* hour labels */}
+      {[0, 6, 12, 18, 23].map(i => (
+        <text key={i} x={i * stepX} y={h - 2} fill="rgba(255,255,255,0.3)" fontSize="10" fontFamily="JetBrains Mono, monospace">{String(i).padStart(2, '0')}:00</text>
+      ))}
+      <path d={areaPath} fill="url(#bigfill)" />
+      <path d={path} fill="none" stroke={accent} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+      {/* peak dot */}
+      <circle cx={points[points.length - 1][0]} cy={points[points.length - 1][1]} r="6" fill={accent} stroke="#050608" strokeWidth="3">
+        <animate attributeName="r" values="6;9;6" dur="1.6s" repeatCount="indefinite" />
+      </circle>
+    </svg>
+  );
+}
+
+// ── SCENE 3: Top accounts leaderboard ──────────────────────
+function SceneTop({ accent }) {
+  const top = [...ACCOUNTS].sort((a, b) => b.dViews - a.dViews).slice(0, 8);
+  const max = top[0].dViews;
+  return (
+    <div style={{ width: '100%', height: '100%', padding: '0 56px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
+      {/* Leaderboard list */}
+      <div>
+        <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 18 }}>TOP MOVERS · 24H · BY VIEW DELTA</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {top.map((a, i) => {
+            const w = (a.dViews / max) * 100;
+            const meta = PLATFORM_META[a.platform];
+            const prof = PROFILE_META[a.profile];
+            return (
+              <div key={a.handle} style={{
+                position: 'relative', padding: '14px 20px', borderRadius: 14,
+                background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)',
+                overflow: 'hidden',
+              }}>
+                <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(90deg, ${prof.color}22, transparent ${Math.min(95, w + 20)}%)`, opacity: 0.7 }} />
+                <div style={{ position: 'relative', display: 'grid', gridTemplateColumns: '36px 1fr auto auto', alignItems: 'center', gap: 16 }}>
+                  <div className="mono tnum" style={{ fontSize: 22, fontWeight: 700, color: i < 3 ? accent : 'rgba(255,255,255,0.45)' }}>{String(i + 1).padStart(2, '0')}</div>
+                  <div>
+                    <div style={{ fontSize: 19, fontWeight: 500 }}>{a.handle}</div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
+                      <span className="mono" style={{ fontSize: 11, color: meta.color, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{meta.label}</span>
+                      <span style={{ width: 3, height: 3, borderRadius: 999, background: 'rgba(255,255,255,0.3)' }} />
+                      <span className="mono" style={{ fontSize: 11, color: prof.color, letterSpacing: '0.1em' }}>{prof.label}</span>
+                    </div>
+                  </div>
+                  <div className="mono tnum" style={{ fontSize: 18, color: 'rgba(255,255,255,0.65)', textAlign: 'right', minWidth: 64 }}>{fmt(a.views)}</div>
+                  <div className="mono tnum" style={{ fontSize: 22, color: '#4ade80', fontWeight: 600, textAlign: 'right', minWidth: 90 }}>+{fmt(a.dViews)}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Right column: distribution + profiles */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 28 }}>
+          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 18 }}>BY PROFILE</div>
+          <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center' }}>
+            {PROFILES.map(p => (
+              <div key={p.id} style={{ textAlign: 'center' }}>
+                <RadialDial value={p.accounts / 162} size={140} color={p.color} label={p.accounts} sub={p.label} />
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 28, flex: 1 }}>
+          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 18 }}>PLATFORM DISTRIBUTION</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {PLATFORMS.map(p => (
+              <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 60px', alignItems: 'center', gap: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color }} />
+                  <span style={{ fontSize: 14 }}>{p.label}</span>
+                </div>
+                <div style={{ height: 8, borderRadius: 2, background: 'rgba(255,255,255,0.04)', overflow: 'hidden', position: 'relative' }}>
+                  <div style={{ position: 'absolute', inset: 0, width: `${p.share * 100}%`, background: p.color, opacity: 0.85 }} />
+                </div>
+                <div className="mono tnum" style={{ fontSize: 14, color: 'rgba(255,255,255,0.6)', textAlign: 'right' }}>{p.accounts}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Bottom ticker ──────────────────────────────────────────
+function TVTicker({ accent }) {
+  const items = useMemoTV(() => {
+    return ACCOUNTS.filter(a => a.dViews > 0).slice(0, 10).map(a => `${a.handle} +${fmt(a.dViews)} VIEWS`);
+  }, []);
+  return (
+    <div style={{ position: 'absolute', bottom: 28, left: 0, right: 0, display: 'flex', alignItems: 'center', gap: 20, padding: '0 56px' }}>
+      <div style={{ flexShrink: 0, padding: '8px 14px', borderRadius: 999, background: accent, color: '#000', fontSize: 11, fontWeight: 700, letterSpacing: '0.18em', fontFamily: 'JetBrains Mono, monospace' }}>LIVE</div>
+      <div style={{ flex: 1, overflow: 'hidden', maskImage: 'linear-gradient(90deg, transparent, #000 5%, #000 95%, transparent)' }}>
+        <div className="mono" style={{ display: 'flex', gap: 48, whiteSpace: 'nowrap', animation: 'tickerScroll 80s linear infinite', fontSize: 15, color: 'rgba(255,255,255,0.7)', letterSpacing: '0.06em' }}>
+          {[...items, ...items, ...items].map((it, i) => (
+            <span key={i} style={{ display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ color: accent }}>◆</span> {it}
+            </span>
+          ))}
+        </div>
+      </div>
+      <style>{`
+        @keyframes tickerScroll { from { transform: translateX(0); } to { transform: translateX(-33.333%); } }
+      `}</style>
+    </div>
+  );
+}
+
+function TVSceneIndicator({ total, current, accent }) {
+  return (
+    <div style={{ position: 'absolute', top: 110, right: 56, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+      {Array.from({ length: total }).map((_, i) => (
+        <div key={i} style={{
+          width: i === current ? 32 : 12, height: 3, borderRadius: 2,
+          background: i === current ? accent : 'rgba(255,255,255,0.15)',
+          transition: 'all 0.4s ease',
+        }} />
+      ))}
+      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.2em', marginTop: 6 }}>SCENE {current + 1}/{total}</div>
+    </div>
+  );
+}
+
+Object.assign(window, { TVScreen });
+
+
+// ===== screen-accounts.jsx =====
+// Accounts list screen — atomic-themed redesign of the table view.
+
+const { useState: useStateAcc, useMemo: useMemoAcc } = React;
+
+function AccountsScreen({ tweaks }) {
+  const accent = tweaks.accent || '#6aa9ff';
+  const view = tweaks.accounts_view || 'table'; // table | cards
+  const [platform, setPlatform] = useStateAcc('all');
+  const [profile, setProfile] = useStateAcc('all');
+  const [status, setStatus] = useStateAcc('all');
+  const [tab, setTab] = useStateAcc('accounts');
+
+  const filtered = useMemoAcc(() => {
+    return ACCOUNTS.filter(a =>
+      (platform === 'all' || a.platform === platform) &&
+      (profile === 'all' || a.profile === profile)
+    );
+  }, [platform, profile]);
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }} data-screen-label="Accounts List">
+      <TopBar accent={accent} />
+      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '280px 1fr', gap: 0 }}>
+        <Sidebar profile={profile} setProfile={setProfile} tab={tab} setTab={setTab} accent={accent} />
+        <main style={{ padding: '28px 36px 60px', minWidth: 0 }}>
+          <FilterBar platform={platform} setPlatform={setPlatform} status={status} setStatus={setStatus} accent={accent} />
+          {view === 'table'
+            ? <AccountsTable rows={filtered} accent={accent} />
+            : <AccountsCards rows={filtered} accent={accent} />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+function TopBar({ accent }) {
+  const stats = [
+    { label: 'ПОДПИСЧИКИ', value: TOTAL.followers.value, delta: TOTAL.followers.delta, color: '#4ade80' },
+    { label: 'ПРОСМОТРЫ',  value: TOTAL.views.value,     delta: TOTAL.views.delta,     color: '#ec4899' },
+    { label: 'ЛАЙКИ',      value: TOTAL.likes.value,     delta: TOTAL.likes.delta,     color: '#f59e0b' },
+    { label: 'ПУБЛИКАЦИИ', value: TOTAL.posts.value,     delta: TOTAL.posts.delta,     color: accent },
+  ];
+  return (
+    <header style={{
+      position: 'sticky', top: 0, zIndex: 50, padding: '18px 36px',
+      background: 'rgba(5,6,8,0.85)', backdropFilter: 'blur(14px)',
+      borderBottom: '1px solid var(--line)',
+      display: 'grid', gridTemplateColumns: '260px 1fr auto', gap: 32, alignItems: 'center',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <AtomLogoMini size={32} accent={accent} />
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 600, letterSpacing: '-0.01em' }}>AccountsStats</div>
+          <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.2em', textTransform: 'uppercase' }}>v2.0 · ATOMIC</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {stats.map((s, i) => (
+          <React.Fragment key={s.label}>
+            {i > 0 && <span style={{ width: 1, height: 36, background: 'var(--line)' }} />}
+            <div style={{ flex: 1, padding: '0 14px' }}>
+              <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{s.label}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
+                <span className="tnum" style={{ fontSize: 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{fmt(s.value)}</span>
+                <span className="mono tnum" style={{ fontSize: 12, color: s.color }}>+{fmt(s.delta)}</span>
+              </div>
+            </div>
+          </React.Fragment>
+        ))}
+        <div style={{ width: 1, height: 36, background: 'var(--line)' }} />
+        <div style={{ padding: '0 14px' }}>
+          <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>АККАУНТОВ</div>
+          <div className="tnum" style={{ fontSize: 22, fontWeight: 600, marginTop: 2 }}>{TOTAL.accounts}</div>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <Btn>↻ Обновить всё</Btn>
+        <Btn accent={accent}><span style={{ width: 8, height: 8, borderRadius: 999, background: '#4ade80', display: 'inline-block', marginRight: 6, boxShadow: '0 0 8px #4ade80' }} />Автообновление</Btn>
+        <Btn>+ Список</Btn>
+        <Btn primary accent={accent}>+ Добавить</Btn>
+      </div>
+    </header>
+  );
+}
+
+function AtomLogoMini({ size = 32, accent }) {
+  return (
+    <svg viewBox="0 0 100 100" width={size} height={size}>
+      <ellipse cx="50" cy="50" rx="40" ry="14" fill="none" stroke={accent} strokeWidth="2" opacity="0.7" />
+      <ellipse cx="50" cy="50" rx="40" ry="14" fill="none" stroke={accent} strokeWidth="2" opacity="0.7" transform="rotate(60 50 50)" />
+      <circle cx="50" cy="50" r="8" fill={accent} />
+    </svg>
+  );
+}
+
+function Btn({ children, primary, accent = '#6aa9ff', onClick }) {
+  return (
+    <button onClick={onClick} style={{
+      padding: '10px 16px', borderRadius: 12,
+      background: primary ? accent : 'rgba(255,255,255,0.04)',
+      color: primary ? '#000' : 'var(--ink)',
+      border: primary ? 'none' : '1px solid var(--line)',
+      fontSize: 13, fontWeight: primary ? 600 : 500, cursor: 'pointer',
+      display: 'inline-flex', alignItems: 'center',
+      transition: 'all .15s',
+    }}>{children}</button>
+  );
+}
+
+function Sidebar({ profile, setProfile, tab, setTab, accent }) {
+  return (
+    <aside style={{ borderRight: '1px solid var(--line)', padding: '24px 20px', position: 'sticky', top: 80, height: 'calc(100vh - 80px)' }}>
+      <div style={{ display: 'flex', gap: 4, padding: 4, background: 'rgba(255,255,255,0.025)', borderRadius: 12, border: '1px solid var(--line)' }}>
+        {[{ id: 'accounts', label: 'Аккаунты' }, { id: 'analytics', label: 'Аналитика' }].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            flex: 1, padding: '8px 12px', borderRadius: 9, border: 'none', cursor: 'pointer',
+            background: tab === t.id ? '#fff' : 'transparent',
+            color: tab === t.id ? '#000' : 'var(--ink-dim)',
+            fontSize: 13, fontWeight: tab === t.id ? 600 : 500,
+          }}>{t.label}</button>
+        ))}
+      </div>
+      <div style={{ marginTop: 24 }}>
+        <div style={{ position: 'relative', marginBottom: 14 }}>
+          <input placeholder="Поиск профилей" style={{
+            width: '100%', padding: '10px 14px 10px 34px', borderRadius: 10,
+            background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line)',
+            color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit',
+          }} />
+          <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink-mute)', fontSize: 12 }}>⌕</span>
+        </div>
+        <SidebarItem active={profile === 'all'} onClick={() => setProfile('all')} label="Все профили" count={162} dot="ring" accent={accent} />
+        <SidebarItem active={profile === 'none'} onClick={() => setProfile('none')} label="Без профиля" count={0} dim />
+        <div style={{ height: 1, background: 'var(--line)', margin: '14px 0' }} />
+        {PROFILES.map(p => (
+          <SidebarItem key={p.id} active={profile === p.id} onClick={() => setProfile(p.id)} label={p.label} count={p.accounts} color={p.color} />
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function SidebarItem({ active, onClick, label, count, color, dot, dim, accent }) {
+  return (
+    <div onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+      padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
+      background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
+      border: `1px solid ${active ? 'var(--line-2)' : 'transparent'}`,
+      marginBottom: 2,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {color
+          ? <span style={{ width: 22, height: 22, borderRadius: 999, background: `${color}26`, color, fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700 }}>{label.charAt(0)}</span>
+          : <span style={{ width: 22, height: 22, borderRadius: 999, border: `1.5px solid ${active ? 'var(--ink-dim)' : 'var(--line-2)'}`, opacity: dim ? 0.4 : 1 }} />
+        }
+        <span style={{ fontSize: 14, color: dim ? 'var(--ink-mute)' : 'var(--ink)' }}>{label}</span>
+      </div>
+      <span className="mono tnum" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{count}</span>
+    </div>
+  );
+}
+
+function FilterBar({ platform, setPlatform, status, setStatus, accent }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ flex: 1, position: 'relative' }}>
+          <input placeholder="Поиск аккаунтов…" style={{
+            width: '100%', padding: '12px 16px 12px 40px', borderRadius: 12,
+            background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line)',
+            color: 'var(--ink)', fontSize: 14, fontFamily: 'inherit',
+          }} />
+          <span style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--ink-mute)' }}>⌕</span>
+        </div>
+        <Pill active={platform === 'all'} onClick={() => setPlatform('all')}>Все</Pill>
+        {PLATFORMS.slice(0, 5).map(p => (
+          <Pill key={p.id} active={platform === p.id} onClick={() => setPlatform(p.id)} dot={p.color}>{p.label}</Pill>
+        ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Btn>↺ Сбросить фильтры</Btn>
+        <Pill active={status === 'all'} onClick={() => setStatus('all')}>Все статусы</Pill>
+        <Pill active={status === 'avail'} onClick={() => setStatus('avail')}>Доступные</Pill>
+        <Pill active={status === 'unavail'} onClick={() => setStatus('unavail')}>Недоступные</Pill>
+      </div>
+    </div>
+  );
+}
+
+function Pill({ active, onClick, children, dot }) {
+  return (
+    <button onClick={onClick} style={{
+      padding: '8px 14px', borderRadius: 999, cursor: 'pointer',
+      background: active ? '#fff' : 'rgba(255,255,255,0.025)',
+      color: active ? '#000' : 'var(--ink-dim)',
+      border: '1px solid ' + (active ? '#fff' : 'var(--line)'),
+      fontSize: 13, fontWeight: active ? 600 : 500,
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+    }}>
+      {dot && <span style={{ width: 6, height: 6, borderRadius: 999, background: dot }} />}
+      {children}
+    </button>
+  );
+}
+
+function AccountsTable({ rows, accent }) {
+  return (
+    <div style={{ borderRadius: 14, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', overflow: 'hidden' }}>
+      <div style={{
+        display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 1.1fr',
+        padding: '14px 20px', gap: 16, borderBottom: '1px solid var(--line)',
+        fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.18em', textTransform: 'uppercase',
+        fontFamily: 'JetBrains Mono, monospace',
+      }}>
+        <div>Аккаунт</div>
+        <div>Платформа</div>
+        <div>Профиль</div>
+        <div style={{ textAlign: 'right' }}>Подписчики</div>
+        <div style={{ textAlign: 'right', color: accent }}>Просмотры ↓</div>
+        <div style={{ textAlign: 'right' }}>Лайки</div>
+        <div style={{ textAlign: 'right' }}>Публ.</div>
+        <div>Обновлён</div>
+      </div>
+      {rows.map((a, i) => (
+        <AccountRow key={a.handle} a={a} i={i} />
+      ))}
+    </div>
+  );
+}
+
+function AccountRow({ a, i }) {
+  const meta = PLATFORM_META[a.platform];
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 1.1fr',
+      padding: '16px 20px', gap: 16, alignItems: 'center',
+      borderBottom: i < ACCOUNTS.length - 1 ? '1px solid var(--line)' : 'none',
+      fontSize: 14,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <span style={{
+          width: 36, height: 36, borderRadius: 999,
+          background: `linear-gradient(135deg, ${meta.color}40, ${PROFILE_META[a.profile].color}30)`,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 13, fontWeight: 700, color: '#fff',
+          border: `1px solid ${meta.color}40`,
+        }}>{a.name.charAt(0).toUpperCase()}</span>
+        <div>
+          <div style={{ fontWeight: 500 }}>{a.name}</div>
+          <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{a.handle}</div>
+        </div>
+      </div>
+      <div><PlatformGlyph id={a.platform} /></div>
+      <div><ProfileBadge id={a.profile} /></div>
+      <div className="mono tnum" style={{ textAlign: 'right', color: a.followers ? '#fff' : 'var(--ink-mute)' }}>{a.followers ?? '—'}</div>
+      <div style={{ textAlign: 'right' }}>
+        <div className="mono tnum" style={{ fontSize: 15, fontWeight: 500 }}>{fmt(a.views)}</div>
+        <div className="mono tnum" style={{ fontSize: 12, color: '#4ade80' }}>+{fmt(a.dViews)}</div>
+      </div>
+      <div style={{ textAlign: 'right' }}>
+        <div className="mono tnum">{fmt(a.likes)}</div>
+        <div className="mono tnum" style={{ fontSize: 12, color: a.dLikes >= 0 ? '#4ade80' : 'var(--danger)' }}>{a.dLikes >= 0 ? '+' : ''}{fmt(a.dLikes)}</div>
+      </div>
+      <div style={{ textAlign: 'right' }}>
+        <div className="mono tnum">{fmt(a.posts)}</div>
+        <div className="mono tnum" style={{ fontSize: 12, color: '#4ade80' }}>+{fmt(a.dPosts)}</div>
+      </div>
+      <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{a.updated}</div>
+    </div>
+  );
+}
+
+function AccountsCards({ rows, accent }) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 14 }}>
+      {rows.map(a => {
+        const meta = PLATFORM_META[a.platform];
+        const prof = PROFILE_META[a.profile];
+        return (
+          <div key={a.handle} style={{
+            padding: 18, borderRadius: 14,
+            background: `linear-gradient(180deg, ${prof.color}10, rgba(255,255,255,0.01))`,
+            border: '1px solid var(--line)',
+            position: 'relative', overflow: 'hidden',
+          }}>
+            <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: 2, background: prof.color, opacity: 0.6 }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <span style={{ width: 36, height: 36, borderRadius: 999, background: `linear-gradient(135deg, ${meta.color}40, ${prof.color}30)`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, border: `1px solid ${meta.color}40` }}>{a.name.charAt(0).toUpperCase()}</span>
+                <div>
+                  <div style={{ fontWeight: 500, fontSize: 14 }}>{a.name}</div>
+                  <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{a.handle}</div>
+                </div>
+              </div>
+              <ProfileBadge id={a.profile} dense />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+              {[['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d, c]) => (
+                <div key={l}>
+                  <div className="mono" style={{ fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{l.toUpperCase()}</div>
+                  <div className="mono tnum" style={{ fontSize: 17, fontWeight: 600 }}>{fmt(v)}</div>
+                  <div className="mono tnum" style={{ fontSize: 11, color: d >= 0 ? '#4ade80' : 'var(--danger)' }}>{d >= 0 ? '+' : ''}{fmt(d)}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <PlatformGlyph id={a.platform} size={16} />
+              <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{a.updated}</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+Object.assign(window, { AccountsScreen, TopBar, Sidebar, FilterBar });
+
+
+// ===== screen-analytics.jsx =====
+// Analytics screen — atomic-themed redesign of "Аналитика" tab.
+
+const { useState: useStateAn } = React;
+
+function AnalyticsScreen({ tweaks }) {
+  const accent = tweaks.accent || '#6aa9ff';
+  const [period, setPeriod] = useStateAn('24h');
+  const [platform, setPlatform] = useStateAn('all');
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }} data-screen-label="Analytics">
+      <TopBar accent={accent} />
+      <main style={{ flex: 1, padding: '28px 36px 60px', maxWidth: 1600, width: '100%', margin: '0 auto' }}>
+        {/* Hero band */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr 1fr 1fr', gap: 14, marginBottom: 24 }}>
+          <div style={{ borderRadius: 16, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', padding: 24, position: 'relative', overflow: 'hidden' }}>
+            <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.22em' }}>ENGAGEMENT · 24H</div>
+            <div className="tnum" style={{ fontSize: 64, fontWeight: 700, lineHeight: 1, marginTop: 8, letterSpacing: '-0.02em' }}>{fmt(TOTAL.views.delta + TOTAL.likes.delta)}</div>
+            <div className="mono tnum" style={{ marginTop: 4, fontSize: 14, color: '#4ade80' }}>▲ +5.7% vs prev. day</div>
+            <div style={{ marginTop: 12, height: 60 }}><Sparkline data={TREND_24H} color={accent} width={500} height={60} /></div>
+          </div>
+          {[
+            { l: 'ТОП ПОСТОВ', v: '1067', d: '+87 / 24h', c: '#ec4899', spark: TREND_24H.map(v => v * 0.4) },
+            { l: 'СРЕДНИЙ ER', v: '2.4%', d: '▲ 0.3%', c: '#f59e0b', spark: TREND_24H.map(v => v * 0.6 + 50) },
+            { l: 'ВИРАЛЬНОСТЬ', v: 'HIGH', d: '4 поста >+200', c: '#4ade80', spark: TREND_24H.map(v => v * 0.8) },
+          ].map(s => (
+            <div key={s.l} style={{ borderRadius: 16, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', padding: 20 }}>
+              <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em' }}>{s.l}</div>
+              <div className="tnum" style={{ fontSize: 36, fontWeight: 700, marginTop: 8, letterSpacing: '-0.02em' }}>{s.v}</div>
+              <div className="mono" style={{ fontSize: 12, color: s.c, marginTop: 4 }}>{s.d}</div>
+              <div style={{ marginTop: 10, height: 36 }}><Sparkline data={s.spark} color={s.c} width={220} height={36} dot={false} /></div>
+            </div>
+          ))}
+        </div>
+
+        {/* Period + platform */}
+        <div style={{ display: 'flex', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, padding: 4, borderRadius: 12, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line)' }}>
+            {[['24h', 'Сутки'], ['7d', '7 дней'], ['30d', '30 дней']].map(([id, l]) => (
+              <button key={id} onClick={() => setPeriod(id)} style={{
+                padding: '8px 14px', borderRadius: 9, border: 'none', cursor: 'pointer',
+                background: period === id ? '#fff' : 'transparent',
+                color: period === id ? '#000' : 'var(--ink-dim)', fontSize: 13, fontWeight: 500,
+              }}>{l}</button>
+            ))}
+          </div>
+          <Pill active={platform === 'all'} onClick={() => setPlatform('all')}>Все</Pill>
+          {PLATFORMS.map(p => <Pill key={p.id} active={platform === p.id} onClick={() => setPlatform(p.id)} dot={p.color}>{p.label}</Pill>)}
+        </div>
+
+        <SectionHeader kicker="TOP MOVERS" title={<>Топ постов <span style={{ color: 'var(--ink-mute)', fontWeight: 400, marginLeft: 8 }}>(1067)</span></>} right={<Pill active>Прирост просмотров ↓</Pill>} />
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {POSTS.map((p, i) => <PostRow key={i} p={p} accent={accent} rank={i + 1} max={POSTS[0].delta} />)}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function PostRow({ p, accent, rank, max }) {
+  const meta = PLATFORM_META[p.platform];
+  const w = (p.delta / max) * 100;
+  return (
+    <div style={{
+      position: 'relative', display: 'grid', gridTemplateColumns: '40px 80px 1fr auto auto', gap: 18, alignItems: 'center',
+      padding: '14px 18px', borderRadius: 14, border: '1px solid var(--line)',
+      background: 'rgba(255,255,255,0.015)', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: `${w}%`, background: `linear-gradient(90deg, ${meta.color}10, transparent)`, opacity: 0.8 }} />
+      <div className="mono tnum" style={{ position: 'relative', fontSize: 18, fontWeight: 700, color: rank <= 3 ? accent : 'var(--ink-mute)' }}>{String(rank).padStart(2, '0')}</div>
+      <div style={{ position: 'relative', width: 64, height: 64, borderRadius: 8, background: `linear-gradient(135deg, ${meta.color}40, rgba(255,255,255,0.05))`, border: '1px solid var(--line)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'JetBrains Mono, monospace', fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.1em' }}>POST</div>
+      <div style={{ position: 'relative', minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <PlatformGlyph id={p.platform} size={14} />
+          <span style={{ fontSize: 14, fontWeight: 500 }}>{p.handle}</span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', marginLeft: 'auto' }}>{p.date}</span>
+        </div>
+        <div style={{ fontSize: 13, color: 'var(--ink-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.text}</div>
+      </div>
+      <div style={{ position: 'relative', display: 'flex', gap: 16, fontSize: 13 }}>
+        <div className="mono tnum" style={{ color: 'var(--ink-dim)' }}>👁 {fmt(p.views)}</div>
+        <div className="mono tnum" style={{ color: 'var(--ink-dim)' }}>♥ {fmt(p.likes)}</div>
+        <div className="mono tnum" style={{ color: 'var(--ink-mute)' }}>ER {p.er.toFixed(1)}%</div>
+      </div>
+      <div className="mono tnum" style={{ position: 'relative', fontSize: 22, fontWeight: 600, color: '#4ade80' }}>+{p.delta}</div>
+    </div>
+  );
+}
+
+Object.assign(window, { AnalyticsScreen });
+
+
+// ===== screen-settings.jsx =====
+// Settings (auth) screen — atomic-themed redesign of "Настройки авторизации".
+
+function SettingsScreen({ tweaks, onBack }) {
+  const accent = tweaks.accent || '#6aa9ff';
+  const platforms = [
+    { id: 'tiktok',    name: 'TikTok',    state: 'active', expires: '5 дн.', meta: 'perf_feed_cache', warn: true,  account: null },
+    { id: 'instagram', name: 'Instagram', state: 'active', updated: '2026-05-04 08:47 UTC', warn: false, account: '@asti22297' },
+    { id: 'telegram',  name: 'Telegram',  state: 'detected', meta: 'Данные хранятся в браузерном профиле', warn: false, account: null },
+    { id: 'youtube',   name: 'YouTube',   state: 'active', updated: '2026-05-06 14:12 UTC', warn: false, account: '@phil.studio' },
+    { id: 'twitter',   name: 'X (Twitter)', state: 'expired', warn: true, account: null },
+    { id: 'threads',   name: 'Threads',   state: 'active', updated: '2026-05-05 10:24 UTC', warn: false, account: '@asti22297' },
+  ];
+  return (
+    <div style={{ minHeight: '100vh' }} data-screen-label="Settings">
+      <TopBar accent={accent} />
+      <main style={{ maxWidth: 1100, margin: '0 auto', padding: '28px 36px 80px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 24 }}>
+          <button onClick={onBack} style={{ padding: '8px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>← Назад</button>
+          <div>
+            <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.22em' }}>SECURITY · SESSIONS</div>
+            <div style={{ fontSize: 26, fontWeight: 600, marginTop: 2, letterSpacing: '-0.01em' }}>Настройки авторизации</div>
+          </div>
+        </div>
+        <p style={{ color: 'var(--ink-dim)', fontSize: 14, lineHeight: 1.6, marginBottom: 24, maxWidth: 720 }}>
+          Для сбора данных приложение использует авторизованные сессии в браузере. Нажмите кнопку — откроется окно, войдите в аккаунт, и данные будут обновляться автоматически.
+        </p>
+
+        {/* Summary tile */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 14, marginBottom: 28 }}>
+          <SummaryTile label="АКТИВНЫХ" value="4" color="#4ade80" />
+          <SummaryTile label="ИСТЕКАЮТ" value="1" color="#f59e0b" warn />
+          <SummaryTile label="ИСТЕКЛО" value="1" color="#ef4444" />
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          {platforms.map(p => <SessionCard key={p.id} p={p} accent={accent} />)}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function SummaryTile({ label, value, color, warn }) {
+  return (
+    <div style={{ padding: 20, borderRadius: 14, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', position: 'relative', overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, width: 4, bottom: 0, background: color, opacity: 0.6 }} />
+      <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.22em' }}>{label}</div>
+      <div className="tnum" style={{ fontSize: 40, fontWeight: 700, color, marginTop: 4, letterSpacing: '-0.02em' }}>{value}</div>
+    </div>
+  );
+}
+
+function SessionCard({ p, accent }) {
+  const meta = PLATFORM_META[p.id];
+  const stateColor = p.state === 'active' || p.state === 'detected' ? '#4ade80' : p.state === 'expired' ? '#ef4444' : '#f59e0b';
+  return (
+    <div style={{ padding: 22, borderRadius: 16, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', position: 'relative', overflow: 'hidden' }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${meta?.color || accent}, transparent)`, opacity: 0.5 }} />
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{
+            width: 36, height: 36, borderRadius: 10, background: 'rgba(255,255,255,0.04)',
+            border: `1px solid ${meta?.color}40`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            color: meta?.color, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace',
+          }}>{p.name.charAt(0)}</span>
+          <div style={{ fontSize: 18, fontWeight: 600 }}>{p.name}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ width: 7, height: 7, borderRadius: 999, background: stateColor, boxShadow: `0 0 8px ${stateColor}` }} />
+          <span className="mono" style={{ fontSize: 11, color: stateColor, letterSpacing: '0.18em', textTransform: 'uppercase' }}>
+            {p.state === 'active' ? 'Авторизован' : p.state === 'detected' ? 'Обнаружено' : 'Истекло'}
+          </span>
+        </div>
+      </div>
+
+      {p.account && <div className="mono" style={{ fontSize: 13, color: 'var(--ink-dim)', marginBottom: 4 }}>{p.account}</div>}
+      {p.updated && <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>Обновлено: {p.updated}</div>}
+      {p.expires && (
+        <div style={{ marginTop: 10, padding: '6px 10px', display: 'inline-flex', gap: 8, alignItems: 'center', borderRadius: 8, background: '#ef444415', border: '1px solid #ef444433' }}>
+          <span className="mono" style={{ fontSize: 11, color: '#ef4444' }}>● {p.expires}</span>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)' }}>{p.meta}</span>
+        </div>
+      )}
+      {p.meta && !p.expires && <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 4 }}>{p.meta}</div>}
+
+      {p.warn && p.state === 'active' && (
+        <div style={{ marginTop: 14, padding: '10px 12px', borderRadius: 10, background: '#f59e0b15', border: '1px solid #f59e0b40', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ color: '#f59e0b' }}>⚠</span>
+          <span style={{ fontSize: 12, color: '#fbbf24' }}>Cookies скоро истекут — обновите авторизацию.</span>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', gap: 10, marginTop: 16, alignItems: 'center' }}>
+        <button style={{ padding: '8px 14px', borderRadius: 10, background: '#fff', color: '#000', border: 'none', fontSize: 13, fontWeight: 500, cursor: 'pointer' }}>Обновить авторизацию</button>
+        <button style={{ padding: '8px 14px', borderRadius: 10, background: 'transparent', border: '1px solid var(--line)', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Завершить сессию</button>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { SettingsScreen });
+
+
+// ===== screen-modals.jsx =====
+// Modal screens — Add list, Schedule, Add account form.
+
+const { useState: useStateMd } = React;
+
+function ModalsScreen({ tweaks }) {
+  const accent = tweaks.accent || '#6aa9ff';
+  const [active, setActive] = useStateMd('add_list');
+  return (
+    <div style={{ minHeight: '100vh', position: 'relative' }} data-screen-label="Modals">
+      <TopBar accent={accent} />
+      <main style={{ padding: '28px 36px 60px' }}>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 22 }}>
+          {[['add_list', 'Добавить список'], ['schedule', 'Расписание'], ['add_one', 'Добавить аккаунт']].map(([id, l]) => (
+            <Pill key={id} active={active === id} onClick={() => setActive(id)}>{l}</Pill>
+          ))}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: 40 }}>
+          {active === 'add_list' && <AddListModal accent={accent} />}
+          {active === 'schedule' && <ScheduleModal accent={accent} />}
+          {active === 'add_one' && <AddOneInline accent={accent} />}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function ModalShell({ title, kicker, children, accent, width = 560 }) {
+  return (
+    <div style={{
+      width, padding: 32, borderRadius: 22,
+      background: 'linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.01))',
+      border: '1px solid var(--line-2)', position: 'relative', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${accent}, transparent)` }} />
+      <ParticleField count={20} color={accent} opacity={0.3} />
+      <div style={{ position: 'relative' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 22 }}>
+          <div>
+            {kicker && <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.24em' }}>{kicker}</div>}
+            <div style={{ fontSize: 22, fontWeight: 600, marginTop: 4, letterSpacing: '-0.01em' }}>{title}</div>
+          </div>
+          <button style={{ width: 32, height: 32, borderRadius: 999, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink-dim)', cursor: 'pointer', fontSize: 14 }}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AddListModal({ accent }) {
+  return (
+    <ModalShell title="Добавить список аккаунтов" kicker="BATCH IMPORT" accent={accent}>
+      <div style={{ fontSize: 13, color: 'var(--ink-dim)', marginBottom: 12 }}>Вставь URL аккаунтов — по одному на строку или через запятую</div>
+      <textarea defaultValue={'https://www.tiktok.com/@username\nhttps://www.youtube.com/@channel\nhttps://www.threads.com/@user\nhttps://t.me/channel'} style={{
+        width: '100%', minHeight: 160, padding: 16, borderRadius: 12,
+        background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line-2)',
+        color: 'var(--ink-dim)', fontSize: 13, fontFamily: 'JetBrains Mono, monospace', lineHeight: 1.6, resize: 'vertical',
+      }} />
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 18 }}>
+        <span style={{ fontSize: 13, color: 'var(--ink-dim)' }}>Профиль:</span>
+        <select style={{ padding: '8px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
+          <option>Без профиля</option>
+          {PROFILES.map(p => <option key={p.id}>{p.label}</option>)}
+        </select>
+        <button style={{ width: 32, height: 32, borderRadius: 8, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink-dim)', cursor: 'pointer' }}>+</button>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 28 }}>
+        <button style={{ padding: '8px 0', background: 'transparent', border: 'none', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Отмена</button>
+        <button style={{ padding: '12px 28px', borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>Импортировать</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+function ScheduleModal({ accent }) {
+  const [mode, setMode] = useStateMd('time');
+  const [skip, setSkip] = useStateMd('3h');
+  const [auto, setAuto] = useStateMd(true);
+  const times = ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00', '00:00'];
+  return (
+    <ModalShell title="Расписание обновлений" kicker="AUTOMATION" accent={accent} width={620}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px', borderRadius: 12, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line)', marginBottom: 18 }}>
+        <span style={{ fontSize: 14, fontWeight: 500 }}>Автообновление</span>
+        <button onClick={() => setAuto(!auto)} style={{
+          width: 50, height: 26, borderRadius: 999, background: auto ? '#4ade80' : 'rgba(255,255,255,0.1)',
+          border: 'none', cursor: 'pointer', position: 'relative', transition: 'all .2s',
+        }}>
+          <span style={{ position: 'absolute', top: 3, left: auto ? 27 : 3, width: 20, height: 20, borderRadius: 999, background: '#fff', transition: 'all .2s' }} />
+        </button>
+      </div>
+
+      <div style={{ padding: 16, borderRadius: 12, background: 'rgba(255,255,255,0.015)', border: '1px solid var(--line)', marginBottom: 18 }}>
+        <label style={{ display: 'flex', gap: 12, alignItems: 'flex-start', cursor: 'pointer' }}>
+          <span style={{ width: 18, height: 18, borderRadius: 5, background: '#4ade80', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 1 }}>
+            <span style={{ color: '#000', fontSize: 11, fontWeight: 800 }}>✓</span>
+          </span>
+          <span>
+            <div style={{ fontSize: 14, color: 'var(--ink)' }}>После завершения автообновления сохранять CSV-отчёт</div>
+            <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 4, lineHeight: 1.5 }}>Файл хранится на сервере; утром откройте окно и нажмите «Скачать».</div>
+          </span>
+        </label>
+      </div>
+
+      <div style={{ display: 'flex', gap: 6, padding: 4, borderRadius: 12, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line)', marginBottom: 16 }}>
+        {[['hours', 'Каждые N часов'], ['time', 'В определённое время']].map(([id, l]) => (
+          <button key={id} onClick={() => setMode(id)} style={{
+            flex: 1, padding: '10px 14px', borderRadius: 9, border: 'none', cursor: 'pointer',
+            background: mode === id ? '#fff' : 'transparent',
+            color: mode === id ? '#000' : 'var(--ink-dim)', fontSize: 13, fontWeight: 500,
+          }}>{l}</button>
+        ))}
+      </div>
+
+      <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 10 }}>ВРЕМЯ ОБНОВЛЕНИЯ · MSK</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 18 }}>
+        {times.map(t => (
+          <Pill key={t} active={t === '06:00'}>{t}</Pill>
+        ))}
+        <Pill>+ Добавить</Pill>
+      </div>
+
+      <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 10 }}>ПРОПУСКАТЬ НЕДАВНО ОБНОВЛЁННЫЕ</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 26 }}>
+        {['Не пропускать', '< 1ч', '< 3ч', '< 6ч', '< 12ч', '< 24ч'].map(t => (
+          <Pill key={t} active={t === skip || (t === '< 3ч' && skip === '3h')} onClick={() => setSkip(t)}>{t}</Pill>
+        ))}
+      </div>
+
+      <button style={{ width: '100%', padding: 16, borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>Запустить автообновление сейчас</button>
+    </ModalShell>
+  );
+}
+
+function AddOneInline({ accent }) {
+  return (
+    <ModalShell title="Добавить аккаунт" kicker="QUICK ADD" accent={accent} width={680}>
+      <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 160px', gap: 14, alignItems: 'flex-end' }}>
+        <div>
+          <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ПЛАТФОРМА</div>
+          <select style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
+            {PLATFORMS.map(p => <option key={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>USERNAME</div>
+          <input placeholder="@username" style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 14, fontFamily: 'JetBrains Mono, monospace' }} />
+        </div>
+        <div>
+          <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ПРОФИЛЬ</div>
+          <select style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
+            <option>Без профиля</option>
+            {PROFILES.map(p => <option key={p.id}>{p.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 22, justifyContent: 'flex-end' }}>
+        <button style={{ padding: '10px 20px', borderRadius: 10, background: 'transparent', border: '1px solid var(--line)', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Отмена</button>
+        <button style={{ padding: '10px 24px', borderRadius: 10, background: accent, color: '#000', border: 'none', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>Добавить</button>
+      </div>
+    </ModalShell>
+  );
+}
+
+Object.assign(window, { ModalsScreen });
+
+
+// ===== app.jsx =====
+// Root app — routes between TV broadcast and main interface screens, hosts Tweaks panel.
+
+const { useState: useStateApp, useEffect: useEffectApp } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "tv_mood": "mission",
+  "accent": "#6aa9ff",
+  "accounts_view": "table",
+  "start_screen": "tv"
+}/*EDITMODE-END*/;
+
+function App() {
+  const { tweaks, setTweak } = useTweaks(TWEAK_DEFAULTS);
+  const [route, setRoute] = useStateApp(tweaks.start_screen || 'tv');
+
+  // Auto-apply accent to CSS variables
+  useEffectApp(() => {
+    document.documentElement.style.setProperty('--accent', tweaks.accent);
+  }, [tweaks.accent]);
+
+  const ROUTES = [
+    { id: 'tv',        label: 'TV Broadcast' },
+    { id: 'accounts',  label: 'Аккаунты' },
+    { id: 'analytics', label: 'Аналитика' },
+    { id: 'settings',  label: 'Настройки' },
+    { id: 'modals',    label: 'Модалки' },
+  ];
+
+  return (
+    <>
+      {route === 'tv'        && <TVScreen tweaks={tweaks} onExit={() => setRoute('accounts')} />}
+      {route === 'accounts'  && <AccountsScreen tweaks={tweaks} />}
+      {route === 'analytics' && <AnalyticsScreen tweaks={tweaks} />}
+      {route === 'settings'  && <SettingsScreen tweaks={tweaks} onBack={() => setRoute('accounts')} />}
+      {route === 'modals'    && <ModalsScreen tweaks={tweaks} />}
+
+      {route !== 'tv' && (
+        <RouteFloater route={route} setRoute={setRoute} routes={ROUTES} accent={tweaks.accent} />
+      )}
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection title="Старт + навигация">
+          <TweakSelect label="Экран" value={route} onChange={v => setRoute(v)} options={ROUTES.map(r => ({ value: r.id, label: r.label }))} />
+        </TweakSection>
+        <TweakSection title="TV-режим">
+          <TweakRadio label="Настроение" value={tweaks.tv_mood} onChange={v => setTweak('tv_mood', v)} options={[
+            { value: 'mission', label: 'Mission' },
+            { value: 'bloomberg', label: 'Bloom' },
+            { value: 'calm', label: 'Calm' },
+          ]} />
+        </TweakSection>
+        <TweakSection title="Акцент">
+          <TweakColor label="Цвет" value={tweaks.accent} onChange={v => setTweak('accent', v)} options={['#6aa9ff', '#4ade80', '#f59e0b', '#ec4899', '#ffffff']} />
+        </TweakSection>
+        <TweakSection title="Список аккаунтов">
+          <TweakRadio label="Вид" value={tweaks.accounts_view} onChange={v => setTweak('accounts_view', v)} options={[
+            { value: 'table', label: 'Таблица' },
+            { value: 'cards', label: 'Карточки' },
+          ]} />
+        </TweakSection>
+      </TweaksPanel>
+    </>
+  );
+}
+
+function RouteFloater({ route, setRoute, routes, accent }) {
+  return (
+    <div style={{
+      position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+      display: 'flex', gap: 4, padding: 6, borderRadius: 999,
+      background: 'rgba(10,12,18,0.85)', backdropFilter: 'blur(14px)',
+      border: '1px solid var(--line-2)', zIndex: 90, boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+    }}>
+      {routes.map(r => (
+        <button key={r.id} onClick={() => setRoute(r.id)} style={{
+          padding: '9px 16px', borderRadius: 999, border: 'none', cursor: 'pointer',
+          background: route === r.id ? accent : 'transparent',
+          color: route === r.id ? '#000' : 'var(--ink-dim)',
+          fontSize: 12, fontWeight: route === r.id ? 600 : 500, letterSpacing: '0.04em',
+          fontFamily: 'inherit',
+        }}>{r.label}</button>
+      ))}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+

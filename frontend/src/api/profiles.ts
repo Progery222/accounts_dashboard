@@ -6,15 +6,20 @@ export interface Profile {
   description: string;
   color: string;
   avatar_url: string;
+  is_hidden?: boolean;
   account_count: number;
   created_at: string;
   updated_at: string;
 }
 
-export type ProfileInput = Pick<Profile, "name" | "description" | "color" | "avatar_url">;
+export type ProfileInput = Pick<Profile, "name" | "description" | "color" | "avatar_url" | "is_hidden">;
 
-export async function getProfiles(): Promise<Profile[]> {
-  const { data } = await apiClient.get<Profile[]>("/api/accounts/profiles/");
+export async function getProfiles(opts?: { includeHidden?: boolean }): Promise<Profile[]> {
+  const { data } = await apiClient.get<Profile[]>("/api/accounts/profiles/", {
+    params: {
+      include_hidden_profiles: opts?.includeHidden ? "1" : undefined,
+    },
+  });
   return data;
 }
 

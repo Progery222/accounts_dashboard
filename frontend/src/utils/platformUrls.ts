@@ -34,6 +34,8 @@ export function externalProfileUrl(platform: string, username: string): string |
       return `https://www.facebook.com/${encodeURIComponent(u)}`;
     case "rumble":
       return `https://rumble.com/c/${encodeURIComponent(u)}`;
+    case "reddit":
+      return `https://www.reddit.com/r/${encodeURIComponent(u)}/`;
     default:
       return null;
   }

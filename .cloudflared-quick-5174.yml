@@ -1,0 +1,1 @@
+# isolate quick tunnel from global ~/.cloudflared/config.yml ingress

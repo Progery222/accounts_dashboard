@@ -231,7 +231,7 @@ export default function ProfilesPage() {
 
   const { data: profiles = [], isLoading } = useQuery({
     queryKey: ["profiles"],
-    queryFn: getProfiles,
+    queryFn: () => getProfiles(),
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["profiles"] });

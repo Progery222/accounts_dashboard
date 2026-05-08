@@ -12,6 +12,7 @@ import {
   startThreadsAuth,     importThreadsCookies,
   startFacebookAuth,    importFacebookCookies,
   startRumbleAuth,      importRumbleCookies,
+  startRedditAuth,      importRedditCookies,
   logoutPlatform,
   type AuthPlatform,
   type TikTokStatus,
@@ -21,6 +22,7 @@ import {
   type ThreadsStatus,
   type FacebookStatus,
   type RumbleStatus,
+  type RedditStatus,
 } from "../api/settings";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -843,6 +845,51 @@ function RumbleSection({ data }: { data: RumbleStatus }) {
   );
 }
 
+function RedditSection({ data }: { data: RedditStatus }) {
+  const flow = useAuthFlow(startRedditAuth);
+
+  return (
+    <PlatformCard
+      icon={<span className="text-white font-bold text-sm">r/</span>}
+      title="Reddit"
+      color="bg-orange-500/20 border border-orange-500/30"
+    >
+      <div className="flex items-center justify-between mb-5">
+        <div className="flex items-center gap-2">
+          <span className={`w-2 h-2 rounded-full ${data.has_session ? "bg-emerald-400" : "bg-zinc-600"}`} />
+          <span className="text-zinc-300 text-sm">
+            {data.has_session ? "Сессия Reddit обнаружена" : "Сессия не создана"}
+          </span>
+        </div>
+      </div>
+
+      {data.has_session && <SessionLogoutRow platform="reddit" />}
+
+      <AuthButton
+        state={flow.state}
+        message={flow.message}
+        idleLabel={data.has_session ? "Обновить авторизацию" : "Войти в Reddit"}
+        onStart={flow.start}
+        onReset={flow.reset}
+      />
+
+      {flow.state === "pending" && (
+        <p className="mt-3 text-zinc-500 text-xs leading-relaxed max-w-sm">
+          Откроется окно браузера — войдите в Reddit. Окно закроется автоматически.
+        </p>
+      )}
+
+      {flow.state === "idle" && (
+        <CookieImportSection
+          importFn={importRedditCookies}
+          siteDomain="reddit.com"
+          primaryCookieName="reddit_session"
+        />
+      )}
+    </PlatformCard>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Settings() {
@@ -904,6 +951,7 @@ export default function Settings() {
             <ThreadsSection   data={data.threads}   />
             <FacebookSection  data={data.facebook}  />
             <RumbleSection    data={data.rumble}    />
+            <RedditSection    data={data.reddit}    />
           </div>
         )}
       </main>

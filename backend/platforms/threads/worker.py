@@ -11,6 +11,7 @@ in degraded mode if not logged in (no posts). Full post data requires auth.
 """
 import asyncio
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -22,6 +23,10 @@ from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK
 
 NAV_TIMEOUT  = 30_000   # ms
 LOAD_TIMEOUT = 20_000   # ms
+POST_OPEN_TIMEOUT_MS = int(os.getenv("THREADS_POST_OPEN_TIMEOUT_MS", "18000") or "18000")
+POST_VIEWS_MAX_POSTS = int(os.getenv("THREADS_POST_VIEWS_MAX_POSTS", "16") or "16")
+POST_DELAY_MS = int(os.getenv("THREADS_POST_DELAY_MS", "1100") or "1100")
+POST_RETRY_CLICKS = int(os.getenv("THREADS_POST_RETRY_CLICKS", "2") or "2")
 
 
 # ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -41,6 +46,238 @@ def _parse_count(text: str) -> int:
             pass
     digits = re.sub(r'[^\d]', '', text)
     return int(digits) if digits else 0
+
+
+def _extract_post_code_from_url(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r"/post/([A-Za-z0-9_-]{6,})", str(url))
+    if m:
+        return m.group(1)
+    m = re.search(r"/t/([A-Za-z0-9_-]{6,})", str(url))
+    return m.group(1) if m else ""
+
+
+def _collect_post_views_from_json(payload, out: dict[str, int]) -> None:
+    """Рекурсивно собирает post_code -> view_count из JSON-ответов Threads."""
+    stack = [payload]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, list):
+            stack.extend(cur)
+            continue
+        if not isinstance(cur, dict):
+            continue
+
+        view_val = 0
+        for key in (
+            "view_count",
+            "video_view_count",
+            "video_play_count",
+            "play_count",
+            "views",
+        ):
+            if key in cur:
+                view_val = max(view_val, _parse_count(cur.get(key)))
+
+        if view_val > 0:
+            candidates: set[str] = set()
+            for key in ("code", "shortcode", "post_code", "thread_code"):
+                val = str(cur.get(key) or "").strip()
+                if re.match(r"^[A-Za-z0-9_-]{6,}$", val):
+                    candidates.add(val)
+            for key in ("permalink", "url", "post_url", "thread_url"):
+                code = _extract_post_code_from_url(str(cur.get(key) or ""))
+                if code:
+                    candidates.add(code)
+            for code in candidates:
+                prev = int(out.get(code) or 0)
+                if view_val > prev:
+                    out[code] = view_val
+
+        for v in cur.values():
+            if isinstance(v, (dict, list)):
+                stack.append(v)
+
+
+async def _capture_response_post_views(response, out: dict[str, int]) -> None:
+    """Пытается вытащить views из network JSON, не открывая посты отдельно."""
+    try:
+        url = (response.url or "").lower()
+    except Exception:
+        url = ""
+    if not url:
+        return
+    if (
+        "/graphql/" not in url
+        and "threads" not in url
+        and "barcelona" not in url
+        and "/api/" not in url
+    ):
+        return
+
+    try:
+        ctype = (response.headers or {}).get("content-type", "").lower()
+    except Exception:
+        ctype = ""
+    if "json" not in ctype and "graphql" not in url:
+        return
+
+    try:
+        payload = await response.json()
+    except Exception:
+        return
+
+    before = len(out)
+    _collect_post_views_from_json(payload, out)
+    after = len(out)
+    if after > before:
+        print(
+            f"[threads_worker] network views map +{after - before} (total={after})",
+            file=sys.stderr,
+        )
+
+
+def _extract_views_from_text_blob(text: str) -> int:
+    if not text:
+        return 0
+    m = re.search(r"([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)\b", text, re.I)
+    if not m:
+        return 0
+    return _parse_count(m.group(1))
+
+
+async def _click_retry_on_error_page(page) -> bool:
+    """Нажимает «Повторить попытку» на странице поста Threads, если кнопка есть."""
+    try:
+        return await page.evaluate(
+            r"""() => {
+                const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                const isRetryText = (t) => {
+                    const n = norm(t);
+                    return n.includes('повторить попытку') || n.includes('try again') || n.includes('retry');
+                };
+                const nodes = document.querySelectorAll('button, [role="button"], span, div');
+                for (const el of nodes) {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (!t || t.length > 64) continue;
+                    if (isRetryText(t)) {
+                        el.click();
+                        return true;
+                    }
+                }
+                return false;
+            }"""
+        )
+    except Exception:
+        return False
+
+
+async def _extract_views_on_open_post(page) -> int:
+    """Читает просмотры на уже открытой странице поста."""
+    try:
+        return await page.evaluate(
+            r"""() => {
+                const parseCount = (txt) => {
+                    const t = String(txt || '').replace(/\u00a0/g,'').replace(/\u202f/g,'').replace(/\s+/g,'').trim();
+                    const m = t.match(/^([\d]+(?:[.,][\d]+)?)\s*([KMBkmb]?)$/);
+                    if (m) {
+                        const n = parseFloat(m[1].replace(',', '.'));
+                        const u = (m[2] || '').toUpperCase();
+                        const mult = u === 'K' ? 1e3 : u === 'M' ? 1e6 : u === 'B' ? 1e9 : 1;
+                        return Number.isFinite(n) ? Math.round(n * mult) : 0;
+                    }
+                    const d = t.replace(/[^\d]/g, '');
+                    return d ? parseInt(d, 10) : 0;
+                };
+                const scan = (root) => {
+                    if (!root) return 0;
+                    // 1) aria-label c "N views/просмотров"
+                    for (const n of root.querySelectorAll('[aria-label]')) {
+                        const lbl = n.getAttribute('aria-label') || '';
+                        const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
+                        if (m) {
+                            const v = parseCount(m[1]);
+                            if (v > 0) return v;
+                        }
+                    }
+                    // 2) видимый текст
+                    const txt = root.innerText || '';
+                    const m = txt.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
+                    if (m) return parseCount(m[1]);
+                    return 0;
+                };
+                return scan(document.body);
+            }"""
+        )
+    except Exception:
+        return 0
+
+
+async def _collect_post_views_by_opening_posts(
+    page,
+    *,
+    username: str,
+    posts_raw: list[dict],
+) -> dict[str, int]:
+    """
+    fallback: идем по страницам постов с паузой и ретраем кнопки "Повторить попытку".
+    Нужен для случаев, когда views не приходят в profile DOM/API.
+    """
+    out: dict[str, int] = {}
+    if not posts_raw:
+        return out
+
+    # Берем только посты без views (или с нулём), чтобы снизить риск блокировок.
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for p in posts_raw:
+        pid = str(p.get("id") or "").strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        dom_views = _parse_count(p.get("views", "0"))
+        if dom_views > 0:
+            continue
+        purl = str(p.get("url") or "").strip()
+        if not purl:
+            purl = f"https://www.threads.com/@{username}/post/{pid}"
+        candidates.append((pid, purl))
+        if len(candidates) >= POST_VIEWS_MAX_POSTS:
+            break
+
+    if not candidates:
+        return out
+
+    print(
+        f"[threads_worker] fallback open-post views: {len(candidates)} candidates",
+        file=sys.stderr,
+    )
+    for idx, (pid, purl) in enumerate(candidates, start=1):
+        try:
+            await page.goto(purl, wait_until="domcontentloaded", timeout=POST_OPEN_TIMEOUT_MS)
+            await asyncio.sleep(0.9)
+            v = await _extract_views_on_open_post(page)
+            if v <= 0:
+                # Иногда страница роняется на "Произошла ошибка. Повторить попытку позже."
+                # Пробуем нажать Retry пару раз.
+                for _ in range(POST_RETRY_CLICKS):
+                    clicked = await _click_retry_on_error_page(page)
+                    if not clicked:
+                        break
+                    await asyncio.sleep(1.2)
+                    v = await _extract_views_on_open_post(page)
+                    if v > 0:
+                        break
+            if v > 0:
+                out[pid] = v
+                print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: views={v}", file=sys.stderr)
+            else:
+                print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: views not found", file=sys.stderr)
+        except Exception as exc:
+            print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: open failed: {exc}", file=sys.stderr)
+        await asyncio.sleep(max(0.2, POST_DELAY_MS / 1000.0))
+    return out
 
 
 # ── Login check JS ────────────────────────────────────────────────────────────
@@ -141,6 +378,12 @@ async def _run_with_page(username: str, page, _wu):
     bio            = ""
     posts_raw      = []
     settle_relaxed = False  # таймаут «ожидания DOM» — не считаем пустой список постов авторитетным
+    network_post_views: dict[str, int] = {}
+
+    async def _on_response(resp):
+        await _capture_response_post_views(resp, network_post_views)
+
+    page.on("response", lambda resp: asyncio.create_task(_on_response(resp)))
 
     # ── 1. Navigate ───────────────────────────────────────────────
     print(f"[threads_worker] navigating to @{username}", file=sys.stderr)
@@ -406,6 +649,8 @@ async def _run_with_page(username: str, page, _wu):
         except Exception:
             pass
         await page.wait_for_timeout(1350)
+    # Дать ответам догрузиться перед финальным merge метрик.
+    await page.wait_for_timeout(1200)
 
     try:
         posts_raw = await page.evaluate(
@@ -530,6 +775,12 @@ async def _run_with_page(username: str, page, _wu):
                 seen_ids.add(rid)
                 posts_raw.append(row)
 
+    opened_post_views = await _collect_post_views_by_opening_posts(
+        page,
+        username=username,
+        posts_raw=posts_raw,
+    )
+
     # ── 7. Post-process ───────────────────────────────────────────────────────
     posts = []
     seen_post_ids: set[str] = set()
@@ -550,7 +801,11 @@ async def _run_with_page(username: str, page, _wu):
             "description":   p.get("text", ""),
             "thumbnail_url": p.get("thumb", ""),
             "post_url":      p.get("url", f"https://www.threads.com/t/{post_id}"),
-            "view_count":    _parse_count(p.get("views", "0")),
+            "view_count":    max(
+                _parse_count(p.get("views", "0")),
+                int(network_post_views.get(post_id, 0) or 0),
+                int(opened_post_views.get(post_id, 0) or 0),
+            ),
             "like_count":    _parse_count(p.get("likes", "0")),
             "comment_count": _parse_count(p.get("replies", "0")),
             "share_count":   0,

@@ -100,6 +100,14 @@ async def _run_with_page(username: str, page, _wu) -> dict:
                 timeout=30_000,
             )
         except Exception:
+            missing = await page.evaluate(
+                """() => {
+                    const txt = (document.body?.innerText || '').toLowerCase();
+                    return txt.includes("this account doesn") || txt.includes("this account does not exist");
+                }""",
+            )
+            if missing:
+                return {"error": f"Профиль X @{username} не найден."}
             return {"error": "X не загрузился — проверь подключение."}
 
         # ── 3. Check login ────────────────────────────────────────────────────

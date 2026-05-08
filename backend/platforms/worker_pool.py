@@ -1,6 +1,7 @@
 import atexit
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -61,6 +62,9 @@ class _WorkerHandle:
         )
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
+        self._stdout_queue: queue.Queue[str | None] = queue.Queue()
+        self._stdout_thread = threading.Thread(target=self._drain_stdout, daemon=True)
+        self._stdout_thread.start()
 
     def _drain_stderr(self) -> None:
         if self.proc.stderr is None:
@@ -69,7 +73,16 @@ class _WorkerHandle:
             if line:
                 print(line, end="", file=sys.stderr)
 
-    def call(self, payload: dict) -> dict:
+    def _drain_stdout(self) -> None:
+        if self.proc.stdout is None:
+            self._stdout_queue.put(None)
+            return
+        for line in self.proc.stdout:
+            self._stdout_queue.put(line)
+        # EOF marker: worker exited or pipe closed.
+        self._stdout_queue.put(None)
+
+    def call(self, payload: dict, *, timeout_sec: float | None = None) -> dict:
         if self.proc.poll() is not None:
             raise ValueError("Фоновый worker завершился, попробуйте обновить еще раз")
         if self.proc.stdin is None or self.proc.stdout is None:
@@ -78,7 +91,16 @@ class _WorkerHandle:
         with self.lock:
             self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
-            line = self.proc.stdout.readline()
+            try:
+                if timeout_sec is not None and timeout_sec > 0:
+                    line = self._stdout_queue.get(timeout=timeout_sec)
+                else:
+                    line = self._stdout_queue.get()
+            except queue.Empty:
+                raise ValueError(
+                    f"Таймаут ожидания ответа worker ({int(timeout_sec)}с). "
+                    "Попробуйте ещё раз."
+                )
         if not line:
             raise ValueError("Worker не вернул ответ")
         try:
@@ -108,13 +130,15 @@ def _is_recoverable_playwright_error(message: str) -> bool:
         "browser has been closed",
         "context has been closed",
         "page has been closed",
+        "вкладка tiktok закрыта",
         "worker завершился",
         "worker не вернул ответ",
+        "таймаут ожидания ответа worker",
     )
     return any(m in msg for m in markers)
 
 
-def call_worker(worker_path: Path, payload: dict) -> dict:
+def call_worker(worker_path: Path, payload: dict, *, timeout_sec: float | None = None) -> dict:
     """
     До 3 попыток при «пустом stdout» / закрытом браузере — при refresh_all по многим
     аккаунтам один сбой не должен навсегда ломать пул.
@@ -134,7 +158,7 @@ def call_worker(worker_path: Path, payload: dict) -> dict:
                 handle = _WorkerHandle(worker_path)
                 _HANDLES[key] = handle
         try:
-            return handle.call(payload)
+            return handle.call(payload, timeout_sec=timeout_sec)
         except Exception as exc:
             last_exc = exc
             if not _is_recoverable_playwright_error(str(exc)):

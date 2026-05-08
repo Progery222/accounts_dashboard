@@ -41,6 +41,10 @@ export interface RumbleStatus {
   has_session: boolean;
 }
 
+export interface RedditStatus {
+  has_session: boolean;
+}
+
 export interface AuthStatus {
   tiktok:    TikTokStatus;
   instagram: InstagramStatus;
@@ -49,6 +53,7 @@ export interface AuthStatus {
   threads:   ThreadsStatus;
   facebook:  FacebookStatus;
   rumble:    RumbleStatus;
+  reddit:    RedditStatus;
 }
 
 /** Платформы с сохранённой сессией в настройках (POST …/logout/). */
@@ -131,6 +136,16 @@ export async function startRumbleAuth(): Promise<{ job_id: string }> {
 
 export async function importRumbleCookies(cookies: string): Promise<{ job_id: string }> {
   const r = await apiClient.post<{ job_id: string }>("/api/settings/rumble/import-cookies/", { cookies });
+  return r.data;
+}
+
+export async function startRedditAuth(): Promise<{ job_id: string }> {
+  const r = await apiClient.post<{ job_id: string }>("/api/settings/reddit/start-auth/");
+  return r.data;
+}
+
+export async function importRedditCookies(cookies: string): Promise<{ job_id: string }> {
+  const r = await apiClient.post<{ job_id: string }>("/api/settings/reddit/import-cookies/", { cookies });
   return r.data;
 }
 

@@ -1,13 +1,20 @@
 from pathlib import Path
 import os
+import sys
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+# .env используется как локальный fallback и не должен перетирать реальные
+# переменные окружения (Railway/K8s/CI), иначе можно случайно подключиться к
+# localhost вместо DATABASE_URL провайдера.
+load_dotenv(BASE_DIR / ".env", override=False)
 
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-s)66ib*p(f+^813d+^2do6@*w4b^f57g787=hv)@lu7t=g^7!k")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
+if ".trycloudflare.com" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(".trycloudflare.com")
 
 # На Railway публичный домен сервиса доступен в RAILWAY_PUBLIC_DOMAIN.
 # Добавляем его автоматически, чтобы health-check и публичный URL работали без
@@ -75,23 +82,45 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-# Postgres: на Railway автоматически выставляется DATABASE_URL.
-# Локально/в Docker compose используем DB_* envs (psycopg2 нативно).
+
+def _apply_postgres_connection_hardening(db: dict) -> None:
+    """Меньше обрывов после рестарта Postgres / простоя соединения."""
+    eng = (db.get("ENGINE") or "").lower()
+    if "postgresql" not in eng and "postgis" not in eng:
+        return
+    db.setdefault("CONN_MAX_AGE", int(os.getenv("DB_CONN_MAX_AGE", "600") or "600"))
+    db["CONN_HEALTH_CHECKS"] = True
+    opts = db.setdefault("OPTIONS", {})
+    if not isinstance(opts, dict):
+        return
+    timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "10") or "10")
+    opts.setdefault("connect_timeout", timeout)
+
+
+# Только PostgreSQL (DATABASE_URL с Railway или блок DB_* как в docker-compose.prod.yml).
 _database_url = os.getenv("DATABASE_URL", "").strip()
 if _database_url:
+    low = _database_url.lower()
+    if "sqlite" in low or low.startswith("file:") or ":memory:" in low:
+        raise ImproperlyConfigured(
+            "Поддерживается только PostgreSQL. DATABASE_URL не должен указывать на SQLite или file:/memory: "
+            "— удалите переменную из окружения или задайте postgresql://… Можно оставить только DB_* без DATABASE_URL."
+        )
+
     import dj_database_url
 
+    _is_postgres_url = _database_url.lower().startswith(("postgres://", "postgresql://", "postgis://"))
     # На Railway Postgres почти всегда требует SSL. Если URL уже содержит
     # sslmode=require, дублирование не мешает. Локально с DATABASE_URL без SSL
     # выставьте DB_SSL_REQUIRE=false.
-    _db_ssl_default = "true" if _database_url else "false"
-    DATABASES = {
-        "default": dj_database_url.parse(
-            _database_url,
-            conn_max_age=600,
-            ssl_require=os.getenv("DB_SSL_REQUIRE", _db_ssl_default).lower() == "true",
-        )
-    }
+    _db_ssl_default = "true" if _is_postgres_url else "false"
+    _db_ssl_require = os.getenv("DB_SSL_REQUIRE", _db_ssl_default).lower() == "true"
+    _db_parse_kwargs = {"conn_max_age": int(os.getenv("DB_CONN_MAX_AGE", "600") or "600")}
+    if _is_postgres_url:
+        _db_parse_kwargs["ssl_require"] = _db_ssl_require
+    _default_db = dj_database_url.parse(_database_url, **_db_parse_kwargs)
+    _apply_postgres_connection_hardening(_default_db)
+    DATABASES = {"default": _default_db}
 else:
     DATABASES = {
         "default": {
@@ -101,8 +130,23 @@ else:
             "PASSWORD": os.getenv("DB_PASSWORD", "dashboard"),
             "HOST": os.getenv("DB_HOST", "localhost"),
             "PORT": os.getenv("DB_PORT", "5432"),
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "600") or "600"),
+            "CONN_HEALTH_CHECKS": True,
+            "OPTIONS": {
+                "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10") or "10"),
+            },
         }
     }
+
+# Краткий лог при старте (без пароля): какой движок реально используется.
+_db_cfg = DATABASES["default"]
+_engine = str(_db_cfg.get("ENGINE", ""))
+_db_name = str(_db_cfg.get("NAME", ""))
+print(
+    f"[django settings] DB engine={_engine.split('.')[-1]} name={_db_name!r} "
+    f"host={_db_cfg.get('HOST', '')!r}",
+    file=sys.stderr,
+)
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
@@ -143,6 +187,8 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:8000",
 ] + _csrf_extra
+if "https://*.trycloudflare.com" not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append("https://*.trycloudflare.com")
 if _railway_domain:
     railway_https = f"https://{_railway_domain}"
     if railway_https not in CSRF_TRUSTED_ORIGINS:
@@ -179,7 +225,8 @@ YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
 
 # ── Browser (TikTok / Instagram fallback via Playwright) ─────────────────────
 # BROWSER_HEADLESS=true  — headless Chromium for server deployment
-# BROWSER_STATE_FILE     — path to exported cookies JSON (from setup_tiktok_auth)
+# BROWSER_STATE_FILE     — куда сохранить куки setup_tiktok_auth (локально). В Docker
+#                          рабочий путь для воркера TikTok — <BROWSER_PROFILE_DIR>/tiktok_state.json
 # BROWSER_PROFILE_DIR    — persistent profile dir for local dev (auto-detected if empty)
 BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "false").lower() == "true"
 BROWSER_STATE_FILE = os.getenv("BROWSER_STATE_FILE", "")

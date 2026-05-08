@@ -50,7 +50,7 @@ def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[di
             "thumbnail_url": r.get("thumbnail_url") or "",
             "post_url": f"https://www.instagram.com/reel/{sc}/",
             "view_count": int(r.get("view_count") or 0),
-            "like_count": 0,
+            "like_count": int(r.get("like_count") or 0),
             "comment_count": 0,
             "share_count": 0,
             "posted_at": None,
@@ -62,38 +62,65 @@ def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[di
 _EXTRACT_TIMELINE_POSTS_JS = r"""
 (() => {
     const results = [];
+    const pushNode = (n) => {
+        if (!n || !n.shortcode) return;
+        const thumb = n.thumbnail_src || n.display_url || '';
+        const likes = n.edge_liked_by?.count || n.edge_media_preview_like?.count || 0;
+        const comments = n.edge_media_to_comment?.count || 0;
+        const views = n.video_view_count || n.video_play_count || n.play_count || 0;
+        const caption = n.edge_media_to_caption?.edges?.[0]?.node?.text || '';
+        results.push({
+            external_id: n.shortcode,
+            description: caption.slice(0, 500),
+            thumbnail_url: thumb,
+            post_url: 'https://www.instagram.com/p/' + n.shortcode + '/',
+            view_count: views,
+            like_count: likes,
+            comment_count: comments,
+            share_count: 0,
+            posted_at: n.taken_at_timestamp ? new Date(n.taken_at_timestamp * 1000).toISOString() : null,
+        });
+    };
+
+    const walk = (obj, depth = 0) => {
+        if (!obj || depth > 8) return;
+        if (Array.isArray(obj)) {
+            for (const item of obj) walk(item, depth + 1);
+            return;
+        }
+        if (typeof obj !== 'object') return;
+        if (obj.shortcode && (obj.edge_liked_by || obj.edge_media_preview_like || obj.display_url)) {
+            pushNode(obj);
+        }
+        for (const v of Object.values(obj)) {
+            if (v && typeof v === 'object') walk(v, depth + 1);
+        }
+    };
+
     try {
         const scripts = document.querySelectorAll('script[type="application/json"]');
         for (const s of scripts) {
             try {
                 const data = JSON.parse(s.textContent);
-                const text = JSON.stringify(data);
-                const edgeMatch = text.match(/"edge_owner_to_timeline_media":\{.*?"edges":\[(.*?)\]\}/s);
-                if (edgeMatch) {
-                    const nodes = JSON.parse('[' + edgeMatch[1] + ']');
-                    for (const edge of nodes) {
-                        const n = edge.node || edge;
-                        if (!n.shortcode) continue;
-                        const thumb = n.thumbnail_src || n.display_url || '';
-                        const likes = n.edge_liked_by?.count || n.edge_media_preview_like?.count || 0;
-                        const comments = n.edge_media_to_comment?.count || 0;
-                        const views = n.video_view_count || n.video_play_count || 0;
-                        const caption = n.edge_media_to_caption?.edges?.[0]?.node?.text || '';
-                        results.push({
-                            external_id: n.shortcode,
-                            description: caption.slice(0, 500),
-                            thumbnail_url: thumb,
-                            post_url: 'https://www.instagram.com/p/' + n.shortcode + '/',
-                            view_count: views,
-                            like_count: likes,
-                            comment_count: comments,
-                            share_count: 0,
-                            posted_at: n.taken_at_timestamp ? new Date(n.taken_at_timestamp * 1000).toISOString() : null,
-                        });
-                    }
-                    if (results.length > 0) break;
-                }
+                walk(data);
             } catch(e) {}
+        }
+
+        // Deduplicate by shortcode while preserving first non-empty like/comment values.
+        if (results.length > 0) {
+            const byId = new Map();
+            for (const r of results) {
+                const prev = byId.get(r.external_id);
+                if (!prev) {
+                    byId.set(r.external_id, r);
+                    continue;
+                }
+                if (!prev.like_count && r.like_count) prev.like_count = r.like_count;
+                if (!prev.comment_count && r.comment_count) prev.comment_count = r.comment_count;
+                if (!prev.description && r.description) prev.description = r.description;
+                if (!prev.thumbnail_url && r.thumbnail_url) prev.thumbnail_url = r.thumbnail_url;
+            }
+            return Array.from(byId.values()).slice(0, 20);
         }
 
         if (results.length === 0) {
@@ -118,7 +145,7 @@ _EXTRACT_TIMELINE_POSTS_JS = r"""
             }
         }
     } catch(e) {}
-    return results;
+    return results.slice(0, 20);
 })()
 """
 
@@ -318,8 +345,96 @@ async def scrape_reels_only_single(page, _wu, username: str) -> dict:
     }
 
 
+async def _page_indicates_profile_unavailable(page) -> bool:
+    text = (await page.evaluate("document.body?.innerText || ''") or "").lower()
+    markers = (
+        "sorry, this page isn't available",
+        "the link you followed may be broken",
+        "this page isn't available",
+        "user not found",
+        "страница недоступна",
+        "профиль удал",
+        "профиль не найден",
+        "ссылка недействительна",
+    )
+    return any(marker in text for marker in markers)
+
+
+async def _extract_profile_counts_from_dom(page) -> dict:
+    stats = await page.evaluate("""
+        (() => {
+            const toInt = (raw) => {
+                const s = String(raw || '').replace(/\\u00a0|\\u202f|\\s/g, '').replace(/,/g, '');
+                const m = s.match(/^([\\d]+(?:\\.[\\d]+)?)([kmb])?$/i);
+                if (!m) {
+                    const d = s.replace(/[^\\d]/g, '');
+                    return d ? parseInt(d, 10) : 0;
+                }
+                const n = parseFloat(m[1]);
+                const suf = (m[2] || '').toLowerCase();
+                const mul = suf === 'k' ? 1e3 : suf === 'm' ? 1e6 : suf === 'b' ? 1e9 : 1;
+                return Math.round(n * mul);
+            };
+            const out = { followers: 0, following: 0, posts: 0 };
+            try {
+                const root = document.querySelector('header') || document;
+                const readTitleNum = (sel) => {
+                    const el = root.querySelector(sel);
+                    if (!el) return 0;
+                    const t = el.getAttribute('title') || el.textContent || '';
+                    return toInt(t);
+                };
+                // Modern IG layout keeps counters in links with title attr.
+                const followersByLink =
+                    readTitleNum('a[href*="/followers"] span[title]') ||
+                    readTitleNum('a[href$="/followers/"] span[title]') ||
+                    readTitleNum('section a[href*="/followers"] span[title]');
+                const followingByLink =
+                    readTitleNum('a[href*="/following"] span[title]') ||
+                    readTitleNum('a[href$="/following/"] span[title]') ||
+                    readTitleNum('section a[href*="/following"] span[title]');
+                if (followersByLink > 0) out.followers = followersByLink;
+                if (followingByLink > 0) out.following = followingByLink;
+
+                const items = Array.from(document.querySelectorAll('header section ul li, section ul li'));
+                for (const li of items) {
+                    const txt = (li.textContent || '').replace(/\\s+/g, ' ').trim();
+                    if (!txt) continue;
+                    const m = txt.match(/([\\d.,]+\\s*[KMBkmb]?)/);
+                    const val = m ? toInt(m[1]) : 0;
+                    const low = txt.toLowerCase();
+                    if (!out.posts && /(posts?|публикац)/i.test(low)) out.posts = val;
+                    else if (!out.followers && /(followers?|подписчик)/i.test(low)) out.followers = val;
+                    else if (!out.following && /(following|подписк)/i.test(low)) out.following = val;
+                }
+                // Fallback for layouts where list items are absent:
+                // parse nearby label + value nodes in profile header.
+                if (!out.followers || !out.following || !out.posts) {
+                    const text = (root.innerText || '').replace(/\\s+/g, ' ');
+                    const mf = text.match(/([\\d.,]+\\s*[KMBkmb]?)\\s+followers?/i);
+                    const mfo = text.match(/([\\d.,]+\\s*[KMBkmb]?)\\s+following/i);
+                    const mp = text.match(/([\\d.,]+\\s*[KMBkmb]?)\\s+posts?/i);
+                    if (!out.followers && mf) out.followers = toInt(mf[1]);
+                    if (!out.following && mfo) out.following = toInt(mfo[1]);
+                    if (!out.posts && mp) out.posts = toInt(mp[1]);
+                }
+            } catch (_) {}
+            return out;
+        })()
+    """)
+    if not isinstance(stats, dict):
+        return {"followers": 0, "following": 0, "posts": 0}
+    return {
+        "followers": int(stats.get("followers") or 0),
+        "following": int(stats.get("following") or 0),
+        "posts": int(stats.get("posts") or 0),
+    }
+
+
 async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
     url = f"https://www.instagram.com/{username}/"
+    # ВАЖНО: сначала открываем главную страницу профиля и собираем лайки/комменты
+    # из timeline JSON. Затем идём на /reels/ только за просмотрами.
     await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     await _wu.wait_for_anti_bot_clear(page, platform="instagram")
     await page.wait_for_timeout(2500)
@@ -328,6 +443,8 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         raise ValueError(
             "Instagram требует авторизации — войдите в аккаунт в настройках и повторите."
         )
+    if await _page_indicates_profile_unavailable(page):
+        raise ValueError("Sorry, this page isn't available.")
 
     desc = await page.evaluate(
         "document.querySelector('meta[name=\"description\"]')?.content || ''"
@@ -344,7 +461,13 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         follower_count = _parse(m.group(1))
         following_count = _parse(m.group(2))
         post_count = _parse(m.group(3))
-    else:
+    dom_stats = await _extract_profile_counts_from_dom(page)
+    if dom_stats:
+        follower_count = int(dom_stats.get("followers") or follower_count or 0)
+        following_count = int(dom_stats.get("following") or following_count or 0)
+        post_count = int(dom_stats.get("posts") or post_count or 0)
+
+    if follower_count == 0 or following_count == 0 or post_count == 0:
         stats = await page.evaluate("""
             (() => {
                 try {
@@ -360,9 +483,12 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
             })()
         """)
         if stats:
-            follower_count = stats.get("followers", 0)
-            following_count = stats.get("following", 0)
-            post_count = stats.get("posts", 0)
+            if follower_count == 0:
+                follower_count = stats.get("followers", 0)
+            if following_count == 0:
+                following_count = stats.get("following", 0)
+            if post_count == 0:
+                post_count = stats.get("posts", 0)
 
     display_name = await page.evaluate(
         "document.querySelector('meta[property=\"og:title\"]')?.content?.split('•')[0]?.trim() || ''"
@@ -399,6 +525,13 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         }
 
     reels_rows = await _scrape_reels_tab_once(page, _wu, username)
+    reels_dom_stats = await _extract_profile_counts_from_dom(page)
+    if reels_dom_stats.get("followers", 0) > 0:
+        follower_count = int(reels_dom_stats["followers"])
+    if reels_dom_stats.get("following", 0) > 0:
+        following_count = int(reels_dom_stats["following"])
+    if reels_dom_stats.get("posts", 0) > 0:
+        post_count = int(reels_dom_stats["posts"])
     posts = _merge_posts_with_reels_grid(posts, reels_rows)
 
     return {
@@ -410,6 +543,20 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         "like_count": 0,
         "post_count": post_count,
         "_posts": posts or [],
+    }
+
+
+async def scrape_profile_counts_only_on_page(page, _wu, username: str) -> dict:
+    url = f"https://www.instagram.com/{username}/reels/"
+    await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+    await _wu.wait_for_anti_bot_clear(page, platform="instagram")
+    await page.wait_for_timeout(1800)
+    stats = await _extract_profile_counts_from_dom(page)
+    return {
+        "follower_count": int(stats.get("followers") or 0),
+        "following_count": int(stats.get("following") or 0),
+        "post_count": int(stats.get("posts") or 0),
+        "_posts": [],
     }
 
 
@@ -427,6 +574,11 @@ async def execute_payload(page, _wu, arg: dict) -> dict:
         if not u:
             raise ValueError("Не указан username")
         return await scrape_reels_only_single(page, _wu, u)
+    if bool(arg.get("counts_only")):
+        u = (arg.get("username") or "").lstrip("@")
+        if not u:
+            raise ValueError("Не указан username")
+        return await scrape_profile_counts_only_on_page(page, _wu, u)
     u = (arg.get("username") or "").lstrip("@")
     if not u:
         raise ValueError("Не указан username")

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 from platforms.worker_pool import call_worker
+from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK, is_profile_unavailable_error
 
 _HEADERS = {
     "User-Agent": (
@@ -49,6 +50,47 @@ def _parse_videos(items: list[dict]) -> list[dict]:
             "created_at": item.get("createTime", 0),
         })
     return videos
+
+
+def _merge_parsed_videos(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    """Объединить списки постов по id (SSR часто даёт только первую страницу, worker — остальное)."""
+    by_id: dict[str, dict] = {}
+    order: list[str] = []
+
+    def _merge_into(cur: dict, other: dict) -> None:
+        cur["play_count"] = max(int(cur.get("play_count") or 0), int(other.get("play_count") or 0))
+        cur["like_count"] = max(int(cur.get("like_count") or 0), int(other.get("like_count") or 0))
+        cur["comment_count"] = max(int(cur.get("comment_count") or 0), int(other.get("comment_count") or 0))
+        cur["share_count"] = max(int(cur.get("share_count") or 0), int(other.get("share_count") or 0))
+        ca = max(int(cur.get("created_at") or 0), int(other.get("created_at") or 0))
+        if ca:
+            cur["created_at"] = ca
+        if not cur.get("description") and other.get("description"):
+            cur["description"] = other["description"]
+        if not cur.get("cover") and other.get("cover"):
+            cur["cover"] = other["cover"]
+
+    for v in primary:
+        vid = str(v.get("id") or "")
+        if not vid:
+            continue
+        if vid not in by_id:
+            by_id[vid] = dict(v)
+            order.append(vid)
+        else:
+            _merge_into(by_id[vid], v)
+
+    for v in secondary:
+        vid = str(v.get("id") or "")
+        if not vid:
+            continue
+        if vid not in by_id:
+            by_id[vid] = dict(v)
+            order.append(vid)
+        else:
+            _merge_into(by_id[vid], v)
+
+    return [by_id[i] for i in order]
 
 
 def _extract_username_from_url(url: str) -> str:
@@ -118,6 +160,39 @@ def _extract_avatar_from_html(html: str) -> str:
     return _html.unescape(m.group(1)).strip()
 
 
+def _avatar_score(url: str) -> int:
+    """
+    Prefer profile avatar endpoints over generic media thumbnails.
+    TikTok profile avatars usually contain avt markers.
+    """
+    u = (url or "").strip().lower()
+    if not u:
+        return 0
+    score = 1
+    if "tiktokcdn" in u or "muscdn" in u:
+        score += 1
+    if "avt-" in u or "/avt/" in u or "tos-maliva-avt-" in u:
+        score += 8
+    # Penalize obvious post/video preview urls.
+    if "cover" in u or "video" in u or "thumb" in u:
+        score -= 3
+    return score
+
+
+def _pick_best_avatar(*candidates: str) -> str:
+    best = ""
+    best_score = 0
+    for c in candidates:
+        val = str(c or "").strip()
+        if not val:
+            continue
+        s = _avatar_score(val)
+        if s > best_score:
+            best = val
+            best_score = s
+    return best
+
+
 def _filter_profile_items(items: list[dict], expected_username: str, expected_user_id: str = "") -> list[dict]:
     expected_username = (expected_username or "").strip().lstrip("@").lower()
     expected_user_id = (expected_user_id or "").strip()
@@ -137,7 +212,80 @@ def _filter_profile_items(items: list[dict], expected_username: str, expected_us
     return filtered
 
 
-def _run_worker(url: str) -> tuple[list[dict], dict]:
+def _extract_author_stats_from_items(items: list[dict]) -> dict:
+    """
+    Read profile counters from item_list payloads (authorStats/authorStatsV2).
+    This is reliable even when profile header DOM does not expose counters.
+    """
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        stats = item.get("authorStats") or item.get("authorStatsV2") or {}
+        if not isinstance(stats, dict):
+            continue
+        follower = int(stats.get("followerCount") or 0)
+        following = int(stats.get("followingCount") or 0)
+        likes = int(stats.get("heartCount") or stats.get("heart") or 0)
+        videos = int(stats.get("videoCount") or 0)
+        if follower or following or likes or videos:
+            return {
+                "follower_count": follower,
+                "following_count": following,
+                "like_count": likes,
+                "video_count": videos,
+            }
+    return {
+        "follower_count": 0,
+        "following_count": 0,
+        "like_count": 0,
+        "video_count": 0,
+    }
+
+
+def _extract_author_avatar_from_items(
+    items: list[dict],
+    expected_username: str,
+    expected_user_id: str = "",
+) -> str:
+    """
+    Prefer avatar from item.author payloads (most reliable profile image source
+    when page meta/DOM is noisy or points to media thumbnails).
+    """
+    exp_u = (expected_username or "").strip().lstrip("@").lower()
+    exp_id = (expected_user_id or "").strip()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        author = item.get("author", {}) if isinstance(item.get("author"), dict) else {}
+        a_user = str(author.get("uniqueId") or "").strip().lower()
+        a_id = str(author.get("id") or "").strip()
+        if exp_u and a_user and a_user != exp_u:
+            continue
+        if exp_id and a_id and a_id != exp_id:
+            continue
+        for key in ("avatarLarger", "avatarMedium", "avatarThumb"):
+            val = str(author.get(key) or "").strip()
+            if val:
+                return val
+    return ""
+
+
+def _is_tiktok_profile_unavailable_html(html: str) -> bool:
+    text = (html or "").lower()
+    if re.search(r"couldn.{0,3}t find this account", text):
+        return True
+    markers = (
+        "could not find this account",
+        "this account doesn",
+        "account not found",
+        "профиль не найден",
+        "аккаунт не найден",
+        "user not found",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], dict]:
     # Read browser settings from Django settings so the subprocess
     # always gets the correct values even if os.environ wasn't updated.
     try:
@@ -158,8 +306,12 @@ def _run_worker(url: str) -> tuple[list[dict], dict]:
         return [], {}
 
     os.environ.update(browser_env)
+
     try:
-        data = call_worker(_WORKER, {"url": url})
+        payload = {"url": url, "target_post_count": int(target_post_count or 0)}
+        # Всегда используем daemon worker pool: одно окно TikTok переиспользуется
+        # между аккаунтами и не закрывается после каждого refresh.
+        data = call_worker(_WORKER, payload)
         if isinstance(data, list):
             # Backward compatibility with old worker payload.
             return _filter_profile_items(data, _extract_username_from_url(url)), {}
@@ -167,6 +319,10 @@ def _run_worker(url: str) -> tuple[list[dict], dict]:
         profile_stats = data.get("profile_stats") or {}
         return _filter_profile_items(items, _extract_username_from_url(url)), profile_stats
     except Exception as e:
+        # Worker may already return a user-facing "profile unavailable" style error.
+        # Propagate it so API can mark account.profile_unavailable in a uniform way.
+        if is_profile_unavailable_error(str(e)):
+            raise
         print(f"[worker] error: {e}", file=sys.stderr)
         return [], {}
 
@@ -198,6 +354,9 @@ def fetch_tiktok_profile(username: str) -> dict:
                 html = response.text
                 break
             html = response.text
+            # Не ставим "profile unavailable" по одному HTML-ответу: TikTok часто
+            # отдаёт антибот/ошибочную страницу, визуально похожую на "not found".
+            # Окончательно решаем только после fallback через worker.
             # Detect error page ("Something went wrong" / empty shell without data)
             if _UNIVERSAL_RE.search(html):
                 break   # good page, stop retrying
@@ -216,6 +375,7 @@ def fetch_tiktok_profile(username: str) -> dict:
         user = user_info.get("user", {})
         stats = user_info.get("stats", {})
     else:
+        # Не считаем это окончательным "профиль удалён": сначала пробуем worker.
         # Don't fail hard here: TikTok often omits SSR data under bot pressure.
         # We still try the Playwright worker and return partial data if needed.
         print(
@@ -269,10 +429,45 @@ def fetch_tiktok_profile(username: str) -> dict:
         raw = _filter_profile_items(raw, username, str(user.get("id") or ""))
         videos = _parse_videos(raw)
 
-    worker_stats = {}
-    if not videos:
-        items, worker_stats = _run_worker(url)
-        videos = _parse_videos(items)
+    worker_stats: dict = {}
+    worker_author_stats = {
+        "follower_count": 0,
+        "following_count": 0,
+        "like_count": 0,
+        "video_count": 0,
+    }
+    video_count_stat = int(stats.get("videoCount") or 0)
+    ssr_n = len(videos)
+    # SSR почти всегда неполный (~одна страница item_list). Дополнительно TikTok часто
+    # отдаёт videoCount=0 или заниженный — тогда без worker остаётся 16/3 постов вместо ~37.
+    _FIRST_PAGE_CAP = 36
+    need_posts_worker = (
+        not videos
+        or (video_count_stat > ssr_n)
+        or (video_count_stat == 0 and ssr_n > 0)
+        or (
+            ssr_n > 0
+            and ssr_n <= _FIRST_PAGE_CAP
+            and (video_count_stat == 0 or video_count_stat <= _FIRST_PAGE_CAP)
+        )
+    )
+
+    worker_avatar = ""
+    if need_posts_worker:
+        if video_count_stat > 0:
+            worker_post_target = max(video_count_stat, ssr_n + 1)
+        else:
+            # Нет официального счётчика — крутим ленту до «второй-третьей» страницы (~40+).
+            worker_post_target = max(ssr_n + 28, 45)
+        worker_items, worker_stats = _run_worker(url, target_post_count=worker_post_target)
+        worker_avatar = _extract_author_avatar_from_items(
+            worker_items,
+            username,
+            str(user.get("id") or ""),
+        )
+        worker_author_stats = _extract_author_stats_from_items(worker_items)
+        worker_videos = _parse_videos(worker_items)
+        videos = _merge_parsed_videos(videos, worker_videos) if videos else worker_videos
 
     html_stats = _extract_tiktok_stats_from_html(html)
     follower_count = stats.get("followerCount", 0) or html_stats["follower_count"]
@@ -282,28 +477,28 @@ def fetch_tiktok_profile(username: str) -> dict:
     # If core counters are still empty, ask Playwright worker for DOM-derived stats
     # (XPath/CSS selectors on rendered profile header).
     if (follower_count == 0 or like_count == 0) and not worker_stats:
-        _, worker_stats = _run_worker(url)
+        _, worker_stats = _run_worker(url, target_post_count=0)
 
     worker_follower = _parse_short_count(worker_stats.get("follower_text", "")) if worker_stats else 0
     worker_following = _parse_short_count(worker_stats.get("following_text", "")) if worker_stats else 0
     worker_likes = _parse_short_count(worker_stats.get("like_text", "")) if worker_stats else 0
 
     if follower_count == 0:
-        follower_count = worker_follower
+        follower_count = worker_author_stats["follower_count"] or worker_follower
     if following_count == 0:
-        following_count = worker_following
+        following_count = worker_author_stats["following_count"] or worker_following
     if like_count == 0:
-        like_count = worker_likes
+        like_count = worker_author_stats["like_count"] or worker_likes
     if like_count == 0 and videos:
         # Fallback when TikTok hides profile "Likes" counter in DOM for this session.
         like_count = sum(int(v.get("like_count", 0) or 0) for v in videos)
-    video_count = stats.get("videoCount", 0)
-    avatar_url = (
-        user.get("avatarMedium")
-        or user.get("avatarLarger", "")
-        or (worker_stats.get("avatar_url") if worker_stats else "")
-        or _extract_avatar_from_html(html)
-        or (videos[0].get("cover", "") if videos else "")
+    video_count = stats.get("videoCount", 0) or worker_author_stats["video_count"]
+    avatar_url = _pick_best_avatar(
+        worker_avatar,
+        (worker_stats.get("avatar_url") if worker_stats else ""),
+        user.get("avatarLarger", ""),
+        user.get("avatarMedium", ""),
+        _extract_avatar_from_html(html),
     )
 
     # For TikTok, empty video list is often a transient anti-bot/API issue.

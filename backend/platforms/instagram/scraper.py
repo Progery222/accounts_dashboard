@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -52,6 +53,22 @@ def _html_indicates_removed_instagram_profile(html: str) -> bool:
     return False
 
 
+def _message_indicates_removed_instagram_profile(message: str) -> bool:
+    low = (message or "").lower()
+    markers = (
+        "sorry, this page isn't available",
+        "this page isn't available",
+        "the link you followed may be broken",
+        "user not found",
+        "instagram @",
+        "страница не найдена",
+        "профиль удал",
+        "профиль недоступ",
+        "ссылка недействительна",
+    )
+    return any(marker in low for marker in markers)
+
+
 def _instagram_creds_from_settings() -> tuple[str, str, str]:
     try:
         from django.conf import settings
@@ -70,7 +87,14 @@ def _call_instagram_worker(payload: dict) -> dict:
     """
     if not _WORKER.exists():
         raise ValueError(f"Внутренняя ошибка: worker не найден по пути {_WORKER}")
-    data = call_worker(_WORKER, payload)
+    timeout_sec = 180.0
+    try:
+        from django.conf import settings
+
+        timeout_sec = float(getattr(settings, "INSTAGRAM_WORKER_TIMEOUT_SEC", timeout_sec) or timeout_sec)
+    except Exception:
+        pass
+    data = call_worker(_WORKER, payload, timeout_sec=timeout_sec)
     if "_posts" not in data:
         data["_posts"] = []
     return data
@@ -105,7 +129,7 @@ def _merge_posts_with_reels_grid_scraper(posts: list[dict], rows: list[dict]) ->
             "thumbnail_url": r.get("thumbnail_url") or "",
             "post_url": f"https://www.instagram.com/reel/{sc}/",
             "view_count": int(r.get("view_count") or 0),
-            "like_count": 0,
+            "like_count": int(r.get("like_count") or 0),
             "comment_count": 0,
             "share_count": 0,
             "posted_at": None,
@@ -138,6 +162,21 @@ def _merge_reels_views_into_posts(username: str, posts: list[dict]) -> list[dict
                 continue
 
     return _merge_posts_with_reels_grid_scraper(posts or [], grid)
+
+
+def _fetch_instagram_counts_via_worker(username: str) -> dict:
+    u = (username or "").lstrip("@").strip()
+    if not u:
+        return {"follower_count": 0, "following_count": 0, "post_count": 0}
+    try:
+        data = _call_instagram_worker({"username": u, "counts_only": True})
+    except Exception:
+        return {"follower_count": 0, "following_count": 0, "post_count": 0}
+    return {
+        "follower_count": int(data.get("follower_count") or 0),
+        "following_count": int(data.get("following_count") or 0),
+        "post_count": int(data.get("post_count") or 0),
+    }
 
 
 def _instaloader_login_once(insta_user: str, insta_pass: str, session_file: str):
@@ -342,6 +381,45 @@ def _parse_count(text: str) -> int:
     return int(digits) if digits else 0
 
 
+def _fetch_public_meta_counts(username: str) -> dict:
+    """
+    Read public counters from unauthenticated profile meta description.
+    This can be more reliable than authenticated GraphQL/session fallbacks.
+    """
+    u = (username or "").lstrip("@").strip()
+    if not u:
+        return {"follower_count": 0, "following_count": 0, "post_count": 0}
+    try:
+        r = httpx.get(
+            f"https://www.instagram.com/{u}/",
+            headers=_HEADERS,
+            follow_redirects=True,
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return {"follower_count": 0, "following_count": 0, "post_count": 0}
+        html = r.text or ""
+        meta_desc = (
+            re.search(r'<meta\s+name="description"\s+content="([^"]*)"', html)
+            or re.search(r'<meta\s+property="og:description"\s+content="([^"]*)"', html)
+        )
+        if not meta_desc:
+            return {"follower_count": 0, "following_count": 0, "post_count": 0}
+        text = _html.unescape(meta_desc.group(1))
+        # Order-independent extraction, e.g.:
+        # "15 posts, 6 followers, 5 following - ..."
+        f_m = re.search(r'([\d,.]+\s*[KMBkmb]?)\s+Followers?', text, re.I)
+        fo_m = re.search(r'([\d,.]+\s*[KMBkmb]?)\s+Following', text, re.I)
+        p_m = re.search(r'([\d,.]+\s*[KMBkmb]?)\s+Posts?', text, re.I)
+        return {
+            "follower_count": _parse_count(f_m.group(1)) if f_m else 0,
+            "following_count": _parse_count(fo_m.group(1)) if fo_m else 0,
+            "post_count": _parse_count(p_m.group(1)) if p_m else 0,
+        }
+    except Exception:
+        return {"follower_count": 0, "following_count": 0, "post_count": 0}
+
+
 def fetch_instagram_profile(username: str) -> dict:
     """
     Fetch Instagram profile.
@@ -350,13 +428,37 @@ def fetch_instagram_profile(username: str) -> dict:
     Без кредов — полный сбор через Playwright (профиль + Reels).
     """
     username = username.lstrip("@")
+    # Fast pre-check for "page unavailable" HTML before any heavier scraper path.
+    # This catches removed/banned/not-found profiles even when Instaloader returns
+    # a "successful" shell with empty counters.
+    try:
+        public_url = f"https://www.instagram.com/{username}/"
+        r = httpx.get(public_url, headers=_HEADERS, follow_redirects=True, timeout=15)
+        if r.status_code == 404 or _html_indicates_removed_instagram_profile(r.text):
+            raise_instagram_profile_unavailable(username)
+    except ValueError:
+        raise
+    except Exception:
+        # Best-effort only: if network is flaky, continue with normal scraper flow.
+        pass
     try:
         from django.conf import settings
         insta_user = getattr(settings, "INSTAGRAM_USERNAME", "")
         insta_pass = getattr(settings, "INSTAGRAM_PASSWORD", "")
         session_file = getattr(settings, "INSTAGRAM_SESSION_FILE", "")
+        force_playwright = bool(getattr(settings, "INSTAGRAM_FORCE_PLAYWRIGHT", False))
     except Exception:
         insta_user = insta_pass = session_file = ""
+        force_playwright = False
+
+    # Optional local override to troubleshoot/update via visible browser flow.
+    if not force_playwright:
+        force_playwright = os.getenv("INSTAGRAM_FORCE_PLAYWRIGHT", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+
+    if force_playwright:
+        return _fetch_instagram_playwright(username)
 
     if insta_user and insta_pass:
         # Instaloader для профиля и постов; затем один проход Playwright по /reels/ для просмотров.
@@ -375,6 +477,35 @@ def _fetch_instagram_instaloader(username: str, insta_user: str, insta_pass: str
     summary, posts = chunk
     out = dict(summary)
     out["_posts"] = _merge_reels_views_into_posts(username, posts)
+    public_counts = _fetch_public_meta_counts(username)
+    # Prefer public meta counters when they are available and differ.
+    # In practice this fixes occasional stale/shifted counters from authenticated flows.
+    if int(public_counts.get("follower_count") or 0) > 0:
+        out["follower_count"] = int(public_counts["follower_count"])
+    if int(public_counts.get("following_count") or 0) > 0:
+        out["following_count"] = int(public_counts["following_count"])
+    if int(public_counts.get("post_count") or 0) > 0:
+        out["post_count"] = int(public_counts["post_count"])
+    worker_counts = _fetch_instagram_counts_via_worker(username)
+    if int(worker_counts.get("follower_count") or 0) > 0:
+        out["follower_count"] = int(worker_counts["follower_count"])
+    if int(worker_counts.get("following_count") or 0) > 0:
+        out["following_count"] = int(worker_counts["following_count"])
+    if int(worker_counts.get("post_count") or 0) > 0:
+        out["post_count"] = int(worker_counts["post_count"])
+    # Instaloader иногда отдает "пустой" профиль (все ключевые счётчики = 0)
+    # без явной ошибки. В таком случае пробуем Playwright, чтобы получить
+    # актуальные данные в том же refresh-запросе.
+    if (
+        int(out.get("follower_count") or 0) == 0
+        and int(out.get("post_count") or 0) == 0
+        and len(out.get("_posts") or []) == 0
+    ):
+        print(
+            f"[instagram] instaloader returned empty profile for @{username}; falling back to Playwright",
+            file=sys.stderr,
+        )
+        return _fetch_instagram_playwright(username)
     return out
 
 
@@ -698,4 +829,12 @@ def _parse_instagram_graphql_user(user: dict, username: str) -> dict:
 
 def _fetch_instagram_playwright(username: str) -> dict:
     """Fallback: Playwright subprocess (requires manual login in browser)."""
-    return _call_instagram_worker({"username": username})
+    try:
+        return _call_instagram_worker({"username": username})
+    except ValueError as e:
+        # Worker may return plain text errors without PROFILE_UNAVAILABLE prefix.
+        # Normalize known "page unavailable / not found" phrases so views can
+        # reliably set account.profile_unavailable.
+        if _message_indicates_removed_instagram_profile(str(e)):
+            raise_instagram_profile_unavailable(username)
+        raise

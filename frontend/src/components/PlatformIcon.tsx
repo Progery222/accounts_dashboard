@@ -61,6 +61,16 @@ export default function PlatformIcon({ platform, className = "w-4 h-4" }: Props)
         </svg>
       );
 
+    case "reddit":
+      return (
+        <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+          <path d="M14.11 15.95c-.45.45-1.18.67-2.11.67-.93 0-1.66-.22-2.11-.67a.75.75 0 10-1.06 1.06c.73.73 1.83 1.11 3.17 1.11 1.34 0 2.44-.38 3.17-1.11a.75.75 0 00-1.06-1.06z" />
+          <circle cx="9.25" cy="12.25" r="1.25" />
+          <circle cx="14.75" cy="12.25" r="1.25" />
+          <path d="M21.5 11.5a2.5 2.5 0 00-4.24-1.78 8.62 8.62 0 00-4.45-1.41l.77-3.15 2.15.52a1.9 1.9 0 101.81-1.33 1.9 1.9 0 00-1.62.93l-2.71-.66a.75.75 0 00-.9.55l-.94 3.84A8.62 8.62 0 006.74 9.7 2.5 2.5 0 102.5 11.5c0 .23.01.45.04.67C2.51 12.45 2.5 12.72 2.5 13c0 3.87 4.26 7 9.5 7s9.5-3.13 9.5-7c0-.28-.01-.55-.04-.83.03-.22.04-.44.04-.67zM17 3.85a.4.4 0 110 .8.4.4 0 010-.8z" />
+        </svg>
+      );
+
     default:
       return (
         <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>

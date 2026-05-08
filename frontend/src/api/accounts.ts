@@ -17,6 +17,8 @@ export interface Account {
   post_count: number;
   /** Instagram и др.: последнее обновление зафиксировало удалённый/недоступный профиль */
   profile_unavailable?: boolean;
+  is_platform_hidden?: boolean;
+  is_profile_hidden?: boolean;
   follower_delta: number | null;
   like_delta: number | null;
   view_delta: number | null;
@@ -28,6 +30,7 @@ export interface Account {
 export interface Platform {
   value: string;
   label: string;
+  hidden?: boolean;
 }
 
 export interface Post {
@@ -73,6 +76,9 @@ export interface AccountsFilter {
   platform?: string;
   profile_id?: number | "none";
   search?: string;
+  include_hidden?: boolean;
+  include_hidden_platforms?: boolean;
+  include_hidden_profiles?: boolean;
 }
 
 export async function getAccounts(filter: AccountsFilter = {}): Promise<Account[]> {
@@ -177,11 +183,51 @@ export interface RefreshSchedule {
   enabled: boolean;
   mode: "interval" | "times";
   interval_hours: number;
+  skip_recent_hours: number;
+  /** Сохранять CSV после каждого завершённого автообновления (скачивание в интерфейсе). */
+  auto_refresh_csv_report?: boolean;
+  /** В автообновлении учитывать аккаунты скрытых платформ. */
+  include_hidden_platform_accounts?: boolean;
+  /** В автообновлении учитывать аккаунты скрытых профилей. */
+  include_hidden_profile_accounts?: boolean;
   times: string[];
+}
+
+export interface GlobalVisibility {
+  hidden_platforms: string[];
+  hidden_profile_ids: number[];
+}
+
+export interface AutoRefreshStatus {
+  is_running: boolean;
+  source: string;
+  cancel_requested?: boolean;
+  total_accounts: number;
+  processed_accounts: number;
+  success_accounts: number;
+  failed_accounts: number;
+  progress_percent: number;
+  current_account: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+  updated_at: string;
+  has_csv_report?: boolean;
+  report_generated_at?: string | null;
 }
 
 export async function getSchedule(): Promise<RefreshSchedule> {
   const { data } = await apiClient.get<RefreshSchedule>("/api/accounts/schedule/");
+  return data;
+}
+
+export async function getGlobalVisibility(): Promise<GlobalVisibility> {
+  const { data } = await apiClient.get<GlobalVisibility>("/api/accounts/visibility/");
+  return data;
+}
+
+export async function setGlobalVisibility(payload: Partial<GlobalVisibility>): Promise<GlobalVisibility> {
+  const { data } = await apiClient.post<GlobalVisibility>("/api/accounts/visibility/", payload);
   return data;
 }
 
@@ -190,11 +236,57 @@ export async function setSchedule(s: Partial<RefreshSchedule>): Promise<RefreshS
   return data;
 }
 
+export async function getAutoRefreshStatus(): Promise<AutoRefreshStatus> {
+  const { data } = await apiClient.get<AutoRefreshStatus>("/api/accounts/auto-refresh-status/");
+  return data;
+}
+
+export async function runAutoRefreshNow(): Promise<{ started: boolean; detail?: string }> {
+  const { data } = await apiClient.post<{ started: boolean; detail?: string }>(
+    "/api/accounts/auto-refresh-run-now/",
+  );
+  return data;
+}
+
+export async function stopAutoRefresh(): Promise<{ stopped: boolean; detail?: string }> {
+  const { data } = await apiClient.post<{ stopped: boolean; detail?: string }>(
+    "/api/accounts/auto-refresh-stop/",
+  );
+  return data;
+}
+
+/** CSV последнего автообновления (UTF-8 BOM). Ошибка — если отчёта ещё нет. */
+export async function downloadAutoRefreshReport(): Promise<void> {
+  const res = await apiClient.get<Blob>("/api/accounts/auto-refresh-report/", {
+    responseType: "blob",
+    validateStatus: () => true,
+  });
+  if (res.status !== 200) {
+    let msg = "Не удалось скачать отчёт.";
+    try {
+      const t = await res.data.text();
+      const j = JSON.parse(t) as { detail?: string };
+      if (j.detail) msg = j.detail;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg);
+  }
+  const url = window.URL.createObjectURL(res.data);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `auto-refresh-report-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+  a.click();
+  window.URL.revokeObjectURL(url);
+}
+
 export interface SnapshotImportResult {
   accounts_created: number;
   accounts_updated: number;
   posts_created: number;
   posts_updated: number;
+  account_snapshots_upserted?: number;
+  post_snapshots_upserted?: number;
   errors: Array<{ section: string; row: number; message: string }>;
 }
 
@@ -212,6 +304,14 @@ export async function downloadSnapshotExport(): Promise<void> {
 export async function importSnapshotFile(file: File): Promise<SnapshotImportResult> {
   const fd = new FormData();
   fd.append("file", file);
-  const { data } = await apiClient.post<SnapshotImportResult>("/api/accounts/import-snapshot/", fd);
+  const { data } = await apiClient.post<SnapshotImportResult>(
+    "/api/accounts/import-snapshot/",
+    fd,
+    {
+      // Let browser/axios set proper multipart boundary.
+      headers: { "Content-Type": "multipart/form-data" },
+      timeout: 600_000,
+    },
+  );
   return data;
 }

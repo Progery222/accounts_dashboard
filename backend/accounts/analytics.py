@@ -18,7 +18,7 @@ from .models import Platform, Post, PostSnapshot
 
 # ── constants ────────────────────────────────────────────────────────────────
 
-PERIOD_DAYS: dict[str, int | None] = {"1d": 1, "7d": 7, "30d": 30, "all": None}
+PERIOD_DAYS: dict[str, int] = {"1d": 1, "7d": 7, "30d": 30}
 
 WEEKDAY_LABELS = {1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс"}
 
@@ -52,24 +52,18 @@ def _annotated_qs(account_id=None, platform=None, period="1d", min_views=MIN_VIE
     if platform:
         qs = qs.filter(account__platform=platform)
 
-    days = PERIOD_DAYS.get(period)
-    if days is not None:
-        period_start = today - datetime.timedelta(days=days)
-        qs = qs.annotate(
-            view_delta_period=ExpressionWrapper(
-                F("view_count") - _snap_subq("view_count", period_start),
-                output_field=IntegerField(),
-            ),
-            like_delta_period=ExpressionWrapper(
-                F("like_count") - _snap_subq("like_count", period_start),
-                output_field=IntegerField(),
-            ),
-        )
-    else:
-        qs = qs.annotate(
-            view_delta_period=F("view_count"),
-            like_delta_period=F("like_count"),
-        )
+    days = PERIOD_DAYS.get(period, 7)
+    period_start = today - datetime.timedelta(days=days)
+    qs = qs.annotate(
+        view_delta_period=ExpressionWrapper(
+            F("view_count") - _snap_subq("view_count", period_start),
+            output_field=IntegerField(),
+        ),
+        like_delta_period=ExpressionWrapper(
+            F("like_count") - _snap_subq("like_count", period_start),
+            output_field=IntegerField(),
+        ),
+    )
 
     qs = qs.annotate(
         engagement_rate=Case(
@@ -245,6 +239,13 @@ def insights(request):
                 dt = datetime.datetime.fromisoformat(str(dt))
             except Exception:
                 continue
+        try:
+            # Нормализуем в локальную TZ проекта (Europe/Moscow), чтобы график
+            # "Лучшее время" соответствовал подписи UI.
+            if timezone.is_aware(dt):
+                dt = timezone.localtime(dt, timezone.get_current_timezone())
+        except Exception:
+            pass
         h  = dt.hour
         wd = dt.isoweekday()   # 1=Mon … 7=Sun
         er = float(r["engagement_rate"] or 0)

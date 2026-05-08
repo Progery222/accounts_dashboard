@@ -11,6 +11,8 @@ Runs headless=False with the window placed off-screen.
 """
 import asyncio
 import json
+import os
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -21,7 +23,21 @@ from playwright.async_api import async_playwright
 NAV_TIMEOUT         = 35_000
 LOAD_TIMEOUT        = 25_000
 AUTH_DETECT_TIMEOUT = 12_000
-MAX_POSTS           = 5
+MAX_POSTS           = int(os.getenv("FACEBOOK_MAX_POSTS", "12") or "12")
+PAUSE_PRE_NAV_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_NAV_MIN_MS", "700") or "700")
+PAUSE_PRE_NAV_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_NAV_MAX_MS", "1700") or "1700")
+PAUSE_SCROLL_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_SCROLL_MIN_MS", "900") or "900")
+PAUSE_SCROLL_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_SCROLL_MAX_MS", "1900") or "1900")
+PAUSE_PRE_M_BASIC_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_MBASIC_MIN_MS", "800") or "800")
+PAUSE_PRE_M_BASIC_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_MBASIC_MAX_MS", "1800") or "1800")
+PAUSE_BETWEEN_TASKS_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_BETWEEN_TASKS_MIN_MS", "1000") or "1000")
+PAUSE_BETWEEN_TASKS_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_BETWEEN_TASKS_MAX_MS", "2200") or "2200")
+
+
+def _ms_jitter(min_ms: int, max_ms: int) -> float:
+    lo = max(0, min_ms)
+    hi = max(lo, max_ms)
+    return random.uniform(lo, hi) / 1000.0
 
 
 # ── Python parse helper ───────────────────────────────────────────────────────
@@ -56,6 +72,108 @@ def _parse_count(text: str) -> int:
         return int(num * mult)
     digits = re.sub(r'[^\d]', '', text)
     return int(digits) if digits else 0
+
+
+def _extract_post_id_from_url(url: str) -> str:
+    if not url:
+        return ""
+    s = str(url)
+    patterns = [
+        r"/posts/([\w-]{5,})",
+        r"story_fbid=([\w-]{5,})",
+        r"/videos/([\w-]{5,})",
+        r"/reel/([\w-]{5,})",
+        r"/permalink/([\w-]{5,})",
+    ]
+    for p in patterns:
+        m = re.search(p, s)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _collect_post_metrics_from_json(payload, out: dict[str, dict]) -> None:
+    """Рекурсивно собирает post_id -> метрики из JSON-ответов Facebook."""
+    stack = [payload]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, list):
+            stack.extend(cur)
+            continue
+        if not isinstance(cur, dict):
+            continue
+
+        pid_candidates: set[str] = set()
+        for key in ("id", "post_id", "story_fbid", "feedback_id"):
+            val = str(cur.get(key) or "").strip()
+            if re.match(r"^[\w-]{5,}$", val):
+                pid_candidates.add(val)
+        for key in ("permalink_url", "url", "story_url", "post_url"):
+            pid = _extract_post_id_from_url(str(cur.get(key) or ""))
+            if pid:
+                pid_candidates.add(pid)
+
+        metrics = {
+            "reactions": 0,
+            "comments": 0,
+            "shares": 0,
+            "views": 0,
+            "post_url": "",
+        }
+        for key in ("reaction_count", "reactions", "like_count"):
+            metrics["reactions"] = max(metrics["reactions"], _parse_count(cur.get(key)))
+        for key in ("comment_count", "comments"):
+            metrics["comments"] = max(metrics["comments"], _parse_count(cur.get(key)))
+        for key in ("share_count", "shares"):
+            metrics["shares"] = max(metrics["shares"], _parse_count(cur.get(key)))
+        for key in ("view_count", "video_view_count", "video_play_count", "play_count", "views"):
+            metrics["views"] = max(metrics["views"], _parse_count(cur.get(key)))
+        for key in ("permalink_url", "url", "story_url", "post_url"):
+            u = str(cur.get(key) or "")
+            if "/facebook.com/" in u or "/fb.watch/" in u:
+                metrics["post_url"] = u
+                break
+
+        if pid_candidates and any(metrics[k] > 0 for k in ("reactions", "comments", "shares", "views")):
+            for pid in pid_candidates:
+                prev = out.get(pid) or {}
+                out[pid] = {
+                    "reactions": max(int(prev.get("reactions", 0) or 0), metrics["reactions"]),
+                    "comments": max(int(prev.get("comments", 0) or 0), metrics["comments"]),
+                    "shares": max(int(prev.get("shares", 0) or 0), metrics["shares"]),
+                    "views": max(int(prev.get("views", 0) or 0), metrics["views"]),
+                    "post_url": str(prev.get("post_url") or metrics["post_url"] or ""),
+                }
+
+        for v in cur.values():
+            if isinstance(v, (dict, list)):
+                stack.append(v)
+
+
+async def _capture_response_post_metrics(response, out: dict[str, dict]) -> None:
+    try:
+        url = (response.url or "").lower()
+    except Exception:
+        url = ""
+    if not url:
+        return
+    if "/graphql/" not in url and "api" not in url and "facebook.com" not in url:
+        return
+    try:
+        ctype = (response.headers or {}).get("content-type", "").lower()
+    except Exception:
+        ctype = ""
+    if "json" not in ctype and "/graphql/" not in url:
+        return
+    try:
+        payload = await response.json()
+    except Exception:
+        return
+    before = len(out)
+    _collect_post_metrics_from_json(payload, out)
+    after = len(out)
+    if after > before:
+        print(f"[facebook_worker] network post metrics +{after - before} (total={after})", file=sys.stderr)
 
 
 # ── Auth detection JS ─────────────────────────────────────────────────────────
@@ -236,7 +354,9 @@ _PROFILE_JS = """(username) => {
 
 # ── Posts extraction JS ───────────────────────────────────────────────────────
 
-_POSTS_JS = """(username) => {
+_POSTS_JS = """(params) => {
+    const username = String((params && params.username) || '');
+    const maxPosts = Number((params && params.maxPosts) || 5);
     function parseNum(t) {
         t = (t || '').toString().replace(/[\\u00a0\\u202f]/g, '').trim();
         const ru = t.match(/^([\\d]+(?:[.,][\\d]+)?)\\s*(млрд|млн|тыс)/i);
@@ -265,7 +385,7 @@ _POSTS_JS = """(username) => {
         return 0;
     }
 
-    const MAX     = 5;
+    const MAX     = Math.max(1, Number(maxPosts || 5));
     const results = [];
     const seen    = new Set();
 
@@ -381,6 +501,83 @@ _POSTS_JS = """(username) => {
 }"""
 
 
+_MBASIC_FALLBACK_JS = """(params) => {
+    const username = String((params && params.username) || '');
+    const maxPosts = Math.max(1, Number((params && params.maxPosts) || 8));
+    const out = { followers: '', pageLikes: '', posts: [] };
+    const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
+    const parseNum = (s) => (s || '').replace(/[\\u00a0\\u202f]/g, ' ').trim();
+
+    const fMatch =
+      bodyText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s+(?:followers?|подписчик\\w*)/i) ||
+      bodyText.match(/(?:followers?|подписчик\\w*)\\s*[:\\-]?\\s*([\\d][\\d\\s,.]*[KkMmBb]?)/i);
+    if (fMatch) out.followers = parseNum(fMatch[1]);
+
+    const lMatch =
+      bodyText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s+(?:likes?|нравится)/i) ||
+      bodyText.match(/(?:likes?|нравится)\\s*[:\\-]?\\s*([\\d][\\d\\s,.]*[KkMmBb]?)/i);
+    if (lMatch) out.pageLikes = parseNum(lMatch[1]);
+
+    const links = document.querySelectorAll('a[href*="story_fbid="], a[href*="/posts/"], a[href*="/videos/"], a[href*="/reel/"], a[href*="/permalink/"]');
+    const seen = new Set();
+    for (const a of links) {
+        if (out.posts.length >= maxPosts) break;
+        const href = a.getAttribute('href') || '';
+        let id = '';
+        let m = href.match(/story_fbid=([\\w-]+)/) ||
+                href.match(/\\/posts\\/([\\w-]+)/) ||
+                href.match(/\\/videos\\/([\\w-]+)/) ||
+                href.match(/\\/reel\\/([\\w-]+)/) ||
+                href.match(/\\/permalink\\/([\\w-]+)/);
+        if (m) id = m[1];
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+
+        const row = (a.closest('article') || a.closest('div') || a.parentElement || document.body);
+        const rowText = (row && row.innerText) ? row.innerText : '';
+        const cm = rowText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:comments?|коммент)/i);
+        const sm = rowText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:shares?|подел)/i);
+        const vm = rowText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотр)/i);
+        const rm = rowText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:reactions?|likes?|нрав)/i);
+        out.posts.push({
+            id,
+            url: a.href || '',
+            text: rowText.slice(0, 500),
+            comments: cm ? parseNum(cm[1]) : '0',
+            shares: sm ? parseNum(sm[1]) : '0',
+            views: vm ? parseNum(vm[1]) : '0',
+            reactions: rm ? parseNum(rm[1]) : '0',
+            ts: '',
+            thumb: '',
+        });
+    }
+    return out;
+}"""
+
+
+async def _extract_mbasic_fallback(page, username: str) -> dict:
+    """Fallback для Facebook: более простой HTML на mbasic."""
+    try:
+        await asyncio.sleep(_ms_jitter(PAUSE_PRE_M_BASIC_MIN_MS, PAUSE_PRE_M_BASIC_MAX_MS))
+        await page.goto(
+            f"https://mbasic.facebook.com/{username}?v=timeline",
+            wait_until="domcontentloaded",
+            timeout=NAV_TIMEOUT,
+        )
+        await page.wait_for_timeout(1800)
+        data = await page.evaluate(_MBASIC_FALLBACK_JS, {"username": username, "maxPosts": MAX_POSTS})
+        if not isinstance(data, dict):
+            return {"followers": "", "pageLikes": "", "posts": []}
+        return {
+            "followers": str(data.get("followers") or ""),
+            "pageLikes": str(data.get("pageLikes") or ""),
+            "posts": data.get("posts") or [],
+        }
+    except Exception as exc:
+        print(f"[facebook_worker] mbasic fallback failed: {exc}", file=sys.stderr)
+        return {"followers": "", "pageLikes": "", "posts": []}
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def _load_worker_utils():
@@ -401,9 +598,16 @@ async def _run_with_page(username: str, page, _wu):
     avatar_url     = ""
     bio            = ""
     posts_raw      = []
+    network_post_metrics: dict[str, dict] = {}
+
+    async def _on_response(resp):
+        await _capture_response_post_metrics(resp, network_post_metrics)
+
+    page.on("response", lambda resp: asyncio.create_task(_on_response(resp)))
 
     # ── 1. Navigate ───────────────────────────────────────────────
     print(f"[facebook_worker] navigating to facebook.com/{username}", file=sys.stderr)
+    await asyncio.sleep(_ms_jitter(PAUSE_PRE_NAV_MIN_MS, PAUSE_PRE_NAV_MAX_MS))
     await page.goto(
         f"https://www.facebook.com/{username}",
         wait_until="domcontentloaded",
@@ -474,17 +678,37 @@ async def _run_with_page(username: str, page, _wu):
         if n >= MAX_POSTS:
             break
         await page.keyboard.press("End")
-        await page.wait_for_timeout(1200)
+        await asyncio.sleep(_ms_jitter(PAUSE_SCROLL_MIN_MS, PAUSE_SCROLL_MAX_MS))
+    await page.wait_for_timeout(1000)
 
     # ── 6. Extract posts ──────────────────────────────────────────
-    posts_raw = await page.evaluate(_POSTS_JS, username)
+    posts_raw = await page.evaluate(_POSTS_JS, {"username": username, "maxPosts": MAX_POSTS})
 
-    # ── 7. Post-process ───────────────────────────────────────────────────────
+    # ── 7. Fallback to mbasic when data is sparse ────────────────────────────
+    mbasic_data = {"followers": "", "pageLikes": "", "posts": []}
+    if (len(posts_raw) < 3) or (follower_count <= 0):
+        mbasic_data = await _extract_mbasic_fallback(page, username)
+        fb_fallback = _parse_count(mbasic_data.get("followers", ""))
+        likes_fallback = _parse_count(mbasic_data.get("pageLikes", ""))
+        if fb_fallback > follower_count:
+            follower_count = fb_fallback
+        if likes_fallback > like_count_val:
+            like_count_val = likes_fallback
+        # Merge posts by external id
+        existing_ids = {str(p.get("id", "")).strip() for p in posts_raw if p.get("id")}
+        for row in (mbasic_data.get("posts") or []):
+            rid = str(row.get("id", "")).strip()
+            if rid and rid not in existing_ids:
+                posts_raw.append(row)
+                existing_ids.add(rid)
+
+    # ── 8. Post-process ───────────────────────────────────────────────────────
     posts = []
     for p in posts_raw:
         post_id = str(p.get("id", "")).strip()
         if not post_id:
             continue
+        nmeta = network_post_metrics.get(post_id) or {}
         ts = p.get("ts", "")
         posted_at = None
         if ts:
@@ -499,11 +723,11 @@ async def _run_with_page(username: str, page, _wu):
             "external_id":   post_id,
             "description":   p.get("text", ""),
             "thumbnail_url": p.get("thumb", ""),
-            "post_url":      p.get("url", f"https://www.facebook.com/{username}/posts/{post_id}"),
-            "view_count":    p.get("views", 0),
-            "like_count":    p.get("reactions", 0),
-            "comment_count": p.get("comments", 0),
-            "share_count":   p.get("shares", 0),
+            "post_url":      nmeta.get("post_url") or p.get("url", f"https://www.facebook.com/{username}/posts/{post_id}"),
+            "view_count":    max(_parse_count(p.get("views", 0)), int(nmeta.get("views", 0) or 0)),
+            "like_count":    max(_parse_count(p.get("reactions", 0)), int(nmeta.get("reactions", 0) or 0)),
+            "comment_count": max(_parse_count(p.get("comments", 0)), int(nmeta.get("comments", 0) or 0)),
+            "share_count":   max(_parse_count(p.get("shares", 0)), int(nmeta.get("shares", 0) or 0)),
             "posted_at":     posted_at,
         })
 
@@ -517,6 +741,12 @@ async def _run_with_page(username: str, page, _wu):
         "like_count":     like_count_val,
         "post_count":     len(posts) or None,
         "_posts":         posts,
+        "_quality_flags": {
+            "auth_wall_detected": state == "auth",
+            "network_metrics_used": len(network_post_metrics) > 0,
+            "mbasic_fallback_used": bool(mbasic_data.get("posts") or mbasic_data.get("followers") or mbasic_data.get("pageLikes")),
+            "partial_posts": len(posts) < max(3, min(MAX_POSTS, 8)),
+        },
     }
 
 
@@ -571,6 +801,7 @@ async def daemon_main() -> None:
                     _write_response({"error": f"Ошибка worker: {exc}"})
                     continue
                 _write_response(result)
+                await asyncio.sleep(_ms_jitter(PAUSE_BETWEEN_TASKS_MIN_MS, PAUSE_BETWEEN_TASKS_MAX_MS))
         finally:
             await _wu.close_context(context, _browser)
 

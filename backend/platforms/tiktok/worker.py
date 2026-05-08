@@ -16,6 +16,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK
 
 
 def _default_profile_dir() -> str:
@@ -67,6 +68,52 @@ def _is_item_list_url(url: str) -> bool:
     ))
 
 
+async def _page_indicates_profile_unavailable(page) -> bool:
+    try:
+        return bool(await page.evaluate(
+            """() => {
+                const t = ((document.body && document.body.innerText) || '').toLowerCase();
+                return (
+                    t.includes("couldn't find this account") ||
+                    t.includes("could not find this account") ||
+                    t.includes("account not found") ||
+                    t.includes("профиль не найден") ||
+                    t.includes("аккаунт не найден")
+                );
+            }"""
+        ))
+    except Exception:
+        return False
+
+
+def _item_list_key(it: dict) -> str:
+    if not isinstance(it, dict):
+        return ""
+    return str(it.get("id") or it.get("aweme_id") or "").strip()
+
+
+def _uniq_items_count(items: list) -> int:
+    keys = set()
+    for it in items:
+        k = _item_list_key(it)
+        if k:
+            keys.add(k)
+    return len(keys)
+
+
+def _dedupe_item_list(items: list) -> list[dict]:
+    seen: dict[str, dict] = {}
+    order: list[str] = []
+    for it in items:
+        k = _item_list_key(it)
+        if not k:
+            continue
+        if k not in seen:
+            seen[k] = it
+            order.append(k)
+    return [seen[k] for k in order]
+
+
 async def _run_with_context(
     data: dict,
     context,
@@ -78,6 +125,7 @@ async def _run_with_context(
     url: str = data["url"]
     m_user = re.search(r"/@([^/?#]+)", url)
     profile_username = m_user.group(1).strip().lower() if m_user else ""
+    target_post_count = int(data.get("target_post_count") or 0)
     collected: list[dict] = []
     profile_stats: dict = {}
     own_page = page is None
@@ -154,21 +202,8 @@ async def _run_with_context(
                             const avatarFromMeta = (avatarMeta?.getAttribute("content") || "").trim();
                             if (avatarFromMeta) out.avatar_url = avatarFromMeta;
                         } catch (_) {}
-                        const cssFollower = document.querySelector("#main-content-others_homepage > div > div:nth-child(1) > div.ez3kcqd14.css-a572kd-7937d88b--DivShareLayoutHeader-7937d88b--StyledDivShareLayoutHeaderV2-7937d88b--CreatorPageHeader.ekn5mj62 > div.css-1hhejm3-7937d88b--DivShareTitleContainer-7937d88b--CreatorPageHeaderShareContainer.ez3kcqd15 > div.css-1litizp-7937d88b--DivPreviewUIWrapper.ez3kcqd16 > h3 > div:nth-child(1) > strong");
-                        if (cssFollower) out.follower_text = (cssFollower.textContent || "").trim();
-                        if (!out.follower_text) {
-                            try {
-                                const xr = document.evaluate(
-                                    "/html/body/div[1]/div[2]/div[2]/div/div/div[1]/div[1]/div[2]/div[1]/h3/div[1]/strong",
-                                    document,
-                                    null,
-                                    XPathResult.FIRST_ORDERED_NODE_TYPE,
-                                    null
-                                );
-                                const node = xr.singleNodeValue;
-                                if (node) out.follower_text = (node.textContent || "").trim();
-                            } catch (_) {}
-                        }
+                        // Do not bind follower count to the "first stat" selector:
+                        // TikTok header order is usually Following / Followers / Likes.
                         if (!out.like_text) {
                             try {
                                 const xrLike = document.evaluate(
@@ -199,9 +234,32 @@ async def _run_with_context(
                                 if (m2) out.like_text = (m2[1] || "").trim();
                             } catch (_) {}
                         }
+                        try {
+                            const statBlocks = Array.from(document.querySelectorAll("h3 > div, [data-e2e='user-stats'] h3 > div"));
+                            for (const block of statBlocks) {
+                                const strong = block.querySelector("strong");
+                                if (!strong) continue;
+                                const value = (strong.textContent || "").trim();
+                                if (!value) continue;
+                                const labelText = (block.textContent || "").replace(value, "").trim().toLowerCase();
+                                if (!out.follower_text && /(followers?|подписчики)/i.test(labelText)) {
+                                    out.follower_text = value;
+                                    continue;
+                                }
+                                if (!out.following_text && /(following|подписки)/i.test(labelText)) {
+                                    out.following_text = value;
+                                    continue;
+                                }
+                                if (!out.like_text && /(likes?|лайки|понрав)/i.test(labelText)) {
+                                    out.like_text = value;
+                                }
+                            }
+                        } catch (_) {}
                         const stats = Array.from(document.querySelectorAll("h3 strong"));
-                        if (!out.follower_text && stats[0]) out.follower_text = (stats[0].textContent || "").trim();
-                        if (!out.following_text && stats[1]) out.following_text = (stats[1].textContent || "").trim();
+                        // Fallback order on TikTok profile header is usually:
+                        // [0]=Following, [1]=Followers, [2]=Likes.
+                        if (!out.following_text && stats[0]) out.following_text = (stats[0].textContent || "").trim();
+                        if (!out.follower_text && stats[1]) out.follower_text = (stats[1].textContent || "").trim();
                         if (!out.like_text && stats[2]) out.like_text = (stats[2].textContent || "").trim();
                         if (!out.avatar_url) {
                             try {
@@ -305,6 +363,14 @@ async def _run_with_context(
                         print(f"[worker] re-route failed: {_nav_exc}", file=sys.stderr)
                 else:
                     break  # page looks normal — proceed to XHR wait
+
+            # Явная страница "Couldn't find this account" на рендере браузера —
+            # это надёжный признак, что профиль недоступен на площадке.
+            if await _page_indicates_profile_unavailable(page):
+                raise ValueError(
+                    f"{PROFILE_UNAVAILABLE_MARK}TikTok @{profile_username or 'unknown'}: "
+                    "профиль не найден или недоступен на площадке."
+                )
 
             # Wait for videos to load — poll until we have items or timeout.
             # TikTok renders server-side HTML first, then fires the XHR.
@@ -565,6 +631,44 @@ async def _run_with_context(
                     if "closed" in str(exc).lower():
                         raise
 
+            # TikTok подгружает следующие страницы item_list только при скролле.
+            if items_captured:
+                u0 = _uniq_items_count(items_captured)
+                print(
+                    f"[worker] expanding feed by scroll: unique={u0}, "
+                    f"target_post_count={target_post_count or '—'}",
+                    file=sys.stderr,
+                )
+                stable = 0
+                prev_u = u0
+                chasing_target = bool(target_post_count and prev_u < target_post_count)
+                max_rounds = 100 if chasing_target else 26
+                stable_limit = 14 if chasing_target else 8
+                for _rnd in range(max_rounds):
+                    u = _uniq_items_count(items_captured)
+                    if target_post_count and u >= target_post_count:
+                        break
+                    await page.evaluate(
+                        "window.scrollBy(0, Math.floor(window.innerHeight * 0.92))"
+                    )
+                    await asyncio.sleep(1.15 if chasing_target else 1.05)
+                    u2 = _uniq_items_count(items_captured)
+                    if u2 == prev_u:
+                        stable += 1
+                        if stable >= stable_limit:
+                            break
+                    else:
+                        stable = 0
+                    prev_u = u2
+                print(
+                    f"[worker] after scroll: unique={_uniq_items_count(items_captured)}",
+                    file=sys.stderr,
+                )
+
+            deduped_items = _dedupe_item_list(items_captured)
+            items_captured.clear()
+            items_captured.extend(deduped_items)
+
             if items_captured:
                 if profile_username:
                     matched_by_author = 0
@@ -594,6 +698,8 @@ async def _run_with_context(
                 await context.storage_state(path=str(state_path))
 
     except Exception as e:
+        if str(e).startswith(PROFILE_UNAVAILABLE_MARK):
+            raise
         print(f"[worker] error: {e}", file=sys.stderr)
     finally:
         if own_page:

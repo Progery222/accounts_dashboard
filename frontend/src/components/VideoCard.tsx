@@ -1,4 +1,5 @@
 import type { TikTokVideo } from "../platforms/tiktok";
+import { IconViews, IconLikes, IconComments, IconRepost } from "./postStatIcons";
 
 function fmt(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
@@ -33,9 +34,9 @@ export default function VideoCard({ video }: { video: TikTokVideo }) {
           </div>
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-        <div className="absolute bottom-2 left-2 flex items-center gap-1 text-white text-sm font-semibold">
-          <EyeIcon className="w-4 h-4" />
-          <span>{fmt(video.play_count)}</span>
+        <div className="absolute bottom-2 left-2 flex items-center gap-1.5 text-white text-sm font-semibold">
+          <IconViews className="w-4 h-4 shrink-0 opacity-95" />
+          <span className="tabular-nums">{fmt(video.play_count)}</span>
         </div>
       </div>
 
@@ -45,9 +46,9 @@ export default function VideoCard({ video }: { video: TikTokVideo }) {
         )}
         <div className="flex items-center justify-between text-xs text-zinc-500">
           <div className="flex gap-3">
-            <Stat icon={<HeartIcon />} value={fmt(video.like_count)} />
-            <Stat icon={<CommentIcon />} value={fmt(video.comment_count)} />
-            <Stat icon={<ShareIcon />} value={fmt(video.share_count)} />
+            <Stat icon={<IconLikes className="w-full h-full text-rose-400/90" />} value={fmt(video.like_count)} />
+            <Stat icon={<IconComments className="w-full h-full text-zinc-400" />} value={fmt(video.comment_count)} />
+            <Stat icon={<IconRepost className="w-full h-full text-zinc-400" />} value={fmt(video.share_count)} />
           </div>
           {video.created_at > 0 && (
             <span>{formatDate(video.created_at)}</span>
@@ -67,35 +68,3 @@ function Stat({ icon, value }: { icon: React.ReactNode; value: string }) {
   );
 }
 
-function EyeIcon({ className }: { className?: string }) {
-  return (
-    <svg fill="currentColor" viewBox="0 0 20 20" className={className ?? "w-full h-full"}>
-      <path d="M10 12a2 2 0 100-4 2 2 0 000 4z" />
-      <path fillRule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function HeartIcon() {
-  return (
-    <svg fill="currentColor" viewBox="0 0 20 20" className="w-full h-full">
-      <path fillRule="evenodd" d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function CommentIcon() {
-  return (
-    <svg fill="currentColor" viewBox="0 0 20 20" className="w-full h-full">
-      <path fillRule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clipRule="evenodd" />
-    </svg>
-  );
-}
-
-function ShareIcon() {
-  return (
-    <svg fill="currentColor" viewBox="0 0 20 20" className="w-full h-full">
-      <path d="M15 8a3 3 0 10-2.977-2.63l-4.94 2.47a3 3 0 100 4.319l4.94 2.47a3 3 0 10.895-1.789l-4.94-2.47a3.027 3.027 0 000-.74l4.94-2.47C13.456 7.68 14.19 8 15 8z" />
-    </svg>
-  );
-}
