@@ -1677,9 +1677,10 @@ function TVScreen({ tweaks, onExit }) {
   const SCENES = ['atom', 'pulse', 'top'];
 
   useEffectTV(() => {
+    if (isMobile) return undefined;
     const id = setInterval(() => setScene(s => (s + 1) % SCENES.length), 14000);
     return () => clearInterval(id);
-  }, []);
+  }, [isMobile]);
   useEffectTV(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -1696,6 +1697,8 @@ function TVScreen({ tweaks, onExit }) {
     : { bg: '#050608', accent: accent, surface: 'rgba(255,255,255,0.025)' };
 
   if (isMobile) {
+    const touchStartXRef = useRefTV(null);
+    const touchStartYRef = useRefTV(null);
     const items = [
       {
         label: 'ПОДПИСЧИКИ',
@@ -1726,38 +1729,176 @@ function TVScreen({ tweaks, onExit }) {
         spark: _buildPercentCappedSpark(TOTAL.posts.value, TOTAL.posts.delta, 24, 10),
       },
     ];
+    const mobileSeriesAll = Array.isArray(AUTO_REFRESH_SERIES) ? AUTO_REFRESH_SERIES : [];
+    const mobileNowTs = Date.now();
+    const mobileSeries = mobileSeriesAll.filter((p) => {
+      const ts = Date.parse(String(p?.measured_at || ''));
+      return Number.isFinite(ts) && ts <= mobileNowTs;
+    });
+    const mobileLast = mobileSeries.length > 0 ? mobileSeries[mobileSeries.length - 1] : null;
+    const mobileDayDeltaViews = Number(mobileLast?.view_delta_from_day_start || TOTAL.views.delta || 0);
+    const mobileTopMovers = [...ACCOUNTS]
+      .sort((a, b) => Number(b.dViews || 0) - Number(a.dViews || 0))
+      .slice(0, 6);
+    const mobileTopMax = mobileTopMovers.length > 0 ? Math.max(1, ...mobileTopMovers.map((a) => Number(a.dViews || 0))) : 1;
+    const mobilePlatformPulse = (PLATFORMS || [])
+      .map((p) => {
+        const pulseData = _platformPulseFromSeries(mobileSeries, p.id);
+        return {
+          id: p.id,
+          label: p.label,
+          color: p.color,
+          value: Math.round(Number(pulseData.totalDelta || 0)),
+          data: Array.isArray(pulseData.data) && pulseData.data.length > 1 ? pulseData.data : [0, 0],
+        };
+      })
+      .sort((a, b) => Math.abs(Number(b.value || 0)) - Math.abs(Number(a.value || 0)))
+      .slice(0, 5);
+
+    const onMobileTouchStart = (e) => {
+      touchStartXRef.current = Number(e?.touches?.[0]?.clientX || 0);
+      touchStartYRef.current = Number(e?.touches?.[0]?.clientY || 0);
+    };
+
+    const onMobileTouchEnd = (e) => {
+      const startX = touchStartXRef.current;
+      const startY = touchStartYRef.current;
+      if (startX == null) return;
+      const endX = Number(e?.changedTouches?.[0]?.clientX || 0);
+      const endY = Number(e?.changedTouches?.[0]?.clientY || 0);
+      const dx = endX - startX;
+      const dy = endY - Number(startY || 0);
+      const absDx = Math.abs(dx);
+      const absDy = Math.abs(dy);
+      touchStartXRef.current = null;
+      touchStartYRef.current = null;
+      if (absDx < 24) return;
+      if (absDx <= absDy + 6) return;
+      const base = Math.max(0, Math.min(SCENES.length - 1, Number(scene || 0)));
+      const next = dx < 0
+        ? ((base - 1 + SCENES.length) % SCENES.length)
+        : ((base + 1) % SCENES.length);
+      setScene(next);
+    };
+
     return (
       <div style={{ position: 'fixed', inset: 0, background: moodTone.bg, color: '#fff', overflowY: 'auto', fontFamily: 'Space Grotesk, sans-serif' }} data-screen-label="TV Broadcast">
         {/* On mobile keep visual style, but remove heavy animated background for faster loading */}
         <AtomicGrid opacity={0.028} size={56} />
         <TVHeader now={now} accent={moodTone.accent} mood={mood} onExit={onExit} autoScheduleLabel={TV_AUTO_SCHEDULE_LABEL} />
-        <div style={{ position: 'relative', padding: '88px 10px 96px', zIndex: 2 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
-            {items.map((item) => (
-              <div key={item.label} style={{
-                borderRadius: 14,
-                border: '1px solid rgba(255,255,255,0.08)',
-                background: 'linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.008))',
-                padding: '12px 12px 10px',
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                  <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: '0.18em' }}>{item.label}</div>
-                  <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.14em' }}>24H</div>
-                </div>
-                <div className="tnum" style={{ fontSize: 58, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 0.9, marginTop: 6 }}>
-                  {fmt(item.value)}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, marginTop: 8 }}>
-                  <div className="mono tnum" style={{ fontSize: 28, color: item.color, fontWeight: 600, minWidth: 84 }}>
-                    {item.delta >= 0 ? '+' : ''}{fmt(item.delta)}
+        <div style={{ position: 'relative', padding: '88px 0 104px', zIndex: 2 }}>
+          <div onTouchStart={onMobileTouchStart} onTouchEnd={onMobileTouchEnd} style={{ padding: '0 10px' }}>
+            {scene === 0 && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
+                {items.map((item) => (
+                  <div key={item.label} style={{
+                    borderRadius: 14,
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    background: 'linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.008))',
+                    padding: '12px 12px 10px',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: '0.18em' }}>{item.label}</div>
+                      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.14em' }}>24H</div>
+                    </div>
+                    <div className="tnum" style={{ fontSize: 58, fontWeight: 700, letterSpacing: '-0.03em', lineHeight: 0.9, marginTop: 6 }}>
+                      {fmt(item.value)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 10, marginTop: 8 }}>
+                      <div className="mono tnum" style={{ fontSize: 28, color: item.color, fontWeight: 600, minWidth: 84 }}>
+                        {item.delta >= 0 ? '+' : ''}{fmt(item.delta)}
+                      </div>
+                      <div style={{ flex: 1, height: 72 }}>
+                        <ResponsiveSpark data={item.spark} color={item.color} scaleMin={0} scaleMax={10} />
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ flex: 1, height: 72 }}>
-                    <ResponsiveSpark data={item.spark} color={item.color} scaleMin={0} scaleMax={10} />
+                ))}
+              </div>
+            )}
+
+            {scene === 1 && (
+              <>
+                <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.02)', padding: '10px 10px 12px', marginBottom: 10 }}>
+                  <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', letterSpacing: '0.18em' }}>VIEWS · LAST 24H</div>
+                  <div className="tnum" style={{ fontSize: 46, fontWeight: 700, marginTop: 6, lineHeight: 0.95 }}>{fmtSign(mobileDayDeltaViews)}</div>
+                  <div style={{ marginTop: 10, height: 190 }}>
+                  <BigChart accent={moodTone.accent} series={mobileSeries} isMobile />
+                  </div>
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {mobilePlatformPulse.map((p) => (
+                    <div key={p.id} style={{ borderRadius: 12, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)', padding: '9px 10px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          <span style={{ width: 8, height: 8, borderRadius: 999, background: p.color }} />
+                          <span style={{ fontSize: 14, fontWeight: 500 }}>{p.label}</span>
+                        </div>
+                        <div className="mono tnum" style={{ color: p.value < 0 ? '#f87171' : p.color, fontSize: 15, fontWeight: 600 }}>
+                          {p.value >= 0 ? '+' : ''}{fmt(p.value)}
+                        </div>
+                      </div>
+                      <div style={{ marginTop: 6, height: 28 }}>
+                        <Sparkline data={p.data} color={p.color} width={900} height={28} dot={false} fill stretch />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {scene === 2 && (
+              <div style={{ borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)', background: 'rgba(255,255,255,0.015)', padding: '10px' }}>
+                <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.55)', letterSpacing: '0.18em', marginBottom: 8 }}>TOP MOVERS · BY VIEW DELTA</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {mobileTopMovers.map((a, i) => (
+                    <div key={a.id || `${a.platform}:${a.username || a.handle}`} style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.01)', padding: '8px 9px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                          <span className="mono tnum" style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', minWidth: 18 }}>{i + 1}</span>
+                          <span style={{ fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.handle}</span>
+                        </div>
+                        <span className="mono tnum" style={{ fontSize: 15, fontWeight: 600, color: '#4ade80' }}>{_hasDelta(a.dViews) ? `+${fmt(a.dViews)}` : '0'}</span>
+                      </div>
+                      <div className="mono" style={{ marginTop: 4, fontSize: 10, color: 'rgba(255,255,255,0.46)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <PlatformGlyph id={a.platform} size={11} />
+                        <span>{(PLATFORM_META[a.platform]?.label || a.platform || '').toUpperCase()}</span>
+                        <span style={{ width: 3, height: 3, borderRadius: 999, background: 'rgba(255,255,255,0.35)' }} />
+                        <span>{PROFILE_META[a.profile]?.label || 'Без профиля'}</span>
+                        <span style={{ marginLeft: 'auto' }}>VIEWS {fmt(a.views)}</span>
+                      </div>
+                      <div style={{ marginTop: 7, height: 6, borderRadius: 999, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                        <div style={{ width: `${Math.min(100, (Number(a.dViews || 0) / mobileTopMax) * 100)}%`, height: '100%', background: moodTone.accent }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                  <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.01)', padding: '8px 9px' }}>
+                    <div className="mono" style={{ fontSize: 9, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.14em', marginBottom: 6 }}>BY PROFILE</div>
+                    {(PROFILES || []).slice(0, 3).map((p) => (
+                      <div key={`m-prof-${p.id}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6, alignItems: 'center', marginBottom: 5 }}>
+                        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.label}</span>
+                        <span className="mono tnum" style={{ fontSize: 12, color: p.color }}>{fmt(Number(p.accounts || 0))}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ borderRadius: 10, border: '1px solid rgba(255,255,255,0.07)', background: 'rgba(255,255,255,0.01)', padding: '8px 9px' }}>
+                    <div className="mono" style={{ fontSize: 9, color: 'rgba(255,255,255,0.5)', letterSpacing: '0.14em', marginBottom: 6 }}>PLATFORMS</div>
+                    {(PLATFORMS || []).slice(0, 4).map((p) => (
+                      <div key={`m-plat-${p.id}`} style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 6, alignItems: 'center', marginBottom: 5 }}>
+                        <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.85)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.label}</span>
+                        <span className="mono tnum" style={{ fontSize: 12, color: p.color }}>{fmt(Number(p.accounts || 0))}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>
-            ))}
+            )}
           </div>
+
+          <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} />
         </div>
       </div>
     );
@@ -2135,23 +2276,23 @@ function ScenePulse({ accent, mood, pulse }) {
             <div key={p.id} style={{
               position: 'relative',
               display: 'grid',
-              gridTemplateColumns: isMobile ? '1fr auto' : '95px minmax(0, 1fr) 86px',
+              gridTemplateColumns: isMobile ? '1fr auto' : '160px minmax(0, 1fr) 110px',
               alignItems: 'center',
-              gap: isMobile ? 6 : 8,
-              padding: isMobile ? '10px 10px' : '12px 12px',
+              gap: isMobile ? 6 : 12,
+              padding: isMobile ? '10px 10px' : '12px 16px',
               borderRadius: 14, background: 'rgba(255,255,255,0.015)',
               border: '1px solid rgba(255,255,255,0.05)',
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 999, background: p.color, boxShadow: `0 0 10px ${p.color}` }} />
-                <span style={{ fontSize: isMobile ? 14 : 15, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.label}</span>
+                <span style={{ fontSize: isMobile ? 14 : 15, fontWeight: 500, whiteSpace: isMobile ? 'nowrap' : 'normal', overflow: isMobile ? 'hidden' : 'visible', textOverflow: isMobile ? 'ellipsis' : 'clip' }}>{p.label}</span>
                 {!isMobile && <InfoButton onClick={(e) => showPlatformInfo(e, p.label)} title={`Подробнее о ${p.label}`} size={10} />}
+              </div>
+              <div style={{ height: 32, width: '100%', minWidth: 0, gridColumn: isMobile ? '1 / -1' : 'auto' }}>
+                <Sparkline data={data} color={p.color} width={1200} height={32} dot={false} fill stretch />
               </div>
               <div className="mono tnum" style={{ fontSize: isMobile ? 16 : 18, color: value < 0 ? '#f87171' : p.color, textAlign: 'right', fontWeight: 600 }}>
                 {value >= 0 ? '+' : ''}{fmt(value)}
-              </div>
-              <div style={{ height: 32, width: '100%', minWidth: 0, gridColumn: isMobile ? '1 / -1' : 'auto' }}>
-                <Sparkline data={data} color={p.color} width={1400} height={32} dot={false} fill stretch />
               </div>
             </div>
           );
@@ -2201,7 +2342,7 @@ function ScenePulse({ accent, mood, pulse }) {
   );
 }
 
-function BigChart({ accent, series = [] }) {
+function BigChart({ accent, series = [], isMobile = false }) {
   const w = 800, h = 320;
   const nowTs = Date.now();
   const windowMs = 24 * 60 * 60 * 1000;
@@ -2281,8 +2422,8 @@ function BigChart({ accent, series = [] }) {
             <text
               x="0"
               y="0"
-              fill="rgba(255,255,255,0.34)"
-              fontSize="10"
+              fill={isMobile ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.34)"}
+              fontSize={isMobile ? "14.4" : "10"}
               textAnchor={i === 0 ? 'start' : (i === xTicks.length - 1 ? 'end' : 'middle')}
               fontFamily="JetBrains Mono, monospace"
             >
@@ -2291,7 +2432,7 @@ function BigChart({ accent, series = [] }) {
             <text
               x="0"
               y="11"
-              fill="rgba(255,255,255,0.24)"
+              fill={isMobile ? "rgba(255,255,255,0.82)" : "rgba(255,255,255,0.24)"}
               fontSize="9"
               textAnchor={i === 0 ? 'start' : (i === xTicks.length - 1 ? 'end' : 'middle')}
               fontFamily="JetBrains Mono, monospace"
@@ -2429,6 +2570,32 @@ function TVTicker({ accent }) {
 }
 
 function TVSceneIndicator({ total, current, accent, onSelect }) {
+  const isMobile = useIsMobile(980);
+  if (isMobile) {
+    return (
+      <div style={{ position: 'fixed', left: 0, right: 0, bottom: 18, display: 'flex', justifyContent: 'center', gap: 8, zIndex: 30, pointerEvents: 'none' }}>
+        {Array.from({ length: total }).map((_, i) => (
+          <button
+            key={i}
+            onClick={() => onSelect?.(i)}
+            title={`Сцена ${i + 1}`}
+            style={{
+              width: i === current ? 9 : 7,
+              height: i === current ? 9 : 7,
+              borderRadius: 999,
+              background: i === current ? accent : 'rgba(255,255,255,0.35)',
+              border: i === current ? `1px solid ${accent}` : '1px solid rgba(255,255,255,0.25)',
+              boxShadow: i === current ? `0 0 10px ${accent}66` : 'none',
+              transition: 'all 0.2s ease',
+              cursor: 'pointer',
+              padding: 0,
+              pointerEvents: 'auto',
+            }}
+          />
+        ))}
+      </div>
+    );
+  }
   return (
     <div style={{ position: 'absolute', top: 110, right: 20, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end', zIndex: 20 }}>
       {Array.from({ length: total }).map((_, i) => (
@@ -2448,7 +2615,6 @@ function TVSceneIndicator({ total, current, accent, onSelect }) {
           }}
         />
       ))}
-      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.2em', marginTop: 6 }}>SCENE {current + 1}/{total}</div>
     </div>
   );
 }
@@ -2781,16 +2947,22 @@ function TopBar({ accent, onRefreshAll, onOpenSchedule, onOpenAddList, onOpenAdd
           <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.2em', textTransform: 'uppercase' }}>v2.0 · ATOMIC</div>
         </div>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflowX: isMobile ? 'auto' : 'visible', paddingBottom: isMobile ? 2 : 0 }}>
+      <div style={{
+        display: isMobile ? 'grid' : 'flex',
+        gridTemplateColumns: isMobile ? 'repeat(4, minmax(0, 1fr))' : undefined,
+        alignItems: 'center',
+        gap: isMobile ? 4 : 8,
+        overflow: 'visible',
+      }}>
         {stats.map((s, i) => (
           <React.Fragment key={s.label}>
-            {i > 0 && <span style={{ width: 1, height: 36, background: 'var(--line)' }} />}
-            <div style={{ flex: 1, padding: isMobile ? '0 8px' : '0 14px' }}>
+            {!isMobile && i > 0 && <span style={{ width: 1, height: 36, background: 'var(--line)' }} />}
+            <div style={{ flex: 1, padding: isMobile ? '0 4px' : '0 14px', minWidth: 0 }}>
               <div className="mono" style={{ fontSize: isMobile ? 9 : 10, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{s.label}</div>
               <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
-                <span className="tnum" style={{ fontSize: isMobile ? 33 : 22, fontWeight: 600, letterSpacing: '-0.01em' }}>{fmt(s.value)}</span>
+                <span className="tnum" style={{ fontSize: isMobile ? 18 : 22, fontWeight: 600, letterSpacing: '-0.01em', lineHeight: 0.95 }}>{fmt(s.value)}</span>
                 {_hasDelta(s.delta) && (
-                  <span className="mono tnum" style={{ fontSize: isMobile ? 11 : 12, color: s.color }}>
+                  <span className="mono tnum" style={{ fontSize: isMobile ? 9 : 12, color: s.color }}>
                     {Number(s.delta) >= 0 ? '+' : ''}{fmt(s.delta)}
                   </span>
                 )}
@@ -2798,17 +2970,12 @@ function TopBar({ accent, onRefreshAll, onOpenSchedule, onOpenAddList, onOpenAdd
             </div>
           </React.Fragment>
         ))}
-        <div style={{ width: 1, height: 36, background: 'var(--line)' }} />
-        <div style={{ padding: '0 14px' }}>
-          <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>АККАУНТОВ</div>
-          <div className="tnum" style={{ fontSize: 22, fontWeight: 600, marginTop: 2 }}>{TOTAL.accounts}</div>
-        </div>
       </div>
-      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <Btn onClick={onRefreshAll}>{isMobile ? '↻' : (busy ? 'Обновление...' : '↻ Обновить всё')}</Btn>
-        <Btn accent={accent} onClick={onOpenSchedule}>{isMobile ? '⏱' : <><span style={{ width: 8, height: 8, borderRadius: 999, background: '#4ade80', display: 'inline-block', marginRight: 6, boxShadow: '0 0 8px #4ade80' }} />Автообновление</>}</Btn>
-        <Btn onClick={onOpenAddList}>{isMobile ? '≡' : '+ Список'}</Btn>
-        <Btn primary accent={accent} onClick={onOpenAddOne}>{isMobile ? '+' : '+ Добавить'}</Btn>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(4, minmax(0, 1fr))' : 'repeat(4, auto)', gap: 10, width: '100%' }}>
+        <Btn onClick={onRefreshAll} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '↻' : (busy ? 'Обновление...' : '↻ Обновить всё')}</Btn>
+        <Btn accent={accent} onClick={onOpenSchedule} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '⏱' : <><span style={{ width: 8, height: 8, borderRadius: 999, background: '#4ade80', display: 'inline-block', marginRight: 6, boxShadow: '0 0 8px #4ade80' }} />Автообновление</>}</Btn>
+        <Btn onClick={onOpenAddList} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '≡' : '+ Список'}</Btn>
+        <Btn primary accent={accent} onClick={onOpenAddOne} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '+' : '+ Добавить'}</Btn>
       </div>
     </header>
   );
@@ -2824,7 +2991,7 @@ function AtomLogoMini({ size = 32, accent }) {
   );
 }
 
-function Btn({ children, primary, accent = '#6aa9ff', onClick }) {
+function Btn({ children, primary, accent = '#6aa9ff', onClick, style }) {
   const isMobile = useIsMobile(980);
   return (
     <button onClick={onClick} style={{
@@ -2836,6 +3003,7 @@ function Btn({ children, primary, accent = '#6aa9ff', onClick }) {
       fontSize: isMobile ? 12 : 13, fontWeight: primary ? 600 : 500, cursor: 'pointer',
       display: 'inline-flex', alignItems: 'center',
       transition: 'all .15s',
+      ...style,
     }}>{children}</button>
   );
 }
@@ -3025,7 +3193,9 @@ function FilterBar({
         </button>
         {(platformOptions || []).map(p => (
           <div key={p.id} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
-            <Pill active={platform === p.id} onClick={() => setPlatform(p.id)} dot={p.color}>{p.label}</Pill>
+            <Pill active={platform === p.id} onClick={() => setPlatform(p.id)} dot={isMobile ? undefined : p.color}>
+              {isMobile ? <PlatformGlyph id={p.id} size={14} /> : p.label}
+            </Pill>
             <button
               onClick={() => onTogglePlatformHidden?.(p.id)}
               title={(hiddenPlatforms?.has(p.id) ? 'Показать платформу' : 'Скрыть платформу')}
@@ -3485,6 +3655,7 @@ const { useState: useStateAn, useEffect: useEffectAn } = React;
 function AnalyticsScreen({ tweaks }) {
   const isMobile = useIsMobile(980);
   const accent = tweaks.accent || '#6aa9ff';
+  const pageSize = isMobile ? 5 : 20;
   const [period, setPeriod] = useStateAn('1d');
   const [platform, setPlatform] = useStateAn('all');
   const [sortBy, setSortBy] = useStateAn('view_delta');
@@ -3505,7 +3676,7 @@ function AnalyticsScreen({ tweaks }) {
         const params = new URLSearchParams({
           period,
           sort_by: sortBy,
-          page_size: '20',
+          page_size: String(pageSize),
           page: String(page),
           min_views: String(minViews),
         });
@@ -3546,7 +3717,7 @@ function AnalyticsScreen({ tweaks }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [period, platform, sortBy, page, minViews]);
+  }, [period, platform, sortBy, page, minViews, pageSize]);
 
   React.useEffect(() => {
     setPage(1);
@@ -3748,7 +3919,7 @@ function AnalyticsScreen({ tweaks }) {
                 key={`${p.postUrl || p.handle}-${i}`}
                 p={p}
                 accent={accent}
-                rank={((page - 1) * 20) + i + 1}
+                rank={((page - 1) * pageSize) + i + 1}
                 max={(topPosts[0]?.delta || POSTS[0]?.delta || 1)}
                 isMobile={isMobile}
               />
@@ -4206,6 +4377,24 @@ function AddListModal({ accent, onDataChanged, onClose }) {
   const [raw, setRaw] = useStateMd('');
   const [busy, setBusy] = useStateMd(false);
   const [profileId, setProfileId] = useStateMd('none');
+  const [profileBusy, setProfileBusy] = useStateMd(false);
+  const createProfileInline = async () => {
+    const rawName = await uiPrompt('Название нового профиля', '', 'Новый профиль');
+    const name = String(rawName || '').trim();
+    if (!name) return;
+    setProfileBusy(true);
+    try {
+      const created = await _postJson('/api/accounts/profiles/', { name });
+      const createdId = created?.id != null ? String(created.id) : null;
+      await onDataChanged?.();
+      if (createdId) setProfileId(createdId);
+      await uiAlert(`Профиль "${name}" добавлен.`, 'Профили');
+    } catch (e) {
+      await uiAlert(`Не удалось добавить профиль: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
   const importBulk = async () => {
     const lines = raw.split(/\r?\n|,/).map((s) => s.trim()).filter(Boolean);
     if (lines.length === 0) return;
@@ -4242,7 +4431,13 @@ function AddListModal({ accent, onDataChanged, onClose }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 18, flexWrap: 'wrap' }}>
         <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em' }}>ПРОФИЛЬ</span>
         <ProfilePicker accent={accent} value={profileId} onChange={setProfileId} />
-        <button style={{ padding: '8px 14px', borderRadius: 999, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink-dim)', cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6 }}>+ Новый</button>
+        <button
+          onClick={createProfileInline}
+          disabled={profileBusy}
+          style={{ padding: '8px 14px', borderRadius: 999, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink-dim)', cursor: profileBusy ? 'default' : 'pointer', fontSize: 13, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, opacity: profileBusy ? 0.7 : 1 }}
+        >
+          {profileBusy ? '...' : '+ Новый'}
+        </button>
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 28 }}>
         <button onClick={onClose} style={{ padding: '8px 0', background: 'transparent', border: 'none', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Отмена</button>
@@ -4655,6 +4850,24 @@ function AddOneInline({ accent, onDataChanged, onClose }) {
   const [username, setUsername] = useStateMd('');
   const [profileId, setProfileId] = useStateMd('none');
   const [busy, setBusy] = useStateMd(false);
+  const [profileBusy, setProfileBusy] = useStateMd(false);
+  const createProfileInline = async () => {
+    const rawName = await uiPrompt('Название нового профиля', '', 'Новый профиль');
+    const name = String(rawName || '').trim();
+    if (!name) return;
+    setProfileBusy(true);
+    try {
+      const created = await _postJson('/api/accounts/profiles/', { name });
+      const createdId = created?.id != null ? String(created.id) : null;
+      await onDataChanged?.();
+      if (createdId) setProfileId(createdId);
+      await uiAlert(`Профиль "${name}" добавлен.`, 'Профили');
+    } catch (e) {
+      await uiAlert(`Не удалось добавить профиль: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
   const addOne = async () => {
     if (!username.trim()) return;
     setBusy(true);
@@ -4679,7 +4892,7 @@ function AddOneInline({ accent, onDataChanged, onClose }) {
         <div>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ПЛАТФОРМА</div>
           <select value={platform} onChange={(e) => setPlatform(e.target.value)} style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
-            {PLATFORMS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            {PLATFORMS.map(p => <option key={p.id} value={p.id} style={{ color: '#ffffff', background: '#374151' }}>{p.label}</option>)}
           </select>
         </div>
         <div>
@@ -4688,10 +4901,19 @@ function AddOneInline({ accent, onDataChanged, onClose }) {
         </div>
         <div>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ПРОФИЛЬ</div>
-          <select value={profileId} onChange={(e) => setProfileId(e.target.value)} style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
-            <option value="none">Без профиля</option>
-            {PROFILES.filter((p) => p.id !== 'none').map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-          </select>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8 }}>
+            <select value={profileId} onChange={(e) => setProfileId(e.target.value)} style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
+              <option value="none" style={{ color: '#ffffff', background: '#374151' }}>Без профиля</option>
+              {PROFILES.filter((p) => p.id !== 'none').map(p => <option key={p.id} value={p.id} style={{ color: '#ffffff', background: '#374151' }}>{p.label}</option>)}
+            </select>
+            <button
+              onClick={createProfileInline}
+              disabled={profileBusy}
+              style={{ padding: '11px 12px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: profileBusy ? 'default' : 'pointer', fontSize: 13, opacity: profileBusy ? 0.7 : 1 }}
+            >
+              {profileBusy ? '...' : '+ Добавить'}
+            </button>
+          </div>
         </div>
       </div>
       <div style={{ display: 'flex', gap: 10, marginTop: 22, justifyContent: 'flex-end' }}>
