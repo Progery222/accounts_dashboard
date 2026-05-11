@@ -4,15 +4,40 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from zoneinfo import ZoneInfo
+
 from django.apps import AppConfig
+from django.db import transaction
 from django.db.models import Sum
+
+# Единая таймзона для Cron/Interval (иначе на UTC-хосте «03:00» nightly = 06:00 МСК).
+SCHEDULER_TZ = ZoneInfo("Europe/Moscow")
 
 _scheduler = None
 _auto_refresh_lock = threading.Lock()
+_queued_refresh_lock = threading.Lock()
+_queued_refresh_requested = False
+_queued_refresh_source = "scheduler"
+_queued_refresh_fast_start = False
 
 
 def get_scheduler():
     return _scheduler
+
+
+def schedule_jobs_signature(config) -> tuple:
+    """Поля, от которых зависит набор зарегистрированных auto_refresh_* задач."""
+    enabled = bool(getattr(config, "enabled", False))
+    mode = str(getattr(config, "mode", "") or "")
+    if mode == "times":
+        times = tuple(
+            str(t).strip()
+            for t in (getattr(config, "times", None) or [])
+            if str(t).strip()
+        )
+        return (enabled, mode, times, 0)
+    interval = max(1, min(24, int(getattr(config, "interval_hours", 6) or 6)))
+    return (enabled, mode, (), interval)
 
 
 def apply_schedule_config(config, sched):
@@ -34,7 +59,7 @@ def apply_schedule_config(config, sched):
     if config.mode == "interval" and config.interval_hours >= 1:
         sched.add_job(
             _scheduled_refresh,
-            IntervalTrigger(hours=config.interval_hours),
+            IntervalTrigger(hours=config.interval_hours, timezone=SCHEDULER_TZ),
             id="auto_refresh_interval",
             replace_existing=True,
         )
@@ -44,7 +69,7 @@ def apply_schedule_config(config, sched):
                 h, m = map(int, t.split(":"))
                 sched.add_job(
                     _scheduled_refresh,
-                    CronTrigger(hour=h, minute=m),
+                    CronTrigger(hour=h, minute=m, timezone=SCHEDULER_TZ),
                     id=f"auto_refresh_time_{i}",
                     replace_existing=True,
                 )
@@ -106,7 +131,7 @@ class AccountsConfig(AppConfig):
             from apscheduler.triggers.cron import CronTrigger
             from .models import AutoRefreshState
 
-            _scheduler = BackgroundScheduler(timezone="Europe/Moscow")
+            _scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
             # If process was restarted in the middle of an auto-refresh run, mark
             # previous run as interrupted so UI doesn't show stale "running" forever.
             try:
@@ -122,7 +147,7 @@ class AccountsConfig(AppConfig):
             # Fixed nightly refresh at 03:00 Moscow — always present
             _scheduler.add_job(
                 _scheduled_refresh,
-                CronTrigger(hour=3, minute=0),
+                CronTrigger(hour=3, minute=0, timezone=SCHEDULER_TZ),
                 id="daily_refresh_03",
                 replace_existing=True,
             )
@@ -141,6 +166,7 @@ class AccountsConfig(AppConfig):
 
 
 def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
+    global _queued_refresh_requested, _queued_refresh_source, _queued_refresh_fast_start
     from django.utils import timezone
     from .auto_refresh_csv import build_auto_refresh_report_csv
     from .models import (
@@ -152,14 +178,40 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
     )
     from .views import (
         _apply_refresh,
+        _apply_visibility_filters,
         _mark_profile_unavailable_if_applicable,
+        _prewarm_workers,
         _refresh_all_delay_seconds,
     )
 
     if not _auto_refresh_lock.acquire(blocking=False):
+        # If a slot fires while a run is active, queue exactly one follow-up run
+        # so scheduled times are not silently lost.
+        with _queued_refresh_lock:
+            _queued_refresh_requested = True
+            _queued_refresh_source = source or "scheduler"
+            _queued_refresh_fast_start = bool(_queued_refresh_fast_start or fast_start)
         return
 
     cfg = RefreshScheduleConfig.get()
+    # Свежая строка из БД: иначе при «Запустить сейчас» после POST расписания
+    # теоретически возможна устаревшая копия синглтона в том же процессе.
+    try:
+        cfg.refresh_from_db(
+            fields=[
+                "skip_recent_hours",
+                "enabled",
+                "mode",
+                "interval_hours",
+                "times",
+                "include_hidden_platform_accounts",
+                "include_hidden_profile_accounts",
+                "include_unavailable_accounts",
+                "auto_refresh_csv_report",
+            ],
+        )
+    except Exception:
+        pass
     skip_recent_hours = max(0, int(getattr(cfg, "skip_recent_hours", 0) or 0))
     cutoff = timezone.now() - timedelta(hours=skip_recent_hours) if skip_recent_hours > 0 else None
     accounts_qs = Account.objects.select_related("profile").all()
@@ -207,6 +259,14 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         return out
 
     accounts = _interleave_accounts_by_platform(accounts)
+    # Как в refresh_all: заранее поднять daemon Playwright по каждой платформе в батче.
+    # Иначе Instagram с Instaloader bulk часто не открывает Chromium до поздних шагов,
+    # а пользователь видит только первое окно (часто TikTok).
+    try:
+        _prewarm_workers(accounts)
+    except Exception as e:
+        print(f"[scheduled_refresh] prewarm workers failed: {e}")
+
     report_rows: list[dict] = []
     state = AutoRefreshState.get()
     state.is_running = True
@@ -220,10 +280,11 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
     state.last_error = ""
     state.started_at = timezone.now()
     state.finished_at = None
+    state.run_detail = {}
     state.save(update_fields=[
         "is_running", "source", "cancel_requested", "total_accounts", "processed_accounts",
         "success_accounts", "failed_accounts", "current_account",
-        "last_error", "started_at", "finished_at", "updated_at",
+        "last_error", "started_at", "finished_at", "run_detail", "updated_at",
     ])
 
     ig_preload: dict[str, dict] = {}
@@ -303,6 +364,71 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         platform_next_allowed_at = {p: 0.0 for p in platform_limits.keys()}
         worker_count = _int_env("AUTO_REFRESH_WORKERS", 4, min_v=1, max_v=16)
 
+        thread_slot_map: dict[int, int] = {}
+        thread_slot_lock = threading.Lock()
+
+        def _worker_slot() -> int:
+            tid = threading.get_ident()
+            with thread_slot_lock:
+                if tid not in thread_slot_map:
+                    thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
+                return thread_slot_map[tid]
+
+        def _persist_run_item(account_id: int, **kwargs) -> None:
+            try:
+                with transaction.atomic():
+                    st = AutoRefreshState.objects.select_for_update().get(pk=1)
+                    rd = dict(st.run_detail or {})
+                    items = [dict(x) for x in (rd.get("items") or [])]
+                    aid = int(account_id)
+                    for i, it in enumerate(items):
+                        if int(it.get("account_id", -1)) != aid:
+                            continue
+                        items[i] = {**it, **kwargs}
+                        break
+                    rd["items"] = items
+                    st.run_detail = rd
+                    st.save(update_fields=["run_detail", "updated_at"])
+            except Exception as e:
+                print(f"[scheduled_refresh] run_detail update failed for {account_id}: {e}")
+
+        run_items = [
+            {
+                "account_id": a.id,
+                "platform": a.platform,
+                "username": a.username,
+                "status": "queued",
+                "worker": None,
+                "detail": "",
+            }
+            for a in accounts
+        ]
+        st_plan = AutoRefreshState.objects.get(pk=1)
+        st_plan.run_detail = {"items": run_items, "worker_count": worker_count}
+        st_plan.save(update_fields=["run_detail", "updated_at"])
+
+        def _finalize_run_detail_stale() -> None:
+            """После остановки: аккаунты в очереди или «зависшие» в running помечаем отменёнными."""
+            try:
+                with transaction.atomic():
+                    st = AutoRefreshState.objects.select_for_update().get(pk=1)
+                    rd = dict(st.run_detail or {})
+                    items = [dict(x) for x in (rd.get("items") or [])]
+                    changed = False
+                    for it in items:
+                        stt = str(it.get("status") or "")
+                        if stt in ("queued", "running"):
+                            it["status"] = "cancelled"
+                            it["detail"] = "не обработан (остановка или прерывание)"
+                            it["worker"] = None
+                            changed = True
+                    if changed:
+                        rd["items"] = items
+                        st.run_detail = rd
+                        st.save(update_fields=["run_detail", "updated_at"])
+            except Exception as e:
+                print(f"[scheduled_refresh] run_detail finalize failed: {e}")
+
         def _claim_index() -> int | None:
             nonlocal next_idx
             with queue_lock:
@@ -373,23 +499,45 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             break
                         time.sleep(min(0.2, wait_sec))
 
+                    slot = _worker_slot()
                     with state_lock:
                         state.current_account = f"{account.platform}/@{account.username}"
                         state.save(update_fields=["current_account", "updated_at"])
+                    _persist_run_item(account.id, status="running", worker=slot)
 
+                    before = None
                     try:
                         if stop_requested.is_set():
                             return
                         if cutoff is not None and account.updated_at and account.updated_at >= cutoff:
+                            account.refresh_from_db()
+                            fb = int(account.follower_count or 0)
+                            lb = int(account.like_count or 0)
+                            vb = int(account.view_count or 0)
+                            pb = int(account.post_count or 0)
                             report_by_index[idx] = {
-                                **_empty_metrics_row(
-                                    account,
-                                    "пропущен",
-                                    f"недавно обновлён (≤ {skip_recent_hours} ч)",
-                                ),
+                                "platform": account.platform,
+                                "username": account.username,
+                                "profile_name": _profile_name(account),
+                                "status": "пропущен",
+                                "follower_before": fb,
+                                "follower_after": fb,
+                                "like_before": lb,
+                                "like_after": lb,
+                                "view_before": vb,
+                                "view_after": vb,
+                                "post_before": pb,
+                                "post_after": pb,
                                 "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
+                                "detail": f"недавно обновлён (≤ {skip_recent_hours} ч)",
                             }
                             _mark_progress(success=True, failed=False)
+                            _persist_run_item(
+                                account.id,
+                                status="skipped",
+                                worker=None,
+                                detail=f"недавно обновлён (≤ {skip_recent_hours} ч)",
+                            )
                             continue
 
                         account.refresh_from_db()
@@ -432,16 +580,38 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             "detail": "",
                         }
                         _mark_progress(success=True, failed=False)
+                        _persist_run_item(account.id, status="done", worker=None, detail="")
                     except Exception as e:
                         _mark_profile_unavailable_if_applicable(account, e)
                         detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
                         if len(detail) > 800:
                             detail = detail[:797] + "..."
+                        account.refresh_from_db()
+                        if before is not None:
+                            fb, lb, vb, pb = before
+                        else:
+                            fb = int(account.follower_count or 0)
+                            lb = int(account.like_count or 0)
+                            vb = int(account.view_count or 0)
+                            pb = int(account.post_count or 0)
                         report_by_index[idx] = {
-                            **_empty_metrics_row(account, "ошибка", detail),
+                            "platform": account.platform,
+                            "username": account.username,
+                            "profile_name": _profile_name(account),
+                            "status": "ошибка",
+                            "follower_before": fb,
+                            "follower_after": fb,
+                            "like_before": lb,
+                            "like_after": lb,
+                            "view_before": vb,
+                            "view_after": vb,
+                            "post_before": pb,
+                            "post_after": pb,
                             "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
+                            "detail": detail,
                         }
                         _mark_progress(success=False, failed=True, last_error=str(e))
+                        _persist_run_item(account.id, status="error", worker=None, detail=detail)
                         print(f"[scheduled_refresh] {account.platform}/@{account.username}: {e}")
                     finally:
                         if attempted_network:
@@ -460,16 +630,35 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             for f in futures:
                 f.result()
 
+        _finalize_run_detail_stale()
+
         for i, row in enumerate(report_by_index):
             if row is not None:
                 report_rows.append(row)
             else:
+                acc_nf = accounts[i]
+                acc_nf.refresh_from_db()
+                fb = int(acc_nf.follower_count or 0)
+                lb = int(acc_nf.like_count or 0)
+                vb = int(acc_nf.view_count or 0)
+                pb = int(acc_nf.post_count or 0)
                 report_rows.append(
-                    _empty_metrics_row(
-                        accounts[i],
-                        "не выполнено",
-                        "остановка до обработки этого аккаунта",
-                    ),
+                    {
+                        "platform": acc_nf.platform,
+                        "username": acc_nf.username,
+                        "profile_name": _profile_name(acc_nf),
+                        "status": "не выполнено",
+                        "follower_before": fb,
+                        "follower_after": fb,
+                        "like_before": lb,
+                        "like_after": lb,
+                        "view_before": vb,
+                        "view_after": vb,
+                        "post_before": pb,
+                        "post_after": pb,
+                        "elapsed_sec": "",
+                        "detail": "остановка до обработки этого аккаунта",
+                    },
                 )
     finally:
         finished = timezone.now()
@@ -477,22 +666,45 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         state.cancel_requested = False
         state.current_account = ""
         state.finished_at = finished
-        save_fields = [
-            "is_running", "cancel_requested", "current_account", "finished_at", "updated_at",
-        ]
-        if cfg.auto_refresh_csv_report:
-            note = (state.last_error or "").strip()
-            state.last_report_csv = build_auto_refresh_report_csv(
-                rows=report_rows,
-                started_at=state.started_at,
-                finished_at=finished,
-                source=state.source or source,
-                total_accounts=len(accounts),
-                run_note=note,
+        # Сначала снимаем is_running — иначе при падении build_auto_refresh_report_csv
+        # state.save ниже не выполнится, и UI навсегда остаётся на «Уже запущено» при 100%.
+        try:
+            state.save(
+                update_fields=[
+                    "is_running",
+                    "cancel_requested",
+                    "current_account",
+                    "finished_at",
+                    "updated_at",
+                ],
             )
-            state.last_report_generated_at = finished
-            save_fields.extend(["last_report_csv", "last_report_generated_at"])
-        state.save(update_fields=save_fields)
+        except Exception as e:
+            print(f"[scheduled_refresh] failed to persist run finished (is_running): {e}")
+        if cfg.auto_refresh_csv_report:
+            try:
+                note = (state.last_error or "").strip()
+                batch_post_total = sum(int(getattr(a, "post_count", 0) or 0) for a in accounts)
+                qs_dash = _apply_visibility_filters(Account.objects.all(), False, False)
+                dash_agg = qs_dash.aggregate(Sum("post_count"))
+                dashboard_post_total = int(dash_agg.get("post_count__sum") or 0)
+                dashboard_account_count = int(qs_dash.count())
+                state.last_report_csv = build_auto_refresh_report_csv(
+                    rows=report_rows,
+                    started_at=state.started_at,
+                    finished_at=finished,
+                    source=state.source or source,
+                    total_accounts=len(accounts),
+                    run_note=note,
+                    batch_post_total=batch_post_total,
+                    dashboard_post_total=dashboard_post_total,
+                    dashboard_account_count=dashboard_account_count,
+                )
+                state.last_report_generated_at = finished
+                state.save(
+                    update_fields=["last_report_csv", "last_report_generated_at", "updated_at"],
+                )
+            except Exception as e:
+                print(f"[scheduled_refresh] CSV report build/save failed: {e}")
         try:
             def _to_int(v):
                 try:
@@ -543,3 +755,20 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         except Exception as e:
             print(f"[scheduled_refresh] failed to persist AutoRefreshPoint: {e}")
         _auto_refresh_lock.release()
+        queued_run = None
+        with _queued_refresh_lock:
+            if _queued_refresh_requested:
+                queued_run = (str(_queued_refresh_source or "scheduler"), bool(_queued_refresh_fast_start))
+                _queued_refresh_requested = False
+                _queued_refresh_source = "scheduler"
+                _queued_refresh_fast_start = False
+        if queued_run:
+            next_source, next_fast_start = queued_run
+            try:
+                threading.Thread(
+                    target=_scheduled_refresh,
+                    kwargs={"source": next_source, "fast_start": next_fast_start},
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                print(f"[scheduled_refresh] failed to start queued run: {e}")

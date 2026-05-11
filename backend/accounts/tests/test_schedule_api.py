@@ -44,3 +44,10 @@ class RefreshScheduleApiTests(APITestCase):
         )
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertTrue(r2.data["auto_refresh_csv_report"])
+
+    def test_auto_refresh_status_includes_run_detail(self):
+        r = self.client.get("/api/accounts/auto-refresh-status/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertIn("run_detail", r.data)
+        self.assertIsInstance(r.data["run_detail"], dict)
+        self.assertIn("skip_recent_hours_config", r.data)

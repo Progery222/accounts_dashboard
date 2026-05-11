@@ -198,6 +198,28 @@ export interface GlobalVisibility {
   hidden_profile_ids: number[];
 }
 
+export type AutoRefreshRunItemStatus =
+  | "queued"
+  | "running"
+  | "done"
+  | "skipped"
+  | "error"
+  | "cancelled";
+
+export interface AutoRefreshRunItem {
+  account_id: number;
+  platform: string;
+  username: string;
+  status: AutoRefreshRunItemStatus;
+  worker: number | null;
+  detail: string;
+}
+
+export interface AutoRefreshRunDetail {
+  worker_count?: number;
+  items?: AutoRefreshRunItem[];
+}
+
 export interface AutoRefreshStatus {
   is_running: boolean;
   source: string;
@@ -214,6 +236,10 @@ export interface AutoRefreshStatus {
   updated_at: string;
   has_csv_report?: boolean;
   report_generated_at?: string | null;
+  /** Прогресс по аккаунтам (плановое автообновление); пусто при ручном bulk_refresh */
+  run_detail?: AutoRefreshRunDetail;
+  /** Актуальное значение из БД (что реально использует автообновление по расписанию / после сохранения) */
+  skip_recent_hours_config?: number;
 }
 
 export async function getSchedule(): Promise<RefreshSchedule> {

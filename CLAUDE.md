@@ -16,14 +16,37 @@ This file provides guidance to coding agents working in this repository.
 
 ## Run commands
 
-Backend (run from `backend/`; local `.venv` exists in repo):
+### Backend — зависимости (Poetry)
+
+Источник правды: `backend/pyproject.toml` + **`backend/poetry.lock`** (зафиксированные версии). В каталоге `backend/` создаётся локальный `.venv` (`poetry.toml`: `virtualenvs.in-project = true`).
+
+**Windows:** если `py` по умолчанию — **Python 3.13 free-threading (`3.13t`)**, перед `poetry install` зафиксируйте **обычный GIL 3.13** (иначе нет колёс `psycopg-binary` / `greenlet`): `py -3.13 -m poetry env use` и путь к `python.exe`, в `sys.version` которого **нет** строки `free-threading` (часто это `…\Python313\python.exe`, а не `python3.13t.exe`).
+
 ```bash
-python manage.py migrate
-python manage.py runserver    # http://localhost:8000
-python manage.py makemigrations <app>
-python manage.py createsuperuser
-python manage.py test accounts
+cd backend
+py -3.13 -m poetry install
 ```
+
+Дальше (из `backend/`):
+
+```bash
+py -3.13 -m poetry run python manage.py migrate
+py -3.13 -m poetry run python manage.py runserver   # http://localhost:8000
+py -3.13 -m poetry run python manage.py makemigrations <app>
+py -3.13 -m poetry run python manage.py createsuperuser
+py -3.13 -m poetry run python manage.py test accounts
+```
+
+Новая библиотека: `py -3.13 -m poetry add <пакет>` → затем **`py -3.13 -m poetry lock`** при необходимости.
+
+**Docker** по-прежнему ставит зависимости из `requirements.txt`. После смены зависимостей в Poetry обновите файл (нужен плагин `poetry-plugin-export`, один раз: `py -3.13 -m poetry self add poetry-plugin-export`):
+
+```bash
+cd backend
+py -3.13 -m poetry export -f requirements.txt --output requirements.txt --without-hashes
+```
+
+На Linux/macOS достаточно `poetry install` и `poetry run python manage.py …` при выбранном подходящем интерпретаторе (`poetry env use 3.12` и т.д.).
 
 Frontend (run from `frontend/`):
 ```bash

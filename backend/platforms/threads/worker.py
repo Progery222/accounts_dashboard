@@ -23,10 +23,11 @@ from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK
 
 NAV_TIMEOUT  = 30_000   # ms
 LOAD_TIMEOUT = 20_000   # ms
-POST_OPEN_TIMEOUT_MS = int(os.getenv("THREADS_POST_OPEN_TIMEOUT_MS", "18000") or "18000")
-POST_VIEWS_MAX_POSTS = int(os.getenv("THREADS_POST_VIEWS_MAX_POSTS", "16") or "16")
-POST_DELAY_MS = int(os.getenv("THREADS_POST_DELAY_MS", "1100") or "1100")
-POST_RETRY_CLICKS = int(os.getenv("THREADS_POST_RETRY_CLICKS", "2") or "2")
+POST_OPEN_TIMEOUT_MS = int(os.getenv("THREADS_POST_OPEN_TIMEOUT_MS", "28000") or "28000")
+POST_VIEWS_MAX_POSTS = int(os.getenv("THREADS_POST_VIEWS_MAX_POSTS", "28") or "28")
+POST_DELAY_MS = int(os.getenv("THREADS_POST_DELAY_MS", "1450") or "1450")
+POST_RETRY_CLICKS = int(os.getenv("THREADS_POST_RETRY_CLICKS", "4") or "4")
+POST_VIEWS_DOM_RESCAN_MS = int(os.getenv("THREADS_POST_VIEWS_DOM_RESCAN_MS", "2400") or "2400")
 
 
 # ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -76,6 +77,10 @@ def _collect_post_views_from_json(payload, out: dict[str, int]) -> None:
             "video_play_count",
             "play_count",
             "views",
+            "total_view_count",
+            "impression_count",
+            "play_count_num",
+            "video_view_count_string",
         ):
             if key in cur:
                 view_val = max(view_val, _parse_count(cur.get(key)))
@@ -174,9 +179,11 @@ async def _click_retry_on_error_page(page) -> bool:
 
 
 async def _extract_views_on_open_post(page) -> int:
-    """Читает просмотры на уже открытой странице поста."""
-    try:
-        return await page.evaluate(
+    """Читает просмотры на уже открытой странице поста (несколько попыток — DOM подгружается)."""
+    best = 0
+    for attempt in range(5):
+        try:
+            v = await page.evaluate(
             r"""() => {
                 const parseCount = (txt) => {
                     const t = String(txt || '').replace(/\u00a0/g,'').replace(/\u202f/g,'').replace(/\s+/g,'').trim();
@@ -195,7 +202,7 @@ async def _extract_views_on_open_post(page) -> int:
                     // 1) aria-label c "N views/просмотров"
                     for (const n of root.querySelectorAll('[aria-label]')) {
                         const lbl = n.getAttribute('aria-label') || '';
-                        const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
+                        const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
                         if (m) {
                             const v = parseCount(m[1]);
                             if (v > 0) return v;
@@ -203,15 +210,23 @@ async def _extract_views_on_open_post(page) -> int:
                     }
                     // 2) видимый текст
                     const txt = root.innerText || '';
-                    const m = txt.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
+                    const m = txt.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
                     if (m) return parseCount(m[1]);
                     return 0;
                 };
                 return scan(document.body);
             }"""
-        )
-    except Exception:
-        return 0
+            )
+        except Exception:
+            v = 0
+        try:
+            best = max(best, int(v or 0))
+        except Exception:
+            pass
+        if best > 0 and attempt >= 1:
+            break
+        await asyncio.sleep(0.42 if attempt < 4 else 0.0)
+    return int(best or 0)
 
 
 async def _collect_post_views_by_opening_posts(
@@ -219,16 +234,17 @@ async def _collect_post_views_by_opening_posts(
     *,
     username: str,
     posts_raw: list[dict],
+    network_hints: dict[str, int] | None = None,
 ) -> dict[str, int]:
     """
-    fallback: идем по страницам постов с паузой и ретраем кнопки "Повторить попытку".
-    Нужен для случаев, когда views не приходят в profile DOM/API.
+    fallback: открываем страницы постов с паузой и ретраем «Повторить попытку».
+    Нужно, когда в ленте нет просмотров, либо JSON из сети даёт больше, чем DOM ленты.
     """
     out: dict[str, int] = {}
     if not posts_raw:
         return out
+    hints = network_hints or {}
 
-    # Берем только посты без views (или с нулём), чтобы снизить риск блокировок.
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
     for p in posts_raw:
@@ -237,7 +253,8 @@ async def _collect_post_views_by_opening_posts(
             continue
         seen.add(pid)
         dom_views = _parse_count(p.get("views", "0"))
-        if dom_views > 0:
+        network_v = int(hints.get(pid, 0) or 0)
+        if dom_views > 0 and network_v <= dom_views:
             continue
         purl = str(p.get("url") or "").strip()
         if not purl:
@@ -256,7 +273,12 @@ async def _collect_post_views_by_opening_posts(
     for idx, (pid, purl) in enumerate(candidates, start=1):
         try:
             await page.goto(purl, wait_until="domcontentloaded", timeout=POST_OPEN_TIMEOUT_MS)
-            await asyncio.sleep(0.9)
+            await asyncio.sleep(1.25)
+            try:
+                await page.mouse.wheel(0, 420)
+            except Exception:
+                pass
+            await asyncio.sleep(0.35)
             v = await _extract_views_on_open_post(page)
             if v <= 0:
                 # Иногда страница роняется на "Произошла ошибка. Повторить попытку позже."
@@ -639,7 +661,7 @@ async def _run_with_page(username: str, page, _wu):
     )
 
     # ── 5–6. Посты: скролл + DOM (Threads подгружает ленту лениво; End + wheel)
-    scroll_passes = 16 if logged_in else 12
+    scroll_passes = 20 if logged_in else 15
     for _ in range(scroll_passes):
         await page.keyboard.press("End")
         try:
@@ -648,13 +670,11 @@ async def _run_with_page(username: str, page, _wu):
             )
         except Exception:
             pass
-        await page.wait_for_timeout(1350)
+        await page.wait_for_timeout(1580)
     # Дать ответам догрузиться перед финальным merge метрик.
-    await page.wait_for_timeout(1200)
+    await page.wait_for_timeout(2600)
 
-    try:
-        posts_raw = await page.evaluate(
-            """(username) => {
+    _dom_posts_js = """(username) => {
                             function getCount(el) {
                                 if (!el) return '0';
                                 const label = el.getAttribute('aria-label') || '';
@@ -674,13 +694,13 @@ async def _run_with_page(username: str, page, _wu):
                                 // 1. aria-label "N views" / "N просмотров" on any child
                                 for (const node of el.querySelectorAll('[aria-label]')) {
                                     const lbl = node.getAttribute('aria-label') || '';
-                                    const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
-                                    if (m) return m[1].replace(/[\s,]/g, '');
+                                    const m = lbl.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
+                                    if (m) return m[1].replace(/[\\s,]/g, '');
                                 }
                                 // 2. Visible text in the post: "16.4M views" / "16 464 791 views"
                                 const text = el.innerText || '';
-                                const m = text.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
-                                if (m) return m[1].replace(/[\s,]/g, '');
+                                const m = text.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
+                                if (m) return m[1].replace(/[\\s,]/g, '');
                                 return '0';
                             }
 
@@ -759,12 +779,31 @@ async def _run_with_page(username: str, page, _wu):
                                 } catch (_) {}
                             }
                             return results;
-            }""",
-            username,
-        )
+            }"""
+
+    try:
+        posts_raw = await page.evaluate(_dom_posts_js, username)
     except Exception as e:
         print(f"[threads_worker] DOM posts extract failed: {e}", file=sys.stderr)
         posts_raw = []
+    if posts_raw:
+        try:
+            await page.wait_for_timeout(int(POST_VIEWS_DOM_RESCAN_MS))
+        except Exception:
+            pass
+        try:
+            posts_raw_2 = await page.evaluate(_dom_posts_js, username)
+        except Exception:
+            posts_raw_2 = []
+        by_id = {str(p.get("id", "")): p for p in posts_raw if p.get("id")}
+        for p2 in posts_raw_2 or []:
+            pid = str(p2.get("id", "") or "").strip()
+            if not pid or pid not in by_id:
+                continue
+            v1 = _parse_count(by_id[pid].get("views", "0"))
+            v2 = _parse_count(p2.get("views", "0"))
+            if v2 > v1:
+                by_id[pid]["views"] = str(p2.get("views", "0"))
 
     if len(posts_raw) < 2:
         extra = await _fallback_posts_from_page_html(page, username)
@@ -779,6 +818,7 @@ async def _run_with_page(username: str, page, _wu):
         page,
         username=username,
         posts_raw=posts_raw,
+        network_hints=network_post_views,
     )
 
     # ── 7. Post-process ───────────────────────────────────────────────────────

@@ -637,10 +637,10 @@ Object.assign(window, {
 // ===== data.jsx =====
 // Runtime data loaded from backend API (fallbacks stay zero-safe).
 let TOTAL = {
-  followers: { value: 0, delta: 0 },
-  views: { value: 0, delta: 0 },
-  likes: { value: 0, delta: 0 },
-  posts: { value: 0, delta: 0 },
+  followers: { value: 0, delta: 0, yesterdayDelta: null },
+  views: { value: 0, delta: 0, yesterdayDelta: null },
+  likes: { value: 0, delta: 0, yesterdayDelta: null },
+  posts: { value: 0, delta: 0, yesterdayDelta: null },
   accounts: 0,
 };
 
@@ -662,6 +662,7 @@ let AUTO_REFRESH_SERIES = [];
 let AUTH_SESSIONS = [];
 let ALL_PLATFORMS = [];
 let TV_AUTO_SCHEDULE_LABEL = '—';
+let TV_AUTO_IS_RUNNING = false;
 let LOAD_STATE = {
   hasError: false,
   errorMessage: '',
@@ -806,13 +807,23 @@ function _buildTvAutoScheduleLabel(sched) {
   return times.length > 0 ? times.join(' / ') : '—';
 }
 
+/** Календарная дата Europe/Moscow (YYYY-MM-DD) — смена дня для фонового обновления summary / вчерашних дельт. */
+function _mskCalendarDateKey(d = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Moscow',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+}
+
 async function _fetchJson(url) {
   const candidates = _apiBaseCandidates();
 
   let lastErr = null;
   for (const base of candidates) {
     try {
-      const res = await fetch(`${base}${url}`);
+      const res = await fetch(`${base}${url}`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
       return res.json();
     } catch (err) {
@@ -820,6 +831,16 @@ async function _fetchJson(url) {
     }
   }
   throw lastErr || new Error(`Failed to fetch ${url}`);
+}
+
+/** Успех/ошибка без «тихого» [] / null, чтобы отличить сбой сети от пустого ответа API. */
+async function _fetchJsonSoft(url) {
+  try {
+    const data = await _fetchJson(url);
+    return { ok: true, data };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 async function _postJson(url, payload) {
@@ -873,6 +894,63 @@ async function _patchJson(url, payload) {
     }
   }
   throw lastErr || new Error(`Failed to patch ${url}`);
+}
+
+/** GET → Blob: перебирает базы API (как _fetchJson), если same-origin не проксирует /api/. */
+async function _fetchBlobWithApiBases(url) {
+  const candidates = _apiBaseCandidates();
+  let lastErr = null;
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}${url}`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      return await res.blob();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`Failed to fetch blob ${url}`);
+}
+
+/** POST multipart → JSON: новый FormData на каждую попытку (файл нельзя читать повторно). */
+async function _postFormDataJsonWithApiBases(url, file, fieldName = 'file') {
+  const candidates = _apiBaseCandidates();
+  let lastErr = null;
+  for (const base of candidates) {
+    try {
+      const fd = new FormData();
+      fd.append(fieldName, file);
+      const res = await fetch(`${base}${url}`, { method: 'POST', body: fd });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          if (j && j.detail) msg = String(j.detail);
+        } catch (_) { /* ignore */ }
+        throw new Error(msg);
+      }
+      return await res.json();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`Failed to post ${url}`);
+}
+
+/** POST → Blob (например refresh_all?download_csv=1). */
+async function _postBlobWithApiBases(url, init) {
+  const candidates = _apiBaseCandidates();
+  let lastErr = null;
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}${url}`, { method: 'POST', ...(init || {}) });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      return await res.blob();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`Failed to post ${url}`);
 }
 
 function _isLocalHostHostName(hostname) {
@@ -1079,6 +1157,23 @@ function InfoIcon({ size = 12, color = 'currentColor' }) {
   );
 }
 
+/** Иконка «прирост» — переключение сортировки по дельтам в шапке таблицы аккаунтов */
+function DeltaGrowthIcon({ size = 17, color = 'currentColor' }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block' }}>
+      <path
+        d="M4 19h16M7 15l4-4 3 3 6-7"
+        fill="none"
+        stroke={color}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M17 8h3.5V11.5" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function InfoButton({ onClick, title, size = 12 }) {
   return (
     <button
@@ -1156,26 +1251,49 @@ function MobileGlobalStyle() {
 async function loadDashboardData() {
   LOAD_STATE = { hasError: false, errorMessage: '' };
   let hadAnySuccess = false;
-  const [summary, accountsResp, profilesResp, topResp, authResp, allPlatformsResp, scheduleResp, autoSeriesResp] = await Promise.all([
-    _fetchJson('/api/accounts/summary/').catch(() => null),
-    _fetchJson('/api/accounts/?include_hidden=1').catch(() => []),
-    _fetchJson('/api/accounts/profiles/').catch(() => []),
-    _fetchJson('/api/accounts/analytics/top-posts/?period=1d&sort_by=view_delta&page_size=8&min_views=0').catch(() => ({ items: [] })),
-    _fetchJson('/api/settings/status/').catch(() => null),
-    _fetchJson('/api/accounts/platforms/').catch(() => []),
-    _fetchJson('/api/accounts/schedule/').catch(() => null),
-    _fetchJson('/api/accounts/auto-refresh-series/').catch(() => null),
+  const [
+    summaryR, accountsR, profilesR, topR, authR, allPlatformsR, scheduleR, autoSeriesR, autoStatusR,
+  ] = await Promise.all([
+    _fetchJsonSoft('/api/accounts/summary/'),
+    _fetchJsonSoft('/api/accounts/?include_hidden=1'),
+    _fetchJsonSoft('/api/accounts/profiles/?include_hidden_profiles=1'),
+    _fetchJsonSoft('/api/accounts/analytics/top-posts/?period=1d&sort_by=view_delta&page_size=8&min_views=0'),
+    _fetchJsonSoft('/api/settings/status/'),
+    _fetchJsonSoft('/api/accounts/platforms/'),
+    _fetchJsonSoft('/api/accounts/schedule/'),
+    _fetchJsonSoft('/api/accounts/auto-refresh-series/'),
+    _fetchJsonSoft('/api/accounts/auto-refresh-status/'),
   ]);
 
+  const scheduleResp = scheduleR.ok ? scheduleR.data : null;
+  const autoStatusResp = autoStatusR.ok ? autoStatusR.data : null;
   TV_AUTO_SCHEDULE_LABEL = _buildTvAutoScheduleLabel(scheduleResp);
+  TV_AUTO_IS_RUNNING = !!(autoStatusResp && autoStatusResp.is_running);
 
+  const summary = summaryR.ok ? summaryR.data : null;
   if (summary) {
     hadAnySuccess = true;
     TOTAL = {
-      followers: { value: Number(summary.follower_count || 0), delta: Number(summary.follower_delta || 0) },
-      views: { value: Number(summary.view_count || 0), delta: Number(summary.view_delta || 0) },
-      likes: { value: Number(summary.like_count || 0), delta: Number(summary.like_delta || 0) },
-      posts: { value: Number(summary.post_count || 0), delta: Number(summary.post_delta || 0) },
+      followers: {
+        value: Number(summary.follower_count || 0),
+        delta: Number(summary.follower_delta || 0),
+        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_follower_delta),
+      },
+      views: {
+        value: Number(summary.view_count || 0),
+        delta: Number(summary.view_delta || 0),
+        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_view_delta),
+      },
+      likes: {
+        value: Number(summary.like_count || 0),
+        delta: Number(summary.like_delta || 0),
+        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_like_delta),
+      },
+      posts: {
+        value: Number(summary.post_count || 0),
+        delta: Number(summary.post_delta || 0),
+        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_post_delta),
+      },
       accounts: Number(summary.account_count || 0),
     };
     const byPlatform = Array.isArray(summary.by_platform) ? summary.by_platform : [];
@@ -1192,6 +1310,7 @@ async function loadDashboardData() {
     TREND_7D = _buildAscendingTrend(TOTAL.views.value, TOTAL.views.delta * 3, 7);
   }
 
+  const autoSeriesResp = autoSeriesR.ok ? autoSeriesR.data : null;
   if (autoSeriesResp && Array.isArray(autoSeriesResp.points)) {
     hadAnySuccess = true;
     AUTO_REFRESH_SERIES = autoSeriesResp.points.map((p) => ({
@@ -1211,6 +1330,7 @@ async function loadDashboardData() {
     AUTO_REFRESH_SERIES = [];
   }
 
+  const allPlatformsResp = allPlatformsR.ok ? allPlatformsR.data : null;
   if (Array.isArray(allPlatformsResp)) {
     hadAnySuccess = true;
     ALL_PLATFORMS = allPlatformsResp.map((p) => ({
@@ -1221,6 +1341,7 @@ async function loadDashboardData() {
     }));
   }
 
+  const profilesResp = profilesR.ok ? profilesR.data : null;
   if (Array.isArray(profilesResp)) {
     hadAnySuccess = true;
     PROFILES = [
@@ -1234,6 +1355,7 @@ async function loadDashboardData() {
     ];
   }
 
+  const accountsResp = accountsR.ok ? accountsR.data : null;
   if (Array.isArray(accountsResp)) {
     hadAnySuccess = true;
     ACCOUNTS = accountsResp.map((a) => ({
@@ -1245,6 +1367,7 @@ async function loadDashboardData() {
       platform: String(a.platform || ''),
       profile: a.profile_id != null ? String(a.profile_id) : 'none',
       followers: Number(a.follower_count || 0),
+      dFollowers: Number(a.follower_delta ?? 0),
       views: Number(a.view_count || 0),
       dViews: Number(a.view_delta || 0),
       likes: Number(a.like_count || 0),
@@ -1273,6 +1396,7 @@ async function loadDashboardData() {
     }));
   }
 
+  const topResp = topR.ok ? topR.data : null;
   if (topResp && Array.isArray(topResp.items)) {
     hadAnySuccess = true;
     POSTS = topResp.items.map((p) => ({
@@ -1289,6 +1413,7 @@ async function loadDashboardData() {
     }));
   }
 
+  const authResp = authR.ok ? authR.data : null;
   if (authResp) {
     hadAnySuccess = true;
     const states = [
@@ -1324,7 +1449,8 @@ async function loadDashboardData() {
   if (!hadAnySuccess) {
     LOAD_STATE = {
       hasError: true,
-      errorMessage: 'Не удалось загрузить данные с backend API.',
+      errorMessage:
+        'Не удалось связаться с backend API (сеть или сервер не отвечает). Запустите Django из папки backend: python manage.py runserver. Если страница открыта не с localhost, задайте базовый URL API в localStorage: new_frontend_api_base (например http://127.0.0.1:8000).',
     };
   }
 
@@ -1673,14 +1799,43 @@ function TVScreen({ tweaks, onExit }) {
   const [scene, setScene] = useStateTV(0);
   const [now, setNow] = useStateTV(new Date());
   const [pulse, setPulse] = useStateTV(0);
+  const [autoRunning, setAutoRunning] = useStateTV(!!TV_AUTO_IS_RUNNING);
+  const [sceneAutoPaused, setSceneAutoPaused] = useStateTV(false);
+  const wheelAccumRef = useRefTV(0);
+  const wheelLockRef = useRefTV(false);
 
   const SCENES = ['atom', 'pulse', 'top'];
+  const wheelStep = (direction) => {
+    setScene((prev) => {
+      const base = Math.max(0, Math.min(SCENES.length - 1, Number(prev || 0)));
+      return direction > 0
+        ? ((base + 1) % SCENES.length)
+        : ((base - 1 + SCENES.length) % SCENES.length);
+    });
+  };
+
+  const onDesktopWheel = (e) => {
+    if (isMobile) return;
+    const dy = Number(e?.deltaY || 0);
+    if (!Number.isFinite(dy) || Math.abs(dy) < 2) return;
+    wheelAccumRef.current += dy;
+    const threshold = 80;
+    if (Math.abs(wheelAccumRef.current) < threshold) return;
+    if (wheelLockRef.current) return;
+    wheelLockRef.current = true;
+    const direction = wheelAccumRef.current > 0 ? 1 : -1;
+    wheelAccumRef.current = 0;
+    wheelStep(direction);
+    window.setTimeout(() => {
+      wheelLockRef.current = false;
+    }, 260);
+  };
 
   useEffectTV(() => {
-    if (isMobile) return undefined;
-    const id = setInterval(() => setScene(s => (s + 1) % SCENES.length), 14000);
+    if (sceneAutoPaused) return undefined;
+    const id = setInterval(() => setScene((s) => (s + 1) % SCENES.length), 14000);
     return () => clearInterval(id);
-  }, [isMobile]);
+  }, [sceneAutoPaused]);
   useEffectTV(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -1688,6 +1843,23 @@ function TVScreen({ tweaks, onExit }) {
   useEffectTV(() => {
     const id = setInterval(() => setPulse(p => p + 1), 2200);
     return () => clearInterval(id);
+  }, []);
+  useEffectTV(() => {
+    let cancelled = false;
+    const refreshAutoStatus = async () => {
+      try {
+        const st = await _fetchJson('/api/accounts/auto-refresh-status/');
+        if (!cancelled) setAutoRunning(!!st?.is_running);
+      } catch {
+        // keep last known state
+      }
+    };
+    void refreshAutoStatus();
+    const id = setInterval(() => { void refreshAutoStatus(); }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   const moodTone = mood === 'bloomberg'
@@ -1705,38 +1877,45 @@ function TVScreen({ tweaks, onExit }) {
         value: TOTAL.followers.value,
         delta: TOTAL.followers.delta,
         color: '#22c55e',
-        spark: _buildPercentCappedSpark(TOTAL.followers.value, TOTAL.followers.delta, 24, 10),
+        spark: _buildYesterdayBaselineSpark(TOTAL.followers.delta, TOTAL.followers.yesterdayDelta, 24, 10),
       },
       {
         label: 'ПРОСМОТРЫ',
         value: TOTAL.views.value,
         delta: TOTAL.views.delta,
         color: '#ec4899',
-        spark: _buildPercentCappedSpark(TOTAL.views.value, TOTAL.views.delta, 24, 10),
+        spark: _buildYesterdayBaselineSpark(TOTAL.views.delta, TOTAL.views.yesterdayDelta, 24, 10),
       },
       {
         label: 'ЛАЙКИ',
         value: TOTAL.likes.value,
         delta: TOTAL.likes.delta,
         color: '#f59e0b',
-        spark: _buildPercentCappedSpark(TOTAL.likes.value, TOTAL.likes.delta, 24, 10),
+        spark: _buildYesterdayBaselineSpark(TOTAL.likes.delta, TOTAL.likes.yesterdayDelta, 24, 10),
       },
       {
         label: 'ПУБЛИКАЦИИ',
         value: TOTAL.posts.value,
         delta: TOTAL.posts.delta,
         color: tweaks.accent || '#6aa9ff',
-        spark: _buildPercentCappedSpark(TOTAL.posts.value, TOTAL.posts.delta, 24, 10),
+        spark: _buildYesterdayBaselineSpark(TOTAL.posts.delta, TOTAL.posts.yesterdayDelta, 24, 10),
       },
     ];
     const mobileSeriesAll = Array.isArray(AUTO_REFRESH_SERIES) ? AUTO_REFRESH_SERIES : [];
     const mobileNowTs = Date.now();
+    const mobileWindowMs = 24 * 60 * 60 * 1000;
+    const mobileSlackMs = 120000;
     const mobileSeries = mobileSeriesAll.filter((p) => {
       const ts = Date.parse(String(p?.measured_at || ''));
-      return Number.isFinite(ts) && ts <= mobileNowTs;
+      return Number.isFinite(ts) && ts <= mobileNowTs && ts >= mobileNowTs - mobileWindowMs - mobileSlackMs;
     });
     const mobileLast = mobileSeries.length > 0 ? mobileSeries[mobileSeries.length - 1] : null;
-    const mobileDayDeltaViews = Number(mobileLast?.view_delta_from_day_start || TOTAL.views.delta || 0);
+    const mobileLive = Number(TOTAL.views.value || 0);
+    const mobileSnap = Number(mobileLast?.view_count_total || 0);
+    const mobileBaseDay = Number(mobileLast?.view_delta_from_day_start || 0);
+    const mobileDayDeltaViews = mobileLast
+      ? mobileBaseDay + (mobileLive - mobileSnap)
+      : Number(TOTAL.views.delta || 0);
     const mobileTopMovers = [...ACCOUNTS]
       .sort((a, b) => Number(b.dViews || 0) - Number(a.dViews || 0))
       .slice(0, 6);
@@ -1785,7 +1964,7 @@ function TVScreen({ tweaks, onExit }) {
       <div style={{ position: 'fixed', inset: 0, background: moodTone.bg, color: '#fff', overflowY: 'auto', fontFamily: 'Space Grotesk, sans-serif' }} data-screen-label="TV Broadcast">
         {/* On mobile keep visual style, but remove heavy animated background for faster loading */}
         <AtomicGrid opacity={0.028} size={56} />
-        <TVHeader now={now} accent={moodTone.accent} mood={mood} onExit={onExit} autoScheduleLabel={TV_AUTO_SCHEDULE_LABEL} />
+        <TVHeader now={now} accent={moodTone.accent} mood={mood} onExit={onExit} autoScheduleLabel={TV_AUTO_SCHEDULE_LABEL} autoIsRunning={autoRunning} />
         <div style={{ position: 'relative', padding: '88px 0 104px', zIndex: 2 }}>
           <div onTouchStart={onMobileTouchStart} onTouchEnd={onMobileTouchEnd} style={{ padding: '0 10px' }}>
             {scene === 0 && (
@@ -1898,30 +2077,30 @@ function TVScreen({ tweaks, onExit }) {
             )}
           </div>
 
-          <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} />
+          <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} autoPaused={sceneAutoPaused} setAutoPaused={setSceneAutoPaused} />
         </div>
       </div>
     );
   }
   return (
-    <div style={{ position: 'fixed', inset: 0, background: moodTone.bg, color: '#fff', overflow: 'hidden', fontFamily: 'Space Grotesk, sans-serif' }} data-screen-label="TV Broadcast">
+    <div onWheel={onDesktopWheel} style={{ position: 'fixed', inset: 0, background: moodTone.bg, color: '#fff', overflow: 'hidden', fontFamily: 'Space Grotesk, sans-serif' }} data-screen-label="TV Broadcast">
       <ParticleField count={mood === 'calm' ? 80 : 50} color={moodTone.accent} opacity={mood === 'bloomberg' ? 0.25 : 0.6} />
       <AtomicGrid opacity={mood === 'bloomberg' ? 0.025 : 0.04} size={64} />
 
-      <TVHeader now={now} accent={moodTone.accent} mood={mood} onExit={onExit} autoScheduleLabel={TV_AUTO_SCHEDULE_LABEL} />
+      <TVHeader now={now} accent={moodTone.accent} mood={mood} onExit={onExit} autoScheduleLabel={TV_AUTO_SCHEDULE_LABEL} autoIsRunning={autoRunning} />
 
       <div style={{ position: 'absolute', top: 110, left: 0, right: 0, bottom: 110 }}>
         <SceneSwitch scene={SCENES[scene]} accent={moodTone.accent} mood={mood} pulse={pulse} />
       </div>
 
       <TVTicker accent={moodTone.accent} />
-      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} />
+      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} autoPaused={sceneAutoPaused} setAutoPaused={setSceneAutoPaused} />
     </div>
   );
 }
 
 // ── Header: brand, time, autoupdate state ──────────────────
-function TVHeader({ now, accent, mood, onExit, autoScheduleLabel }) {
+function TVHeader({ now, accent, mood, onExit, autoScheduleLabel, autoIsRunning = false }) {
   const isMobile = useIsMobile(980);
   const t = now.toTimeString().slice(0, 8);
   const d = now.toLocaleDateString('ru-RU', { day: '2-digit', month: 'long', weekday: 'long' });
@@ -1937,7 +2116,21 @@ function TVHeader({ now, accent, mood, onExit, autoScheduleLabel }) {
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 10 : 32 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ width: 9, height: 9, borderRadius: 999, background: accent, boxShadow: `0 0 14px ${accent}` }} className="pulse-dot" />
+          <span
+            style={{
+              width: 9,
+              height: 9,
+              minWidth: 9,
+              minHeight: 9,
+              borderRadius: '50%',
+              background: autoIsRunning ? '#4ade80' : accent,
+              boxShadow: `0 0 14px ${autoIsRunning ? '#4ade80' : accent}`,
+              display: 'inline-block',
+              flexShrink: 0,
+              aspectRatio: '1 / 1',
+            }}
+            className="pulse-dot"
+          />
           <span className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.7)', letterSpacing: '0.2em' }}>
             AUTO · {autoScheduleLabel || '—'}
           </span>
@@ -1977,13 +2170,13 @@ function AtomLogo({ size = 44, accent = '#6aa9ff' }) {
 function SceneSwitch({ scene, accent, mood, pulse }) {
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-      <div key={scene} style={{ position: 'absolute', inset: 0, animation: 'sceneIn .9s cubic-bezier(.4,0,.2,1)' }}>
+      <div key={scene} style={{ position: 'absolute', inset: 0, animation: 'sceneIn .63s ease-out' }}>
         {scene === 'atom' && <SceneAtom accent={accent} mood={mood} />}
         {scene === 'pulse' && <ScenePulse accent={accent} mood={mood} pulse={pulse} />}
         {scene === 'top' && <SceneTop accent={accent} mood={mood} />}
       </div>
       <style>{`
-        @keyframes sceneIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes sceneIn { from { opacity: 0; } to { opacity: 1; } }
       `}</style>
     </div>
   );
@@ -2003,36 +2196,36 @@ function SceneAtom({ accent, mood }) {
       value: TOTAL.followers.value,
       delta: TOTAL.followers.delta,
       color: '#4ade80',
-      spark: _buildPercentCappedSpark(TOTAL.followers.value, TOTAL.followers.delta, 24, 10),
+      spark: _buildYesterdayBaselineSpark(TOTAL.followers.delta, TOTAL.followers.yesterdayDelta, 24, 10),
       infoTitle: 'Подписчики',
-      infoText: 'График показывает динамику подписчиков за период 24h. Линия отображает относительное изменение показателя во времени.',
+      infoText: 'Мини-график: сравнение дельты за 24h с календарным вчера (дневные дельты по снимкам из API). Ось условная 0…10; при отсутствии вчерашних данных используется запасной режим.',
     },
     {
       label: 'ПРОСМОТРЫ',
       value: TOTAL.views.value,
       delta: TOTAL.views.delta,
       color: '#ec4899',
-      spark: _buildPercentCappedSpark(TOTAL.views.value, TOTAL.views.delta, 24, 10),
+      spark: _buildYesterdayBaselineSpark(TOTAL.views.delta, TOTAL.views.yesterdayDelta, 24, 10),
       infoTitle: 'Просмотры',
-      infoText: 'График показывает динамику просмотров за 24 часа. Дельта считается относительно предыдущего значения.',
+      infoText: 'Мини-график: дельта просмотров за 24h относительно календарного вчера (снимки). Ось условная 0…10.',
     },
     {
       label: 'ЛАЙКИ',
       value: TOTAL.likes.value,
       delta: TOTAL.likes.delta,
       color: '#f59e0b',
-      spark: _buildPercentCappedSpark(TOTAL.likes.value, TOTAL.likes.delta, 24, 10),
+      spark: _buildYesterdayBaselineSpark(TOTAL.likes.delta, TOTAL.likes.yesterdayDelta, 24, 10),
       infoTitle: 'Лайки',
-      infoText: 'График показывает изменение количества лайков за 24 часа по агрегированным данным аккаунтов.',
+      infoText: 'Мини-график: дельта лайков за 24h и календарный вчера (снимки). Ось условная 0…10.',
     },
     {
       label: 'ПУБЛИКАЦИИ',
       value: TOTAL.posts.value,
       delta: TOTAL.posts.delta,
       color: accent,
-      spark: _buildPercentCappedSpark(TOTAL.posts.value, TOTAL.posts.delta, 24, 10),
+      spark: _buildYesterdayBaselineSpark(TOTAL.posts.delta, TOTAL.posts.yesterdayDelta, 24, 10),
       infoTitle: 'Публикации',
-      infoText: 'График показывает изменение количества публикаций за 24 часа.',
+      infoText: 'Мини-график: дельта публикаций за 24h и календарный вчера (снимки). Ось условная 0…10.',
     },
   ];
   return (
@@ -2075,7 +2268,7 @@ function BigStat({ label, value, delta, color, spark, align, infoTitle, infoText
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 18, marginTop: 12 }}>
         <div className="mono tnum" style={{ fontSize: 28, color: color, fontWeight: 500, whiteSpace: 'nowrap' }}>
-          ▲ +{fmt(delta)}
+          ▲ +{Number(delta) > 0 ? fmt(delta) : '0'}
         </div>
         <div style={{ flex: 1, height: 112, minWidth: 0 }}>
           <ResponsiveSpark data={spark} color={color} scaleMin={0} scaleMax={10} />
@@ -2114,6 +2307,41 @@ function _buildPercentCappedSpark(total, delta, points = 24, capPercent = 10) {
     if (out[i] < out[i - 1]) out[i] = out[i - 1];
   }
   // Ensure final point reflects exact capped percent target.
+  out[out.length - 1] = target;
+  return out;
+}
+
+/** Поля `yesterday_*_delta` из GET /api/accounts/summary/; null если с бэка пришло null/нет числа. */
+function _parseSummaryYesterdayDelta(v) {
+  if (v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Мини-график TV (сцена 1): опорная дельта `yesterdayDelta` = 50% высоты при равенстве с сегодняшней; ≥2× опоры — верх. */
+function _buildYesterdayBaselineSpark(todayDelta, yesterdayDelta, points = 24, scaleMax = 10) {
+  const n = Math.max(2, Number(points || 24));
+  const cap = Number(scaleMax) > 0 ? Number(scaleMax) : 10;
+  const cur = Number(todayDelta ?? 0);
+  const curPos = Math.max(0, cur);
+  const hasY = yesterdayDelta !== null && yesterdayDelta !== undefined && Number.isFinite(Number(yesterdayDelta));
+  if (!hasY) {
+    const totalHint = Math.max(1, curPos) + curPos;
+    return _buildPercentCappedSpark(totalHint, curPos, n, cap);
+  }
+  const ref = Math.max(1, Math.abs(Number(yesterdayDelta)));
+  const endNorm = Math.min(1, curPos / (2 * ref));
+  const target = endNorm * cap;
+  const out = [];
+  for (let i = 0; i < n; i += 1) {
+    const t = i / (n - 1);
+    const eased = 1 - Math.pow(1 - t, 1.2);
+    const wave = Math.sin(i * 0.5) * Math.max(0.04, target * 0.04);
+    out.push(Math.max(0, Math.min(cap, target * eased + wave)));
+  }
+  for (let i = 1; i < out.length; i += 1) {
+    if (out[i] < out[i - 1]) out[i] = out[i - 1];
+  }
   out[out.length - 1] = target;
   return out;
 }
@@ -2167,7 +2395,7 @@ function ScenePulse({ accent, mood, pulse }) {
   const showMainInfo = (e) => openInfoPopover(
     e,
     'Что показывает график',
-    'Суммарные просмотры всех аккаунтов по точкам автообновления. По X — последние 6-часовые слоты с датой, по Y — относительная динамика от базового уровня.'
+    'Суммарные просмотры по точкам полного автообновления (AutoRefreshPoint). До текущего момента справа линия дотягивается по актуальному total из summary — чтобы после ручных обновлений аккаунтов график не «залипал». По X — окно 24h, по Y — масштаб от минимума до максимума в окне.'
   );
   const showPlatformInfo = (e, label) => openInfoPopover(
     e,
@@ -2185,8 +2413,15 @@ function ScenePulse({ accent, mood, pulse }) {
   const series = seriesPast.length > 0 ? seriesPast : seriesAll;
   const seriesHasData = series.length > 0;
   const lastPoint = seriesHasData ? series[series.length - 1] : null;
-  const dayDeltaViews = Number(lastPoint?.view_delta_from_day_start || TOTAL.views.delta || 0);
-  const latestTotalViews = Number(lastPoint?.view_count_total || TOTAL.views.value || 0);
+  const liveViewsTotal = Number(TOTAL.views.value || 0);
+  const lastSnapTotal = Number(lastPoint?.view_count_total || 0);
+  const baseDayDeltaFromPoints = Number(lastPoint?.view_delta_from_day_start || 0);
+  // AutoRefreshPoint только после полного автообновления; ручные refresh не дают новых точек —
+  // добиваем прирост до актуального TOTAL из summary (тот же источник, что и карточки).
+  const dayDeltaViews = seriesHasData && lastPoint
+    ? baseDayDeltaFromPoints + (liveViewsTotal - lastSnapTotal)
+    : Number(TOTAL.views.delta || 0);
+  const latestTotalViews = Math.max(lastSnapTotal, liveViewsTotal);
   const dayStartViews = Math.max(0, latestTotalViews - dayDeltaViews);
   const dayGrowthPercent = dayStartViews > 0 ? (dayDeltaViews / dayStartViews) * 100 : 0;
 
@@ -2194,10 +2429,12 @@ function ScenePulse({ accent, mood, pulse }) {
   let troughLabel = '—';
   let avgLabel = '—';
   if (seriesHasData) {
-    let peak = series[0];
-    let trough = series[0];
+    const statsSeries = series.filter((p) => String(p?.source || '') !== 'anchor');
+    const use = statsSeries.length > 0 ? statsSeries : series;
+    let peak = use[0];
+    let trough = use[0];
     let sum = 0;
-    for (const p of series) {
+    for (const p of use) {
       const d = Number(p?.view_delta_from_prev_point || 0);
       sum += d;
       if (d > Number(peak?.view_delta_from_prev_point || 0)) peak = p;
@@ -2205,7 +2442,7 @@ function ScenePulse({ accent, mood, pulse }) {
     }
     peakLabel = String(peak?.slot_label || _ruShortDate(peak?.measured_at || ''));
     troughLabel = String(trough?.slot_label || _ruShortDate(trough?.measured_at || ''));
-    avgLabel = fmt(Math.round(sum / Math.max(1, series.length)));
+    avgLabel = fmt(Math.round(sum / Math.max(1, use.length)));
   } else {
     avgLabel = fmt(Math.round(Number(TOTAL.views.delta || 0) / 24));
   }
@@ -2348,12 +2585,14 @@ function BigChart({ accent, series = [], isMobile = false }) {
   const windowMs = 24 * 60 * 60 * 1000;
   const windowStart = nowTs - windowMs;
   const windowEnd = nowTs;
+  // Небольшой допуск: якорь с сервера (rolling 24h) может оказаться на доли минуты левее окна из‑за рассинхрона часов.
+  const windowSlackMs = 120000;
   const realPoints = (Array.isArray(series) ? series : [])
     .map((p) => ({
       ts: Date.parse(String(p?.measured_at || '')),
       value: Number(p?.view_count_total || 0),
     }))
-    .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.value) && p.ts >= windowStart && p.ts <= windowEnd)
+    .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.value) && p.ts >= windowStart - windowSlackMs && p.ts <= windowEnd)
     .sort((a, b) => a.ts - b.ts);
   const hasRealSeries = realPoints.length >= 1;
 
@@ -2372,8 +2611,16 @@ function BigChart({ accent, series = [], isMobile = false }) {
   if (hasRealSeries) {
     const drawnPoints = [...realPoints];
     const last = drawnPoints[drawnPoints.length - 1];
-    // Extend to "now" so the graph visually ends at current time.
-    if (last && last.ts < windowEnd) drawnPoints.push({ ts: windowEnd, value: last.value });
+    // До «сейчас» тянем линию: если после последней точки автообновления шли ручные refresh,
+    // берём актуальный TOTAL.views из summary, иначе остаётся плато на last.value.
+    if (last && last.ts < windowEnd) {
+      let endVal = last.value;
+      try {
+        const lv = Number(typeof TOTAL !== 'undefined' && TOTAL && TOTAL.views ? TOTAL.views.value : NaN);
+        if (Number.isFinite(lv)) endVal = lv;
+      } catch (_) { /* ignore */ }
+      drawnPoints.push({ ts: windowEnd, value: endVal });
+    }
     const minV = Math.min(...drawnPoints.map((p) => p.value));
     const maxV = Math.max(...drawnPoints.map((p) => p.value));
     const valueRange = Math.max(1, maxV - minV);
@@ -2383,7 +2630,7 @@ function BigChart({ accent, series = [], isMobile = false }) {
     const scaleMin = Math.max(0, minV - padDown);
     const scaleMax = maxV + padUp;
     points = drawnPoints.map((p) => {
-      const x = ((p.ts - windowStart) / (windowEnd - windowStart || 1)) * w;
+      const x = Math.max(0, Math.min(w, ((p.ts - windowStart) / (windowEnd - windowStart || 1)) * w));
       const y = h - ((p.value - scaleMin) / (scaleMax - scaleMin || 1)) * (h - 30) - 10;
       return [x, y, p.ts, p.value];
     });
@@ -2545,6 +2792,23 @@ function SceneTop({ accent }) {
   );
 }
 
+function TVPauseIcon({ size = 10, color = 'currentColor' }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+      <rect x="6" y="5" width="4.5" height="14" rx="1" fill={color} />
+      <rect x="13.5" y="5" width="4.5" height="14" rx="1" fill={color} />
+    </svg>
+  );
+}
+
+function TVPlayIcon({ size = 10, color = 'currentColor' }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+      <path d="M9 6.5v11L18 12z" fill={color} />
+    </svg>
+  );
+}
+
 // ── Bottom ticker ──────────────────────────────────────────
 function TVTicker({ accent }) {
   const items = useMemoTV(() => {
@@ -2569,38 +2833,87 @@ function TVTicker({ accent }) {
   );
 }
 
-function TVSceneIndicator({ total, current, accent, onSelect }) {
+function TVSceneTransport({ accent, autoPaused, setAutoPaused, compact }) {
+  const playing = !autoPaused;
+  // ~27% меньше прежних 28×28 / 30×30 — компактнее на бродкасте
+  const sz = compact ? 20 : 22;
+  const iconSz = compact ? 8 : 9;
+  const iconColor = accent;
+  const btnStyle = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: sz,
+    height: sz,
+    padding: 0,
+    borderRadius: 6,
+    flexShrink: 0,
+    cursor: 'pointer',
+    border: 'none',
+    boxShadow: 'none',
+    background: `${accent}28`,
+    color: iconColor,
+  };
+  const title = playing
+    ? 'Пауза: остановить автоматическое переключение сцен'
+    : 'Плей: снова переключать сцены автоматически';
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={playing ? 'true' : 'false'}
+      onClick={() => setAutoPaused?.(!autoPaused)}
+      style={btnStyle}
+    >
+      {playing ? (
+        <TVPauseIcon size={iconSz} color={iconColor} />
+      ) : (
+        <TVPlayIcon size={iconSz} color={iconColor} />
+      )}
+    </button>
+  );
+}
+
+function TVSceneIndicator({ total, current, accent, onSelect, autoPaused = false, setAutoPaused }) {
   const isMobile = useIsMobile(980);
   if (isMobile) {
     return (
-      <div style={{ position: 'fixed', left: 0, right: 0, bottom: 18, display: 'flex', justifyContent: 'center', gap: 8, zIndex: 30, pointerEvents: 'none' }}>
-        {Array.from({ length: total }).map((_, i) => (
-          <button
-            key={i}
-            onClick={() => onSelect?.(i)}
-            title={`Сцена ${i + 1}`}
-            style={{
-              width: i === current ? 9 : 7,
-              height: i === current ? 9 : 7,
-              borderRadius: 999,
-              background: i === current ? accent : 'rgba(255,255,255,0.35)',
-              border: i === current ? `1px solid ${accent}` : '1px solid rgba(255,255,255,0.25)',
-              boxShadow: i === current ? `0 0 10px ${accent}66` : 'none',
-              transition: 'all 0.2s ease',
-              cursor: 'pointer',
-              padding: 0,
-              pointerEvents: 'auto',
-            }}
-          />
-        ))}
+      <div style={{ position: 'fixed', left: 0, right: 0, bottom: 14, zIndex: 30, pointerEvents: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+        <div style={{ pointerEvents: 'auto' }}>
+          <TVSceneTransport accent={accent} autoPaused={autoPaused} setAutoPaused={setAutoPaused} compact />
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'center', gap: 8, pointerEvents: 'auto' }}>
+          {Array.from({ length: total }).map((_, i) => (
+            <button
+              key={i}
+              type="button"
+              onClick={() => onSelect?.(i)}
+              title={`Сцена ${i + 1}`}
+              style={{
+                width: i === current ? 9 : 7,
+                height: i === current ? 9 : 7,
+                borderRadius: 999,
+                background: i === current ? accent : 'rgba(255,255,255,0.35)',
+                border: i === current ? `1px solid ${accent}` : '1px solid rgba(255,255,255,0.25)',
+                boxShadow: i === current ? `0 0 10px ${accent}66` : 'none',
+                transition: 'all 0.2s ease',
+                cursor: 'pointer',
+                padding: 0,
+              }}
+            />
+          ))}
+        </div>
       </div>
     );
   }
   return (
-    <div style={{ position: 'absolute', top: 110, right: 20, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end', zIndex: 20 }}>
+    <div style={{ position: 'absolute', top: 110, right: 20, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end', zIndex: 20 }}>
+      <TVSceneTransport accent={accent} autoPaused={autoPaused} setAutoPaused={setAutoPaused} compact={false} />
       {Array.from({ length: total }).map((_, i) => (
         <button
           key={i}
+          type="button"
           onClick={() => onSelect?.(i)}
           title={`Переключить на сцену ${i + 1}`}
           style={{
@@ -2627,7 +2940,7 @@ Object.assign(window, { TVScreen });
 
 const { useState: useStateAcc, useMemo: useMemoAcc } = React;
 
-function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
+function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOpenGlobalModal }) {
   const accent = tweaks.accent || '#6aa9ff';
   const view = tweaks.accounts_view || 'table'; // table | cards
   const isMobile = useIsMobile(980);
@@ -2639,18 +2952,21 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
   const [showHidden, setShowHidden] = useStateAcc(() => window.localStorage.getItem('nf_show_hidden') === '1');
   const [sortKey, setSortKey] = useStateAcc('views');
   const [sortOrder, setSortOrder] = useStateAcc('desc');
+  const [sortByDelta, setSortByDelta] = useStateAcc(() => window.localStorage.getItem('nf_sort_by_delta') === '1');
   const [hiddenPlatforms, setHiddenPlatforms] = useStateAcc(new Set());
   const [hiddenProfileIds, setHiddenProfileIds] = useStateAcc(new Set());
   const [tab, setTab] = useStateAcc('accounts');
   const [busy, setBusy] = useStateAcc(false);
   const [rowBusyId, setRowBusyId] = useStateAcc(null);
-  const [activeModal, setActiveModal] = useStateAcc(null); // refresh_all | schedule | add_list | add_one
+  const [profileEditor, setProfileEditor] = useStateAcc(null); // { mode, id?, name, color }
+  const [profileEditorBusy, setProfileEditorBusy] = useStateAcc(false);
 
   React.useEffect(() => { window.localStorage.setItem('nf_platform', platform); }, [platform]);
   React.useEffect(() => { window.localStorage.setItem('nf_profile', profile); }, [profile]);
   React.useEffect(() => { window.localStorage.setItem('nf_status', status); }, [status]);
   React.useEffect(() => { window.localStorage.setItem('nf_search', search); }, [search]);
   React.useEffect(() => { window.localStorage.setItem('nf_show_hidden', showHidden ? '1' : '0'); }, [showHidden]);
+  React.useEffect(() => { window.localStorage.setItem('nf_sort_by_delta', sortByDelta ? '1' : '0'); }, [sortByDelta]);
 
   React.useEffect(() => {
     let mounted = true;
@@ -2681,6 +2997,7 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
     setShowHidden(false);
     setSortKey('views');
     setSortOrder('desc');
+    setSortByDelta(false);
   };
 
   const saveVisibility = async (nextPlatforms, nextProfileIds) => {
@@ -2705,17 +3022,49 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
     await saveVisibility(hiddenPlatforms, nextProfiles);
   };
 
-  const createProfile = async () => {
-    const rawName = await uiPrompt('Название нового профиля', '', 'Новый профиль');
-    const name = String(rawName || '').trim();
-    if (!name) return;
+  const createProfile = async ({ name, color }) => {
+    const profileName = String(name || '').trim();
+    if (!profileName) return;
     try {
-      await _postJson('/api/accounts/profiles/', { name });
+      await _postJson('/api/accounts/profiles/', { name: profileName, color: color || '#6366f1' });
       await onDataChanged?.();
       setProfileSearch('');
-      await uiAlert(`Профиль "${name}" добавлен.`, 'Профили');
+      await uiAlert(`Профиль "${profileName}" добавлен.`, 'Профили');
     } catch (e) {
       await uiAlert(`Не удалось добавить профиль: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    }
+  };
+
+  const saveProfileEditor = async ({ name, color }) => {
+    const profileName = String(name || '').trim();
+    if (!profileName) return;
+    setProfileEditorBusy(true);
+    try {
+      if (profileEditor?.mode === 'edit' && profileEditor?.id != null) {
+        await _patchJson(`/api/accounts/profiles/${profileEditor.id}/`, { name: profileName, color: color || '#6366f1' });
+      } else {
+        await createProfile({ name: profileName, color });
+      }
+      setProfileEditor(null);
+    } finally {
+      setProfileEditorBusy(false);
+    }
+  };
+
+  const deleteProfile = async (profileToDelete) => {
+    if (!profileToDelete?.id) return;
+    const confirmed = await uiConfirm(
+      `Удалить профиль "${profileToDelete.label}"?`,
+      'Подтвердите удаление профиля'
+    );
+    if (!confirmed) return;
+    try {
+      await _delete(`/api/accounts/profiles/${profileToDelete.id}/`);
+      await onDataChanged?.();
+      if (profile === profileToDelete.id) setProfile('all');
+      await uiAlert(`Профиль "${profileToDelete.label}" удален.`, 'Профили');
+    } catch (e) {
+      await uiAlert(`Не удалось удалить профиль: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     }
   };
 
@@ -2740,6 +3089,12 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
       (!search.trim() || a.name.toLowerCase().includes(search.toLowerCase()) || a.handle.toLowerCase().includes(search.toLowerCase()))
     );
     const getter = (a) => {
+      if (sortByDelta) {
+        if (sortKey === 'followers') return _toSortableNumber(a.dFollowers);
+        if (sortKey === 'likes') return _toSortableNumber(a.dLikes);
+        if (sortKey === 'posts') return _toSortableNumber(a.dPosts);
+        return _toSortableNumber(a.dViews);
+      }
       if (sortKey === 'followers') return _toSortableNumber(a.followers);
       if (sortKey === 'likes') return _toSortableNumber(a.likes);
       if (sortKey === 'posts') return _toSortableNumber(a.posts);
@@ -2750,7 +3105,7 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
       return sortOrder === 'asc' ? diff : -diff;
     });
     return rows;
-  }, [platform, profile, status, search, showHidden, sortKey, sortOrder]);
+  }, [platform, profile, status, search, showHidden, sortKey, sortOrder, sortByDelta]);
 
   const platformFilterOptions = useMemoAcc(() => {
     const fromAll = (ALL_PLATFORMS || []).map((p) => ({
@@ -2771,14 +3126,23 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
     return showHidden ? fallback : fallback.filter((p) => !p.hidden);
   }, [showHidden, hiddenPlatforms]);
 
+  const handleMetricSort = (key) => {
+    if (sortKey === key) {
+      setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+    } else {
+      setSortKey(key);
+      setSortOrder('desc');
+    }
+  };
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }} data-screen-label="Accounts List">
       <TopBar
         accent={accent}
-        onRefreshAll={() => setActiveModal('refresh_all')}
-        onOpenSchedule={() => setActiveModal('schedule')}
-        onOpenAddList={() => setActiveModal('add_list')}
-        onOpenAddOne={() => setActiveModal('add_one')}
+        onRefreshAll={() => onOpenGlobalModal?.('refresh_all')}
+        onOpenSchedule={() => onOpenGlobalModal?.('schedule')}
+        onOpenAddList={() => onOpenGlobalModal?.('add_list')}
+        onOpenAddOne={() => onOpenGlobalModal?.('add_one')}
         busy={busy}
       />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '280px 1fr', gap: 0 }}>
@@ -2793,9 +3157,17 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
           hiddenProfileIds={hiddenProfileIds}
           onToggleProfileHidden={toggleProfileHidden}
           showHidden={showHidden}
-          onCreateProfile={createProfile}
+          onCreateProfile={() => setProfileEditor({ mode: 'create', name: '', color: '#6366f1' })}
+          onEditProfile={(profileToEdit) => setProfileEditor({
+            mode: 'edit',
+            id: profileToEdit.id,
+            name: profileToEdit.label || '',
+            color: profileToEdit.color || '#6366f1',
+          })}
+          onDeleteProfile={deleteProfile}
+          stackOrder={isMobile ? 2 : 0}
         />
-        <main style={{ padding: isMobile ? '14px 12px 84px' : '28px 36px 60px', minWidth: 0 }}>
+        <main style={{ padding: isMobile ? '14px 12px 104px' : '28px 36px 60px', minWidth: 0, order: isMobile ? 1 : 0 }}>
           <FilterBar
             platform={platform}
             setPlatform={setPlatform}
@@ -2810,6 +3182,11 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
           hiddenPlatforms={hiddenPlatforms}
           onTogglePlatformHidden={togglePlatformHidden}
             platformOptions={platformFilterOptions}
+            sortKey={sortKey}
+            sortOrder={sortOrder}
+            onMetricSort={isMobile ? handleMetricSort : undefined}
+            sortByDelta={sortByDelta}
+            onToggleSortByDelta={() => setSortByDelta((v) => !v)}
           />
           {LOAD_STATE.hasError && (
             <div style={{ marginBottom: 14, padding: '10px 12px', borderRadius: 10, border: '1px solid #ef444455', background: '#ef444415', color: '#fca5a5', fontSize: 13 }}>
@@ -2821,7 +3198,7 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
               Ничего не найдено по текущим фильтрам.
             </div>
           ) : ((isMobile ? 'cards' : view) === 'table'
-            ? <AccountsTable rows={filtered} accent={accent} sortKey={sortKey} sortOrder={sortOrder} setSortKey={setSortKey} setSortOrder={setSortOrder} onOpenAccount={onOpenAccount} onRefreshOne={async (id) => {
+            ? <AccountsTable rows={filtered} accent={accent} sortKey={sortKey} sortOrder={sortOrder} setSortKey={setSortKey} setSortOrder={setSortOrder} sortByDelta={sortByDelta} setSortByDelta={setSortByDelta} onOpenAccount={onOpenAccount} onRefreshOne={async (id) => {
                 setRowBusyId(id);
                 try {
                   await _postJson(`/api/accounts/${id}/refresh/`, {});
@@ -2867,59 +3244,16 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount }) {
               }} rowBusyId={rowBusyId} />)}
         </main>
       </div>
-      {activeModal && (
-        <ModalOverlay onClose={() => setActiveModal(null)}>
-          {activeModal === 'refresh_all' && (
-            <RefreshAllModal
-              accent={accent}
-              onClose={() => setActiveModal(null)}
-              onDataChanged={onDataChanged}
-            />
-          )}
-          {activeModal === 'schedule' && (
-            <ScheduleModal
-              accent={accent}
-              onDataChanged={onDataChanged}
-              onClose={() => setActiveModal(null)}
-            />
-          )}
-          {activeModal === 'add_list' && (
-            <AddListModal
-              accent={accent}
-              onDataChanged={onDataChanged}
-              onClose={() => setActiveModal(null)}
-            />
-          )}
-          {activeModal === 'add_one' && (
-            <AddOneInline
-              accent={accent}
-              onDataChanged={onDataChanged}
-              onClose={() => setActiveModal(null)}
-            />
-          )}
-        </ModalOverlay>
-      )}
-      {isMobile && (
-        <div style={{
-          position: 'fixed',
-          left: 10,
-          right: 10,
-          bottom: 10,
-          zIndex: 70,
-          display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 8,
-          padding: 8,
-          borderRadius: 14,
-          border: '1px solid var(--line)',
-          background: 'rgba(8,10,14,0.92)',
-          backdropFilter: 'blur(10px)',
-        }}>
-          <button onClick={() => setActiveModal('refresh_all')} style={{ minHeight: 42, borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.03)', color: 'var(--ink)', fontSize: 12, fontWeight: 600 }}>↻ Всё</button>
-          <button onClick={() => setActiveModal('schedule')} style={{ minHeight: 42, borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.03)', color: 'var(--ink)', fontSize: 12, fontWeight: 600 }}>⏱ Авто</button>
-          <button onClick={() => setActiveModal('add_list')} style={{ minHeight: 42, borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.03)', color: 'var(--ink)', fontSize: 12, fontWeight: 600 }}>+ Список</button>
-          <button onClick={() => setActiveModal('add_one')} style={{ minHeight: 42, borderRadius: 10, border: 'none', background: accent, color: '#041018', fontSize: 12, fontWeight: 700 }}>+ Добавить</button>
-        </div>
+      {profileEditor && (
+        <ProfileEditorModal
+          accent={accent}
+          mode={profileEditor.mode}
+          initialName={profileEditor.name}
+          initialColor={profileEditor.color}
+          busy={profileEditorBusy}
+          onSubmit={saveProfileEditor}
+          onClose={() => { if (!profileEditorBusy) setProfileEditor(null); }}
+        />
       )}
     </div>
   );
@@ -2949,20 +3283,20 @@ function TopBar({ accent, onRefreshAll, onOpenSchedule, onOpenAddList, onOpenAdd
       </div>
       <div style={{
         display: isMobile ? 'grid' : 'flex',
-        gridTemplateColumns: isMobile ? 'repeat(4, minmax(0, 1fr))' : undefined,
+        gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : undefined,
         alignItems: 'center',
-        gap: isMobile ? 4 : 8,
+        gap: isMobile ? 8 : 8,
         overflow: 'visible',
       }}>
         {stats.map((s, i) => (
           <React.Fragment key={s.label}>
             {!isMobile && i > 0 && <span style={{ width: 1, height: 36, background: 'var(--line)' }} />}
-            <div style={{ flex: 1, padding: isMobile ? '0 4px' : '0 14px', minWidth: 0 }}>
-              <div className="mono" style={{ fontSize: isMobile ? 9 : 10, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{s.label}</div>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 2 }}>
-                <span className="tnum" style={{ fontSize: isMobile ? 18 : 22, fontWeight: 600, letterSpacing: '-0.01em', lineHeight: 0.95 }}>{fmt(s.value)}</span>
+            <div style={{ flex: 1, padding: isMobile ? '0 2px' : '0 14px', minWidth: 0 }}>
+              <div className="mono" style={{ fontSize: isMobile ? 8 : 10, color: 'var(--ink-mute)', letterSpacing: isMobile ? '0.12em' : '0.18em' }}>{s.label}</div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: isMobile ? 4 : 8, marginTop: 2, minWidth: 0 }}>
+                <span className="tnum" style={{ fontSize: isMobile ? 22 : 22, fontWeight: 600, letterSpacing: '-0.01em', lineHeight: 0.95, minWidth: 0, whiteSpace: 'nowrap' }}>{fmt(s.value)}</span>
                 {_hasDelta(s.delta) && (
-                  <span className="mono tnum" style={{ fontSize: isMobile ? 9 : 12, color: s.color }}>
+                  <span className="mono tnum" style={{ fontSize: isMobile ? 11 : 12, color: s.color, whiteSpace: 'nowrap' }}>
                     {Number(s.delta) >= 0 ? '+' : ''}{fmt(s.delta)}
                   </span>
                 )}
@@ -2975,7 +3309,7 @@ function TopBar({ accent, onRefreshAll, onOpenSchedule, onOpenAddList, onOpenAdd
         <Btn onClick={onRefreshAll} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '↻' : (busy ? 'Обновление...' : '↻ Обновить всё')}</Btn>
         <Btn accent={accent} onClick={onOpenSchedule} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '⏱' : <><span style={{ width: 8, height: 8, borderRadius: 999, background: '#4ade80', display: 'inline-block', marginRight: 6, boxShadow: '0 0 8px #4ade80' }} />Автообновление</>}</Btn>
         <Btn onClick={onOpenAddList} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '≡' : '+ Список'}</Btn>
-        <Btn primary accent={accent} onClick={onOpenAddOne} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '+' : '+ Добавить'}</Btn>
+        <Btn onClick={onOpenAddOne} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '+' : '+ Добавить'}</Btn>
       </div>
     </header>
   );
@@ -3008,18 +3342,22 @@ function Btn({ children, primary, accent = '#6aa9ff', onClick, style }) {
   );
 }
 
-function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setProfileSearch, hiddenProfileIds, onToggleProfileHidden, showHidden, onCreateProfile }) {
+function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setProfileSearch, hiddenProfileIds, onToggleProfileHidden, showHidden, onCreateProfile, onEditProfile, onDeleteProfile, stackOrder = 0 }) {
   const isMobile = useIsMobile(980);
   const matchedProfiles = PROFILES.filter((p) => {
     const matches = p.id === 'none' || p.label.toLowerCase().includes(profileSearch.toLowerCase());
     if (!matches) return false;
     return true;
   });
-  const visibleProfiles = matchedProfiles.filter((p) => p.id === 'none' || !hiddenProfileIds?.has(String(p.id)));
+  const visibleProfiles = matchedProfiles.filter((p) => {
+    if (p.id === 'none') return true;
+    return !hiddenProfileIds?.has(String(p.id));
+  });
   const hiddenProfiles = matchedProfiles.filter((p) => p.id !== 'none' && hiddenProfileIds?.has(String(p.id)));
   const totalProfileAccounts = PROFILES.reduce((sum, p) => sum + Number(p.accounts || 0), 0);
   return (
     <aside style={{
+      order: stackOrder,
       borderRight: isMobile ? 'none' : '1px solid var(--line)',
       borderBottom: isMobile ? '1px solid var(--line)' : 'none',
       padding: isMobile ? '12px' : '24px 20px',
@@ -3081,9 +3419,11 @@ function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setP
             color={p.color}
             hidden={hiddenProfileIds?.has(String(p.id))}
             onToggleHidden={() => onToggleProfileHidden?.(String(p.id))}
+            onEdit={() => onEditProfile?.(p)}
+            onDelete={() => onDeleteProfile?.(p)}
           />
         ))}
-        {hiddenProfiles.length > 0 && !showHidden && (
+        {hiddenProfiles.length > 0 && showHidden && (
           <>
             <div style={{ height: 1, background: 'var(--line)', margin: '14px 0' }} />
             <div className="mono" style={{ fontSize: 10, color: '#86efac', letterSpacing: '0.16em', marginBottom: 8 }}>
@@ -3099,6 +3439,8 @@ function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setP
                 color={p.color}
                 hidden
                 onToggleHidden={() => onToggleProfileHidden?.(String(p.id))}
+                onEdit={() => onEditProfile?.(p)}
+                onDelete={() => onDeleteProfile?.(p)}
               />
             ))}
           </>
@@ -3108,9 +3450,31 @@ function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setP
   );
 }
 
-function SidebarItem({ active, onClick, label, count, color, dot, dim, accent, hidden, onToggleHidden }) {
+function SidebarItem({ active, onClick, label, count, color, dot, dim, accent, hidden, onToggleHidden, onEdit, onDelete }) {
+  const isMobile = useIsMobile(980);
+  const hasActions = !!(onToggleHidden || onEdit || onDelete);
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [hovered, setHovered] = React.useState(false);
+  const menuRef = React.useRef(null);
+  const showMoreButton = isMobile || hovered || menuOpen;
+
+  React.useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDocMouseDown = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, [menuOpen]);
+
   return (
-    <div onClick={onClick} style={{
+    <div
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
       position: 'relative',
       display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
       padding: '10px 12px', borderRadius: 10, cursor: 'pointer',
@@ -3125,31 +3489,113 @@ function SidebarItem({ active, onClick, label, count, color, dot, dim, accent, h
         }
         <span style={{ fontSize: 14, color: dim ? 'var(--ink-mute)' : 'var(--ink)' }}>{label}</span>
       </div>
-      <span className="mono tnum" style={{ fontSize: 12, color: 'var(--ink-mute)', paddingRight: onToggleHidden ? 24 : 0 }}>{count}</span>
-      {onToggleHidden && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onToggleHidden?.(); }}
-          title={hidden ? 'Показать профиль' : 'Скрыть профиль'}
-          style={{
-            position: 'absolute',
-            top: 6,
-            right: 6,
-            width: 18,
-            height: 18,
-            borderRadius: 6,
-            border: `1px solid ${hidden ? 'rgba(34,197,94,0.45)' : 'var(--line)'}`,
-            background: hidden ? 'rgba(34,197,94,0.16)' : 'rgba(255,255,255,0.03)',
-            color: hidden ? '#86efac' : '#cbd5e1',
-            cursor: 'pointer',
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            padding: 0,
-          }}
-        >
-          <EyeIcon size={11} color={hidden ? '#86efac' : '#cbd5e1'} />
-        </button>
-      )}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto' }}>
+        {hasActions && (
+          <div ref={menuRef} style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+            <button
+              onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+              title="Действия с профилем"
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 7,
+                border: '1px solid var(--line)',
+                background: menuOpen ? 'rgba(255,255,255,0.10)' : 'rgba(255,255,255,0.03)',
+                color: '#cbd5e1',
+                cursor: 'pointer',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 0,
+                fontSize: 14,
+                lineHeight: 1,
+                opacity: showMoreButton ? 1 : 0,
+                pointerEvents: showMoreButton ? 'auto' : 'none',
+                transition: 'opacity .14s ease',
+              }}
+            >
+              ⋯
+            </button>
+            {menuOpen && (
+              <div
+                onClick={(e) => e.stopPropagation()}
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 6px)',
+                  right: 0,
+                  minWidth: 152,
+                  borderRadius: 10,
+                  border: '1px solid var(--line-2)',
+                  background: 'rgba(18,20,28,0.96)',
+                  backdropFilter: 'blur(10px)',
+                  boxShadow: '0 10px 28px rgba(0,0,0,0.45)',
+                  padding: 6,
+                  zIndex: 30,
+                }}
+              >
+                {onEdit && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onEdit?.(); }}
+                    style={{
+                      width: '100%',
+                      border: 'none',
+                      background: 'transparent',
+                      color: 'var(--ink)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: 12,
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    ✎ Редактировать
+                  </button>
+                )}
+                {onToggleHidden && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onToggleHidden?.(); }}
+                    style={{
+                      width: '100%',
+                      border: 'none',
+                      background: 'transparent',
+                      color: hidden ? '#86efac' : 'var(--ink)',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: 12,
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    {hidden ? '◉ Показать профиль' : '◉ Скрыть профиль'}
+                  </button>
+                )}
+                {onDelete && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setMenuOpen(false); onDelete?.(); }}
+                    style={{
+                      width: '100%',
+                      border: 'none',
+                      background: 'transparent',
+                      color: '#fca5a5',
+                      cursor: 'pointer',
+                      textAlign: 'left',
+                      fontSize: 12,
+                      padding: '8px 10px',
+                      borderRadius: 8,
+                      fontFamily: 'inherit',
+                    }}
+                  >
+                    ✕ Удалить
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+        <span className="mono tnum" style={{ fontSize: 12, color: 'var(--ink-mute)', minWidth: 20, textAlign: 'right', lineHeight: '18px' }}>{count}</span>
+      </div>
     </div>
   );
 }
@@ -3157,6 +3603,7 @@ function SidebarItem({ active, onClick, label, count, color, dot, dim, accent, h
 function FilterBar({
   platform, setPlatform, status, setStatus, accent, search, setSearch, onReset, showHidden, setShowHidden,
   hiddenPlatforms, onTogglePlatformHidden, platformOptions,
+  sortKey, sortOrder, onMetricSort, sortByDelta, onToggleSortByDelta,
 }) {
   const isMobile = useIsMobile(980);
   return (
@@ -3223,20 +3670,76 @@ function FilterBar({
           </div>
         ))}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <Pill active={false} onClick={onReset}>{isMobile ? '↻' : '↺ Сбросить фильтры'}</Pill>
-        <Pill active={status === 'all'} onClick={() => setStatus('all')}>{isMobile ? 'Все ст.' : 'Все статусы'}</Pill>
-        <Pill active={status === 'avail'} onClick={() => setStatus('avail')}>{isMobile ? 'Дост.' : 'Доступные'}</Pill>
-        <Pill active={status === 'unavail'} onClick={() => setStatus('unavail')}>{isMobile ? 'Недост.' : 'Недоступные'}</Pill>
+      <div style={isMobile && typeof onMetricSort === 'function' ? { display: 'flex', flexDirection: 'column', gap: 14 } : undefined}>
+        {isMobile && typeof onMetricSort === 'function' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, order: 2 }}>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.16em', textTransform: 'uppercase' }}>
+              Сортировка по показателю
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+              <button
+                type="button"
+                onClick={() => onToggleSortByDelta?.()}
+                title={sortByDelta ? 'Сортировка по приросту включена. Нажмите — по абсолютным значениям.' : 'Сортировать по приросту выбранного показателя (дельта)'}
+                aria-pressed={sortByDelta ? 'true' : 'false'}
+                aria-label={sortByDelta ? 'Выключить сортировку по приросту' : 'Включить сортировку по приросту'}
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 8,
+                  border: '1px solid ' + (sortByDelta ? accent : 'var(--line)'),
+                  background: sortByDelta ? `${accent}22` : 'rgba(255,255,255,0.03)',
+                  color: sortByDelta ? accent : 'var(--ink-mute)',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: 0,
+                  flexShrink: 0,
+                }}
+              >
+                <DeltaGrowthIcon size={15} color={sortByDelta ? accent : 'var(--ink-mute)'} />
+              </button>
+              {[
+                { key: 'followers', short: 'Подп', title: 'Подписчики' },
+                { key: 'views', short: 'Просм', title: 'Просмотры' },
+                { key: 'likes', short: 'Лайки', title: 'Лайки' },
+                { key: 'posts', short: 'Публ', title: 'Публикации' },
+              ].map(({ key, short, title }) => {
+                const active = sortKey === key;
+                const mark = active ? (sortOrder === 'desc' ? ' ↓' : ' ↑') : '';
+                const hint = active ? (sortOrder === 'desc' ? `${title} — от большего к меньшему` : `${title} — от меньшего к большему`) : title;
+                return (
+                  <Pill key={key} active={active} onClick={() => onMetricSort(key)} title={hint}>
+                    {short}{mark}
+                  </Pill>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          flexWrap: 'wrap',
+          ...(isMobile && typeof onMetricSort === 'function' ? { order: 1 } : {}),
+        }}
+        >
+          <Pill active={false} onClick={onReset}>{isMobile ? '↻' : '↺ Сбросить фильтры'}</Pill>
+          <Pill active={status === 'all'} onClick={() => setStatus('all')}>{isMobile ? 'Все ст.' : 'Все статусы'}</Pill>
+          <Pill active={status === 'avail'} onClick={() => setStatus('avail')}>{isMobile ? 'Дост.' : 'Доступные'}</Pill>
+          <Pill active={status === 'unavail'} onClick={() => setStatus('unavail')}>{isMobile ? 'Недост.' : 'Недоступные'}</Pill>
+        </div>
       </div>
     </div>
   );
 }
 
-function Pill({ active, onClick, children, dot }) {
+function Pill({ active, onClick, children, dot, title }) {
   const isMobile = useIsMobile(980);
   return (
-    <button onClick={onClick} style={{
+    <button type="button" title={title} onClick={onClick} style={{
       minHeight: isMobile ? 40 : undefined,
       padding: isMobile ? '8px 12px' : '8px 14px', borderRadius: 999, cursor: 'pointer',
       background: active ? '#fff' : 'rgba(255,255,255,0.025)',
@@ -3251,7 +3754,7 @@ function Pill({ active, onClick, children, dot }) {
   );
 }
 
-function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOrder, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId }) {
+function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOrder, sortByDelta, setSortByDelta, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId }) {
   const onSort = (key) => {
     if (sortKey === key) {
       setSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'));
@@ -3261,23 +3764,74 @@ function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOr
     }
   };
   const sortMark = (key) => (sortKey === key ? (sortOrder === 'desc' ? ' ↓' : ' ↑') : '');
+  const metricBtn = (key, label) => (
+    <button
+      type="button"
+      key={key}
+      onClick={() => onSort(key)}
+      style={{
+        textAlign: 'right',
+        border: 'none',
+        background: 'transparent',
+        color: sortKey === key ? accent : 'var(--ink-mute)',
+        cursor: 'pointer',
+        font: 'inherit',
+        letterSpacing: '0.18em',
+        textTransform: 'uppercase',
+        whiteSpace: 'nowrap',
+        maxWidth: '100%',
+      }}
+    >
+      {label}{sortByDelta ? ' Δ' : ''}{sortMark(key)}
+    </button>
+  );
   return (
     <div style={{ borderRadius: 14, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', overflow: 'hidden' }}>
       <div style={{
         display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 1.1fr 1.2fr',
-        padding: '14px 20px', gap: 16, borderBottom: '1px solid var(--line)',
+        padding: '10px 20px', gap: 16, borderBottom: '1px solid var(--line)',
         fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.18em', textTransform: 'uppercase',
         fontFamily: 'JetBrains Mono, monospace',
+        alignItems: 'center',
       }}>
-        <div>Аккаунт</div>
+        <div style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+          <span>Аккаунт</span>
+        </div>
         <div>Платформа</div>
         <div>Профиль</div>
-        <button onClick={() => onSort('followers')} style={{ textAlign: 'right', border: 'none', background: 'transparent', color: sortKey === 'followers' ? accent : 'var(--ink-mute)', cursor: 'pointer', font: 'inherit', letterSpacing: '0.18em', textTransform: 'uppercase' }}>Подписчики{sortMark('followers')}</button>
-        <button onClick={() => onSort('views')} style={{ textAlign: 'right', border: 'none', background: 'transparent', color: sortKey === 'views' ? accent : 'var(--ink-mute)', cursor: 'pointer', font: 'inherit', letterSpacing: '0.18em', textTransform: 'uppercase' }}>Просмотры{sortMark('views')}</button>
-        <button onClick={() => onSort('likes')} style={{ textAlign: 'right', border: 'none', background: 'transparent', color: sortKey === 'likes' ? accent : 'var(--ink-mute)', cursor: 'pointer', font: 'inherit', letterSpacing: '0.18em', textTransform: 'uppercase' }}>Лайки{sortMark('likes')}</button>
-        <button onClick={() => onSort('posts')} style={{ textAlign: 'right', border: 'none', background: 'transparent', color: sortKey === 'posts' ? accent : 'var(--ink-mute)', cursor: 'pointer', font: 'inherit', letterSpacing: '0.18em', textTransform: 'uppercase' }}>Публ.{sortMark('posts')}</button>
+        {metricBtn('followers', 'Подписчики')}
+        {metricBtn('views', 'Просмотры')}
+        {metricBtn('likes', 'Лайки')}
+        {metricBtn('posts', 'Публ.')}
         <div>Обновлён</div>
-        <div>Действия</div>
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, minWidth: 0 }}>
+          <span style={{ letterSpacing: '0.18em', textTransform: 'uppercase', fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            Действия
+          </span>
+          <button
+            type="button"
+            onClick={() => setSortByDelta((v) => !v)}
+            title={sortByDelta ? 'Сортировка по приросту включена. Нажмите — по абсолютным значениям.' : 'Сортировать по приросту выбранного показателя (дельта за период снимков)'}
+            aria-pressed={sortByDelta ? 'true' : 'false'}
+            aria-label={sortByDelta ? 'Выключить сортировку по приросту' : 'Включить сортировку по приросту'}
+            style={{
+              flexShrink: 0,
+              width: 26,
+              height: 26,
+              borderRadius: 6,
+              border: '1px solid ' + (sortByDelta ? accent : 'var(--line)'),
+              background: sortByDelta ? `${accent}22` : 'rgba(255,255,255,0.03)',
+              color: sortByDelta ? accent : 'var(--ink-mute)',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 0,
+            }}
+          >
+            <DeltaGrowthIcon size={13} color={sortByDelta ? accent : 'var(--ink-mute)'} />
+          </button>
+        </div>
       </div>
       {rows.map((a, i) => (
         <AccountRow key={a.id || `${a.platform}:${a.username || a.handle}`} a={a} i={i} onOpenAccount={onOpenAccount} onRefreshOne={onRefreshOne} onDeleteOne={onDeleteOne} rowBusyId={rowBusyId} />
@@ -3341,7 +3895,7 @@ function AccountRow({ a, i, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId 
         )}
       </div>
       <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{a.updated}</div>
-      <div style={{ display: 'flex', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
         <button onClick={() => onRefreshOne?.(a.id)} disabled={rowBusyId === a.id} style={{ minHeight: isMobile ? 40 : undefined, padding: isMobile ? '8px 10px' : '6px 10px', borderRadius: 8, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: 'pointer', fontSize: 12, opacity: rowBusyId === a.id ? 0.6 : 1 }}>
           {rowBusyId === a.id ? '...' : '↻'}
         </button>
@@ -3387,8 +3941,8 @@ function AccountsCards({ rows, accent, onOpenAccount, onRefreshOne, onDeleteOne,
                 <AvailabilityBadge unavailable={a.unavailable} reason={a.unavailableReason} />
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-              {[['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d, c]) => (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+              {[['Followers', a.followers, a.dFollowers, '#4ade80'], ['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d, c]) => (
                 <div key={l}>
                   <div className="mono" style={{ fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{l.toUpperCase()}</div>
                   <div className="mono tnum" style={{ fontSize: 17, fontWeight: 600 }}>{fmt(v)}</div>
@@ -3652,7 +4206,7 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
 
 const { useState: useStateAn, useEffect: useEffectAn } = React;
 
-function AnalyticsScreen({ tweaks }) {
+function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
   const isMobile = useIsMobile(980);
   const accent = tweaks.accent || '#6aa9ff';
   const pageSize = isMobile ? 5 : 20;
@@ -3661,12 +4215,13 @@ function AnalyticsScreen({ tweaks }) {
   const [sortBy, setSortBy] = useStateAn('view_delta');
   const [minViews, setMinViews] = useStateAn(10);
   const [hashtagSort, setHashtagSort] = useStateAn('count');
-  const [topPosts, setTopPosts] = useStateAn(POSTS);
+  const [topPosts, setTopPosts] = useStateAn([]);
   const [page, setPage] = useStateAn(1);
   const [pages, setPages] = useStateAn(1);
   const [totalPosts, setTotalPosts] = useStateAn(0);
   const [insights, setInsights] = useStateAn(null);
   const [loading, setLoading] = useStateAn(false);
+  const [initialReady, setInitialReady] = useStateAn(false);
 
   useEffectAn(() => {
     let cancelled = false;
@@ -3704,13 +4259,15 @@ function AnalyticsScreen({ tweaks }) {
           setPages(Math.max(1, Number(res?.pages || 1)));
           setTotalPosts(Math.max(0, Number(res?.total || 0)));
           setInsights(insightsRes && typeof insightsRes === 'object' ? insightsRes : null);
+          setInitialReady(true);
         }
       } catch {
         if (!cancelled) {
-          setTopPosts(POSTS);
+          setTopPosts([]);
           setPages(1);
-          setTotalPosts(POSTS.length);
+          setTotalPosts(0);
           setInsights(null);
+          setInitialReady(true);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -3731,7 +4288,7 @@ function AnalyticsScreen({ tweaks }) {
     { id: 'er', label: 'Вовлеченность (ER)' },
   ];
 
-  const analyticsRows = topPosts.length > 0 ? topPosts : POSTS;
+  const analyticsRows = topPosts;
   const safeRows = analyticsRows.length > 0 ? analyticsRows : [{ delta: 0, views: 0, er: 0 }];
   const hourRows = Array.isArray(insights?.best_hours) ? insights.best_hours : [];
   const platformRows = Array.isArray(insights?.platform_comparison) ? insights.platform_comparison : [];
@@ -3773,10 +4330,48 @@ function AnalyticsScreen({ tweaks }) {
   const maxHourViews = Math.max(1, ...bestHours.map((h) => Number(h.avg_views || 0)));
   const maxWeekdayViews = Math.max(1, ...bestWeekdays.map((d) => Number(d.avg_views || 0)));
 
+  if (!initialReady) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }} data-screen-label="Analytics">
+        <TopBar
+          accent={accent}
+          onRefreshAll={() => onOpenGlobalModal?.('refresh_all')}
+          onOpenSchedule={() => onOpenGlobalModal?.('schedule')}
+          onOpenAddList={() => onOpenGlobalModal?.('add_list')}
+          onOpenAddOne={() => onOpenGlobalModal?.('add_one')}
+        />
+        <main style={{ flex: 1, padding: isMobile ? '12px 10px 132px' : '28px 36px 60px', maxWidth: 1600, width: '100%', margin: '0 auto' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.6fr 1fr 1fr 1fr', gap: 12, marginBottom: 18 }}>
+            {[0, 1, 2, 3].map((i) => (
+              <div
+                key={`an-sk-${i}`}
+                style={{
+                  height: isMobile && i > 0 ? 128 : 186,
+                  borderRadius: 16,
+                  border: '1px solid var(--line)',
+                  background: 'linear-gradient(90deg, rgba(255,255,255,0.015) 0%, rgba(255,255,255,0.055) 45%, rgba(255,255,255,0.015) 100%)',
+                  backgroundSize: '220% 100%',
+                  animation: 'anShimmer 1.4s linear infinite',
+                }}
+              />
+            ))}
+          </div>
+          <style>{`@keyframes anShimmer { 0% { background-position: 220% 0; } 100% { background-position: -220% 0; } }`}</style>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }} data-screen-label="Analytics">
-      <TopBar accent={accent} />
-      <main style={{ flex: 1, padding: isMobile ? '12px 10px 132px' : '28px 36px 60px', maxWidth: 1600, width: '100%', margin: '0 auto' }}>
+      <TopBar
+        accent={accent}
+        onRefreshAll={() => onOpenGlobalModal?.('refresh_all')}
+        onOpenSchedule={() => onOpenGlobalModal?.('schedule')}
+        onOpenAddList={() => onOpenGlobalModal?.('add_list')}
+        onOpenAddOne={() => onOpenGlobalModal?.('add_one')}
+      />
+      <main style={{ flex: 1, padding: isMobile ? '12px 10px 132px' : '28px 36px 60px', maxWidth: 1600, width: '100%', margin: '0 auto', animation: 'anFadeIn .24s ease-out' }}>
         {/* Hero band */}
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.6fr 1fr 1fr 1fr', gap: 12, marginBottom: 18 }}>
           <div style={{ borderRadius: 16, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', padding: 24, position: 'relative', overflow: 'hidden' }}>
@@ -3835,7 +4430,16 @@ function AnalyticsScreen({ tweaks }) {
               <div style={{ fontSize: 13, color: 'var(--ink-dim)', fontWeight: 500 }}>{s.l}</div>
               <div className="tnum" style={{ fontSize: isMobile ? 30 : 36, fontWeight: 700, marginTop: 8, letterSpacing: '-0.02em' }}>{s.v}</div>
               <div className="mono" style={{ fontSize: 12, color: s.c, marginTop: 4 }}>{s.d}</div>
-              <div style={{ marginTop: 10, height: 36 }}><Sparkline data={Array.isArray(s.spark) && s.spark.length > 1 ? s.spark : TREND_24H.map(v => v * 0.4)} color={s.c} width={220} height={36} dot={false} /></div>
+              <div style={{ marginTop: 10, height: 36 }}>
+                <Sparkline
+                  data={Array.isArray(s.spark) && s.spark.length > 1 ? s.spark : TREND_24H.map(v => v * 0.4)}
+                  color={s.c}
+                  width={isMobile ? 360 : 220}
+                  height={36}
+                  dot={false}
+                  stretch
+                />
+              </div>
             </div>
           ))}
         </div>
@@ -3852,7 +4456,11 @@ function AnalyticsScreen({ tweaks }) {
             ))}
           </div>
           <Pill active={platform === 'all'} onClick={() => setPlatform('all')}>Все</Pill>
-          {PLATFORMS.map(p => <Pill key={p.id} active={platform === p.id} onClick={() => setPlatform(p.id)} dot={p.color}>{p.label}</Pill>)}
+          {PLATFORMS.map(p => (
+            <Pill key={p.id} active={platform === p.id} onClick={() => setPlatform(p.id)} dot={isMobile ? undefined : p.color}>
+              {isMobile ? <PlatformGlyph id={p.id} size={14} /> : p.label}
+            </Pill>
+          ))}
         </div>
 
         <SectionHeader
@@ -3914,18 +4522,24 @@ function AnalyticsScreen({ tweaks }) {
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
-            {(topPosts.length > 0 ? topPosts : POSTS).map((p, i) => (
+            {topPosts.map((p, i) => (
               <PostRow
                 key={`${p.postUrl || p.handle}-${i}`}
                 p={p}
                 accent={accent}
                 rank={((page - 1) * pageSize) + i + 1}
-                max={(topPosts[0]?.delta || POSTS[0]?.delta || 1)}
+                max={(topPosts[0]?.delta || 1)}
                 isMobile={isMobile}
               />
             ))}
           </div>
         </div>
+        {topPosts.length === 0 && !loading && (
+          <div style={{ marginTop: 10, borderRadius: 12, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', padding: 14, fontSize: 13, color: 'var(--ink-mute)' }}>
+            Нет данных для выбранных фильтров.
+          </div>
+        )}
+        <style>{`@keyframes anFadeIn { from { opacity: 0; } to { opacity: 1; } }`}</style>
         <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 10, marginTop: 12, marginBottom: 4 }}>
           <button
             onClick={() => setPage((v) => Math.max(1, v - 1))}
@@ -4040,6 +4654,10 @@ function AnalyticsScreen({ tweaks }) {
 function PostRow({ p, accent, rank, max, isMobile = false }) {
   const meta = PLATFORM_META[p.platform] || { color: '#9ca3af', label: p.platform || 'Unknown' };
   const w = Math.max(0, (p.delta / Math.max(1, max)) * 100);
+  const [thumbBroken, setThumbBroken] = React.useState(false);
+  React.useEffect(() => {
+    setThumbBroken(false);
+  }, [p.thumb]);
   return (
     <div style={{
       position: 'relative',
@@ -4060,14 +4678,19 @@ function PostRow({ p, accent, rank, max, isMobile = false }) {
           width: 64,
           height: 64,
           borderRadius: 8,
-          background: p.thumb ? '#0b1220' : `linear-gradient(135deg, ${meta.color}40, rgba(255,255,255,0.05))`,
+          background: p.thumb && !thumbBroken ? '#0b1220' : `linear-gradient(135deg, ${meta.color}40, rgba(255,255,255,0.05))`,
           border: '1px solid var(--line)',
           overflow: 'hidden',
         }}>
-          {p.thumb ? (
-            <img src={p.thumb} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+          {p.thumb && !thumbBroken ? (
+            <img
+              src={p.thumb}
+              alt=""
+              onError={() => setThumbBroken(true)}
+              style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+            />
           ) : (
-            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'JetBrains Mono, monospace', fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.1em' }}>POST</div>
+            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: 'JetBrains Mono, monospace', fontSize: 8, color: 'var(--ink-mute)', letterSpacing: '0.1em' }}>NO IMAGE</div>
           )}
         </div>
       )}
@@ -4113,7 +4736,7 @@ function _authImportCookiesEndpoint(platformId) {
   return `/api/settings/${platformId}/import-cookies/`;
 }
 
-function SettingsScreen({ tweaks, onBack, onDataChanged }) {
+function SettingsScreen({ tweaks, onBack, onDataChanged, onOpenGlobalModal }) {
   const isMobile = useIsMobile(980);
   const accent = tweaks.accent || '#6aa9ff';
   const fallbackPlatforms = [
@@ -4130,7 +4753,13 @@ function SettingsScreen({ tweaks, onBack, onDataChanged }) {
   const expiredCount = platforms.filter((p) => p.state === 'expired').length;
   return (
     <div style={{ minHeight: '100vh' }} data-screen-label="Settings">
-      <TopBar accent={accent} />
+      <TopBar
+        accent={accent}
+        onRefreshAll={() => onOpenGlobalModal?.('refresh_all')}
+        onOpenSchedule={() => onOpenGlobalModal?.('schedule')}
+        onOpenAddList={() => onOpenGlobalModal?.('add_list')}
+        onOpenAddOne={() => onOpenGlobalModal?.('add_one')}
+      />
       <main style={{ maxWidth: 1100, margin: '0 auto', padding: isMobile ? '12px 10px 132px' : '28px 36px 80px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: isMobile ? 14 : 24, flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
           <button onClick={onBack} style={{ padding: '8px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>← Назад</button>
@@ -4338,15 +4967,16 @@ function ModalsScreen({ tweaks, onDataChanged, initialTab }) {
 }
 
 function ModalOverlay({ children, onClose }) {
+  const isMobile = useIsMobile(760);
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 120, display: 'grid', placeItems: 'center', padding: 18 }}>
+    <div style={{ position: 'fixed', inset: 0, zIndex: 120, display: 'grid', placeItems: 'center', padding: isMobile ? 8 : 18 }}>
       <button onClick={onClose} style={{ position: 'absolute', inset: 0, border: 'none', background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(3px)', cursor: 'pointer' }} />
       <div style={{ position: 'relative', zIndex: 1 }}>{children}</div>
     </div>
   );
 }
 
-function ModalShell({ title, kicker, children, accent, width = 560, onClose }) {
+function ModalShell({ title, kicker, children, accent, width = 620, onClose, offsetY = '0%' }) {
   const isMobile = useIsMobile(760);
   return (
     <div style={{
@@ -4356,6 +4986,7 @@ function ModalShell({ title, kicker, children, accent, width = 560, onClose }) {
       boxShadow: '0 24px 60px rgba(0,0,0,0.55)',
       maxHeight: isMobile ? '92vh' : '88vh',
       overflowY: 'auto',
+      transform: !isMobile && offsetY !== '0%' ? `translateY(${offsetY})` : undefined,
     }}>
       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${accent}, transparent)` }} />
       <ParticleField count={20} color={accent} opacity={0.3} />
@@ -4373,22 +5004,102 @@ function ModalShell({ title, kicker, children, accent, width = 560, onClose }) {
   );
 }
 
+const PROFILE_PRESET_COLORS = [
+  '#6366f1', '#8b5cf6', '#ec4899', '#ef4444', '#f97316',
+  '#eab308', '#22c55e', '#14b8a6', '#3b82f6', '#64748b',
+];
+
+function ProfileColorPicker({ value, onChange }) {
+  return (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      {PROFILE_PRESET_COLORS.map((color) => (
+        <button
+          key={color}
+          type="button"
+          onClick={() => onChange?.(color)}
+          style={{
+            width: 24,
+            height: 24,
+            borderRadius: 999,
+            border: `2px solid ${value === color ? '#ffffff' : 'transparent'}`,
+            background: color,
+            cursor: 'pointer',
+            transform: value === color ? 'scale(1.08)' : 'scale(1)',
+            transition: 'transform .12s ease',
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ProfileEditorModal({ accent, mode, initialName = '', initialColor = '#6366f1', busy = false, onSubmit, onClose }) {
+  const [name, setName] = useStateMd(initialName);
+  const [color, setColor] = useStateMd(initialColor || '#6366f1');
+  const title = mode === 'edit' ? 'Редактировать профиль' : 'Новый профиль';
+  const kicker = mode === 'edit' ? 'PROFILE EDIT' : 'PROFILE CREATE';
+  const submitLabel = busy ? 'Сохраняю...' : (mode === 'edit' ? 'Сохранить' : 'Создать');
+  return (
+    <ModalOverlay onClose={onClose}>
+      <ModalShell title={title} kicker={kicker} accent={accent} width={560} onClose={onClose}>
+        <div style={{ display: 'grid', gap: 14 }}>
+          <div>
+            <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>НАЗВАНИЕ</div>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Название профиля"
+              autoFocus
+              style={{
+                width: '100%',
+                padding: '12px 14px',
+                borderRadius: 10,
+                background: 'rgba(255,255,255,0.025)',
+                border: '1px solid var(--line-2)',
+                color: 'var(--ink)',
+                fontSize: 14,
+                fontFamily: 'inherit',
+              }}
+            />
+          </div>
+          <div>
+            <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ЦВЕТ</div>
+            <ProfileColorPicker value={color} onChange={setColor} />
+          </div>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 24 }}>
+          <button onClick={onClose} style={{ padding: '8px 0', background: 'transparent', border: 'none', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Отмена</button>
+          <button
+            onClick={() => onSubmit?.({ name: String(name || '').trim(), color })}
+            disabled={busy || !String(name || '').trim()}
+            style={{ padding: '12px 28px', borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: busy ? 'default' : 'pointer', opacity: busy || !String(name || '').trim() ? 0.6 : 1 }}
+          >
+            {submitLabel}
+          </button>
+        </div>
+      </ModalShell>
+    </ModalOverlay>
+  );
+}
+
 function AddListModal({ accent, onDataChanged, onClose }) {
+  const isMobile = useIsMobile(760);
   const [raw, setRaw] = useStateMd('');
   const [busy, setBusy] = useStateMd(false);
   const [profileId, setProfileId] = useStateMd('none');
   const [profileBusy, setProfileBusy] = useStateMd(false);
-  const createProfileInline = async () => {
-    const rawName = await uiPrompt('Название нового профиля', '', 'Новый профиль');
-    const name = String(rawName || '').trim();
-    if (!name) return;
+  const [profileEditorOpen, setProfileEditorOpen] = useStateMd(false);
+  const createProfileInline = async ({ name, color }) => {
+    const profileName = String(name || '').trim();
+    if (!profileName) return;
     setProfileBusy(true);
     try {
-      const created = await _postJson('/api/accounts/profiles/', { name });
+      const created = await _postJson('/api/accounts/profiles/', { name: profileName, color: color || '#6366f1' });
       const createdId = created?.id != null ? String(created.id) : null;
       await onDataChanged?.();
       if (createdId) setProfileId(createdId);
-      await uiAlert(`Профиль "${name}" добавлен.`, 'Профили');
+      await uiAlert(`Профиль "${profileName}" добавлен.`, 'Профили');
+      setProfileEditorOpen(false);
     } catch (e) {
       await uiAlert(`Не удалось добавить профиль: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
@@ -4421,7 +5132,7 @@ function AddListModal({ accent, onDataChanged, onClose }) {
     }
   };
   return (
-    <ModalShell title="Добавить список аккаунтов" kicker="BATCH IMPORT" accent={accent} onClose={onClose}>
+    <ModalShell title="Добавить список аккаунтов" kicker="BATCH IMPORT" accent={accent} width={760} offsetY="-10%" onClose={onClose}>
       <div style={{ fontSize: 13, color: 'var(--ink-dim)', marginBottom: 12 }}>Вставь URL аккаунтов — по одному на строку или через запятую</div>
       <textarea value={raw} onChange={(e) => setRaw(e.target.value)} placeholder={'https://www.tiktok.com/@username\nhttps://www.youtube.com/@channel\nhttps://www.threads.com/@user\nhttps://t.me/channel'} style={{
         width: '100%', minHeight: 160, padding: 16, borderRadius: 12,
@@ -4432,22 +5143,99 @@ function AddListModal({ accent, onDataChanged, onClose }) {
         <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em' }}>ПРОФИЛЬ</span>
         <ProfilePicker accent={accent} value={profileId} onChange={setProfileId} />
         <button
-          onClick={createProfileInline}
+          onClick={() => setProfileEditorOpen(true)}
           disabled={profileBusy}
           style={{ padding: '8px 14px', borderRadius: 999, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line)', color: 'var(--ink-dim)', cursor: profileBusy ? 'default' : 'pointer', fontSize: 13, fontFamily: 'inherit', display: 'inline-flex', alignItems: 'center', gap: 6, opacity: profileBusy ? 0.7 : 1 }}
         >
           {profileBusy ? '...' : '+ Новый'}
         </button>
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 28 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 28, gap: 10, flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
         <button onClick={onClose} style={{ padding: '8px 0', background: 'transparent', border: 'none', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Отмена</button>
-        <button onClick={importBulk} disabled={busy} style={{ padding: '12px 28px', borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Импорт...' : 'Импортировать'}</button>
+        <button onClick={importBulk} disabled={busy} style={{ padding: '12px 28px', borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1, width: isMobile ? '100%' : 'auto' }}>{busy ? 'Импорт...' : 'Импортировать'}</button>
       </div>
+      {profileEditorOpen && (
+        <ProfileEditorModal
+          accent={accent}
+          mode="create"
+          busy={profileBusy}
+          onSubmit={createProfileInline}
+          onClose={() => { if (!profileBusy) setProfileEditorOpen(false); }}
+        />
+      )}
     </ModalShell>
   );
 }
 
+const _AUTO_RUN_STATUS_RU = {
+  queued: 'В очереди', running: 'Обновляется', done: 'Готово', skipped: 'Пропущен', error: 'Ошибка', cancelled: 'Отменён',
+};
+
+function AutoRefreshRunDetailOverlay({ status, accent, onClose, refreshAutoStatus }) {
+  React.useEffect(() => {
+    const t = setInterval(() => { void refreshAutoStatus?.(); }, 2000);
+    return () => clearInterval(t);
+  }, [refreshAutoStatus]);
+  const rd = status?.run_detail && typeof status.run_detail === 'object' ? status.run_detail : {};
+  const items = Array.isArray(rd.items) ? rd.items : [];
+  const wc = Number(rd.worker_count || 0);
+  const pick = (s) => items.filter((it) => it.status === s);
+  const buckets = { running: pick('running'), queued: pick('queued'), done: pick('done'), skipped: pick('skipped'), error: pick('error'), cancelled: pick('cancelled') };
+  const section = (title, list, emptyHint) => (
+    <div style={{ marginBottom: 16 }}>
+      <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.12em', marginBottom: 8 }}>{title} · {list.length}</div>
+      {list.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{emptyHint || '—'}</div>
+      ) : (
+        <div style={{ maxHeight: 160, overflowY: 'auto', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(0,0,0,0.2)' }}>
+          {list.map((it) => (
+            <div key={it.account_id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+              <PlatformGlyph id={it.platform} size={14} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: 'var(--ink)', fontWeight: 500 }}>@{it.username} <span style={{ color: 'var(--ink-mute)', fontWeight: 400 }}>· {it.platform}</span></div>
+                {it.detail ? <div style={{ fontSize: 11, color: 'var(--ink-mute)', marginTop: 4, lineHeight: 1.35 }}>{it.detail}</div> : null}
+              </div>
+              <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                <div style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--line)', background: it.status === 'running' ? 'rgba(56,189,248,0.12)' : it.status === 'done' ? 'rgba(74,222,128,0.12)' : 'rgba(255,255,255,0.04)', color: 'var(--ink)' }}>{_AUTO_RUN_STATUS_RU[it.status] || it.status}</div>
+                {it.worker != null && it.status === 'running' ? <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', marginTop: 4 }}>слот {Number(it.worker) + 1}</div> : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 80, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.72)', padding: 16 }} onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={{ width: '100%', maxWidth: 520, maxHeight: 'min(88vh, 620px)', overflowY: 'auto', borderRadius: 16, border: '1px solid var(--line)', background: 'rgba(18,20,28,0.98)', padding: 20 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
+          <div>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 6 }}>АВТООБНОВЛЕНИЕ</div>
+            <div style={{ fontSize: 17, fontWeight: 600, color: '#fff' }}>Детали прогона</div>
+            <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 8, lineHeight: 1.45 }}>Параллельных потоков: {wc || '—'}. Номер слота 1…N — только у строки «Обновляется».</div>
+          </div>
+          <button type="button" onClick={onClose} style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-dim)', cursor: 'pointer' }}>✕</button>
+        </div>
+        {items.length === 0 ? (
+          <p style={{ fontSize: 13, color: 'var(--ink-mute)' }}>Список ещё не пришёл с сервера (нужна миграция 0023 и обновлённый бэкенд).</p>
+        ) : (
+          <>
+            {section('Сейчас обновляются', buckets.running, 'Никто')}
+            {section('В очереди', buckets.queued, 'Пусто')}
+            {section('Уже готово', buckets.done, '—')}
+            {section('Пропущены', buckets.skipped, '—')}
+            {section('Ошибки', buckets.error, '—')}
+            {section('Отменены / не дошли', buckets.cancelled, '—')}
+          </>
+        )}
+        <button type="button" onClick={onClose} style={{ width: '100%', marginTop: 12, padding: 12, borderRadius: 12, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: 'pointer', fontSize: 14 }}>Закрыть</button>
+      </div>
+    </div>
+  );
+}
+
 function ScheduleModal({ accent, onDataChanged, onClose }) {
+  const isMobile = useIsMobile(760);
   const PRESET_TIMES = ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00', '00:00'];
   const SKIP_OPTIONS = [0, 1, 3, 6, 12, 24];
   const [loading, setLoading] = useStateMd(true);
@@ -4456,7 +5244,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const [mode, setMode] = useStateMd('times');
   const [auto, setAuto] = useStateMd(true);
   const [intervalHours, setIntervalHours] = useStateMd(6);
-  const [skipRecent, setSkipRecent] = useStateMd(3);
+  const [skipRecent, setSkipRecent] = useStateMd(0);
   const [selectedTimes, setSelectedTimes] = useStateMd(['06:00', '12:00', '18:00']);
   const [customTime, setCustomTime] = useStateMd('');
   const [csvReport, setCsvReport] = useStateMd(true);
@@ -4465,6 +5253,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const [includeUnavailable, setIncludeUnavailable] = useStateMd(false);
   const [reportDownloading, setReportDownloading] = useStateMd(false);
   const [runBusy, setRunBusy] = useStateMd(false);
+  const [runDetailOpen, setRunDetailOpen] = useStateMd(false);
   const prevRunningRef = React.useRef(false);
 
   const refreshAutoStatus = async () => {
@@ -4485,7 +5274,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
         setMode(sched.mode || 'times');
         setAuto(!!sched.enabled);
         setIntervalHours(Number(sched.interval_hours || 6));
-        setSkipRecent(Number(sched.skip_recent_hours || 0));
+        setSkipRecent(Number(sched.skip_recent_hours ?? 0));
         setSelectedTimes(
           Array.isArray(sched.times) && sched.times.length > 0
             ? sched.times.filter((t) => /^\d{2}:\d{2}$/.test(String(t)))
@@ -4529,7 +5318,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       enabled: auto,
       mode,
       interval_hours: Math.max(1, Number(intervalHours || 1)),
-      skip_recent_hours: Math.max(0, Number(skipRecent || 0)),
+      skip_recent_hours: Math.max(0, Number(skipRecent ?? 0)),
       auto_refresh_csv_report: csvReport,
       include_hidden_platform_accounts: includeHiddenPlatform,
       include_hidden_profile_accounts: includeHiddenProfile,
@@ -4774,7 +5563,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
         ))}
       </div>
 
-      <div style={{ display: 'flex', gap: 10 }}>
+      <div style={{ display: 'flex', gap: 10, flexDirection: isMobile ? 'column' : 'row' }}>
         <button onClick={saveSchedule} disabled={saving} style={{ flex: 1, padding: 14, borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>{saving ? 'Сохранение…' : 'Сохранить'}</button>
         <button onClick={runNow} disabled={runBusy || !!status?.is_running} style={{ flex: 1, padding: 14, borderRadius: 12, background: '#4ade80', color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: runBusy || status?.is_running ? 'default' : 'pointer', opacity: runBusy || status?.is_running ? 0.7 : 1 }}>
           {runBusy ? 'Запуск…' : (status?.is_running ? 'Уже запущено' : 'Запустить сейчас')}
@@ -4798,33 +5587,85 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
               }}
             />
           </div>
+          {Number(status.skip_recent_hours_config || 0) > 0 && (
+            <div style={{ marginTop: 8, fontSize: 11, color: '#fde68a', lineHeight: 1.45 }}>
+              На сервере включён пропуск недавних: &lt; {status.skip_recent_hours_config} ч — такие аккаунты не дергают браузер. Выберите «Не пропускать» и нажмите «Сохранить» (кнопка «Запустить сейчас» перед запуском тоже сохраняет форму).
+            </div>
+          )}
         </div>
+      )}
+      {(status?.is_running || (Array.isArray(status?.run_detail?.items) && status.run_detail.items.length > 0)) && (
+        <button
+          type="button"
+          onClick={() => setRunDetailOpen(true)}
+          style={{ width: '100%', marginTop: 12, padding: '11px 14px', borderRadius: 12, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: 'pointer', fontSize: 14, fontWeight: 500 }}
+        >
+          Подробнее: очередь и слоты воркеров
+        </button>
+      )}
+      {runDetailOpen && (
+        <AutoRefreshRunDetailOverlay status={status} accent={accent} onClose={() => setRunDetailOpen(false)} refreshAutoStatus={refreshAutoStatus} />
       )}
     </ModalShell>
   );
 }
 
 function ProfilePicker({ accent, value = 'none', onChange }) {
+  const isMobile = useIsMobile(760);
   const [open, setOpen] = useStateMd(false);
-  const opts = [{ id: 'none', label: 'Без профиля', color: '#525a70' }, ...PROFILES];
+  const profileOptions = (PROFILES || []).filter((p) => String(p?.id) !== 'none');
+  const opts = [{ id: 'none', label: 'Без профиля', color: '#525a70' }, ...profileOptions];
   const sel = opts.find(o => o.id === value) || opts[0];
+  if (isMobile) {
+    return (
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 10px', borderRadius: 999, border: '1px solid var(--line-2)', background: 'rgba(255,255,255,0.04)' }}>
+          <span style={{ width: 8, height: 8, borderRadius: 999, background: sel.color, boxShadow: `0 0 8px ${sel.color}`, flexShrink: 0 }} />
+          <select
+            value={value}
+            onChange={(e) => onChange?.(e.target.value)}
+            style={{
+              width: '100%',
+              minWidth: 0,
+              border: 'none',
+              outline: 'none',
+              background: 'transparent',
+              color: 'var(--ink)',
+              fontSize: 13,
+              fontFamily: 'inherit',
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              MozAppearance: 'none',
+            }}
+          >
+            {opts.map((o) => (
+              <option key={o.id} value={o.id} style={{ color: '#ffffff', background: '#1f2937' }}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    );
+  }
   return (
-    <div style={{ position: 'relative' }}>
+    <div style={{ position: 'relative', minWidth: 0 }}>
       <button onClick={() => setOpen(!open)} style={{
+        width: '100%',
         padding: '8px 14px', borderRadius: 999,
         background: 'rgba(255,255,255,0.04)', color: 'var(--ink)',
         border: '1px solid var(--line-2)',
         fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: 'inherit',
         display: 'inline-flex', alignItems: 'center', gap: 8,
       }}>
-        <span style={{ width: 8, height: 8, borderRadius: 999, background: sel.color }} />
-        {sel.label}
-        <span style={{ fontSize: 9, color: 'var(--ink-mute)', marginLeft: 2 }}>▼</span>
+        <span style={{ width: 8, height: 8, borderRadius: 999, background: sel.color, boxShadow: `0 0 8px ${sel.color}` }} />
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sel.label}</span>
+        <span style={{ fontSize: 9, color: 'var(--ink-mute)', marginLeft: 'auto' }}>▼</span>
       </button>
       {open && (
         <div style={{
-          position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 20,
-          minWidth: 180, padding: 6, borderRadius: 12,
+          position: 'absolute', top: 'calc(100% + 6px)', left: isMobile ? 'auto' : 0, right: isMobile ? 0 : 'auto', zIndex: 20,
+          minWidth: isMobile ? 160 : 180, width: isMobile ? 'min(86vw, 320px)' : 'auto', padding: 6, borderRadius: 12,
           background: 'rgba(20,22,28,0.96)', backdropFilter: 'blur(12px)',
           border: '1px solid var(--line-2)', boxShadow: '0 12px 32px rgba(0,0,0,0.4)',
         }}>
@@ -4835,7 +5676,7 @@ function ProfilePicker({ accent, value = 'none', onChange }) {
               color: value === o.id ? '#fff' : 'var(--ink-dim)', textAlign: 'left',
               display: 'flex', alignItems: 'center', gap: 10,
             }}>
-              <span style={{ width: 8, height: 8, borderRadius: 999, background: o.color }} />
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: o.color, boxShadow: `0 0 8px ${o.color}` }} />
               {o.label}
             </button>
           ))}
@@ -4846,22 +5687,25 @@ function ProfilePicker({ accent, value = 'none', onChange }) {
 }
 
 function AddOneInline({ accent, onDataChanged, onClose }) {
+  const isCompact = useIsMobile(1160);
+  const isMobile = useIsMobile(760);
   const [platform, setPlatform] = useStateMd(PLATFORMS[0]?.id || 'tiktok');
   const [username, setUsername] = useStateMd('');
   const [profileId, setProfileId] = useStateMd('none');
   const [busy, setBusy] = useStateMd(false);
   const [profileBusy, setProfileBusy] = useStateMd(false);
-  const createProfileInline = async () => {
-    const rawName = await uiPrompt('Название нового профиля', '', 'Новый профиль');
-    const name = String(rawName || '').trim();
-    if (!name) return;
+  const [profileEditorOpen, setProfileEditorOpen] = useStateMd(false);
+  const createProfileInline = async ({ name, color }) => {
+    const profileName = String(name || '').trim();
+    if (!profileName) return;
     setProfileBusy(true);
     try {
-      const created = await _postJson('/api/accounts/profiles/', { name });
+      const created = await _postJson('/api/accounts/profiles/', { name: profileName, color: color || '#6366f1' });
       const createdId = created?.id != null ? String(created.id) : null;
       await onDataChanged?.();
       if (createdId) setProfileId(createdId);
-      await uiAlert(`Профиль "${name}" добавлен.`, 'Профили');
+      await uiAlert(`Профиль "${profileName}" добавлен.`, 'Профили');
+      setProfileEditorOpen(false);
     } catch (e) {
       await uiAlert(`Не удалось добавить профиль: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
@@ -4887,27 +5731,24 @@ function AddOneInline({ accent, onDataChanged, onClose }) {
     }
   };
   return (
-    <ModalShell title="Добавить аккаунт" kicker="QUICK ADD" accent={accent} width={680} onClose={onClose}>
-      <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr 160px', gap: 14, alignItems: 'flex-end' }}>
-        <div>
+    <ModalShell title="Добавить аккаунт" kicker="QUICK ADD" accent={accent} width={900} offsetY="-20%" onClose={onClose}>
+      <div style={{ display: 'grid', gridTemplateColumns: isCompact ? '1fr' : '160px minmax(240px,1fr) minmax(240px,280px)', gap: 14, alignItems: 'flex-end' }}>
+        <div style={{ minWidth: 0 }}>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ПЛАТФОРМА</div>
           <select value={platform} onChange={(e) => setPlatform(e.target.value)} style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
             {PLATFORMS.map(p => <option key={p.id} value={p.id} style={{ color: '#ffffff', background: '#374151' }}>{p.label}</option>)}
           </select>
         </div>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>USERNAME</div>
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="@username" style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 14, fontFamily: 'JetBrains Mono, monospace' }} />
         </div>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 8 }}>ПРОФИЛЬ</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8 }}>
-            <select value={profileId} onChange={(e) => setProfileId(e.target.value)} style={{ width: '100%', padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.04)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'inherit' }}>
-              <option value="none" style={{ color: '#ffffff', background: '#374151' }}>Без профиля</option>
-              {PROFILES.filter((p) => p.id !== 'none').map(p => <option key={p.id} value={p.id} style={{ color: '#ffffff', background: '#374151' }}>{p.label}</option>)}
-            </select>
+          <div style={{ display: 'grid', gridTemplateColumns: isCompact ? '1fr auto' : 'minmax(0,1fr) auto', gap: 8 }}>
+            <ProfilePicker accent={accent} value={profileId} onChange={setProfileId} />
             <button
-              onClick={createProfileInline}
+              onClick={() => setProfileEditorOpen(true)}
               disabled={profileBusy}
               style={{ padding: '11px 12px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: profileBusy ? 'default' : 'pointer', fontSize: 13, opacity: profileBusy ? 0.7 : 1 }}
             >
@@ -4916,10 +5757,19 @@ function AddOneInline({ accent, onDataChanged, onClose }) {
           </div>
         </div>
       </div>
-      <div style={{ display: 'flex', gap: 10, marginTop: 22, justifyContent: 'flex-end' }}>
+      <div style={{ display: 'flex', gap: 10, marginTop: 22, justifyContent: 'flex-end', flexDirection: isMobile ? 'column' : 'row' }}>
         <button onClick={onClose} style={{ padding: '10px 20px', borderRadius: 10, background: 'transparent', border: '1px solid var(--line)', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}>Отмена</button>
         <button onClick={addOne} disabled={busy} style={{ padding: '10px 24px', borderRadius: 10, background: accent, color: '#000', border: 'none', fontSize: 13, fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>{busy ? 'Добавление...' : 'Добавить'}</button>
       </div>
+      {profileEditorOpen && (
+        <ProfileEditorModal
+          accent={accent}
+          mode="create"
+          busy={profileBusy}
+          onSubmit={createProfileInline}
+          onClose={() => { if (!profileBusy) setProfileEditorOpen(false); }}
+        />
+      )}
     </ModalShell>
   );
 }
@@ -4949,6 +5799,7 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   const [search, setSearch] = useStateMd('');
   const [includeHiddenPlatform, setIncludeHiddenPlatform] = useStateMd(false);
   const [includeHiddenProfile, setIncludeHiddenProfile] = useStateMd(false);
+  const [includeUnavailable, setIncludeUnavailable] = useStateMd(false);
   const [selectedIds, setSelectedIds] = useStateMd(() => new Set(ACCOUNTS.map((a) => a.id)));
   const [busy, setBusy] = useStateMd(false);
   const [downloadCsvAfter, setDownloadCsvAfter] = useStateMd(false);
@@ -4972,6 +5823,7 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   const filtered = ACCOUNTS.filter((a) => {
     if (!includeHiddenPlatform && a.isPlatformHidden) return false;
     if (!includeHiddenProfile && a.isProfileHidden) return false;
+    if (availability === 'all' && !includeUnavailable && a.unavailable) return false;
     if (selectedPlatforms.size === 0) return false;
     if (!selectedPlatforms.has(a.platform)) return false;
     if (selectedProfiles.size > 0 && !selectedProfiles.has(a.profile)) return false;
@@ -5025,10 +5877,8 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
     try {
       const selectedAll = ids.length === ACCOUNTS.length;
       if (downloadCsvAfter && selectedAll) {
-        const base = _apiBasePrimary();
-        const res = await fetch(`${base}/api/accounts/refresh_all/?download_csv=1`, { method: 'POST' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
+        const includeUnavailableParam = includeUnavailable ? '&include_unavailable_accounts=1' : '';
+        const blob = await _postBlobWithApiBases(`/api/accounts/refresh_all/?download_csv=1${includeUnavailableParam}`, {});
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -5059,10 +5909,7 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
 
   const exportCsv = async () => {
     try {
-      const base = _apiBasePrimary();
-      const res = await fetch(`${base}/api/accounts/export-snapshot/`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
+      const blob = await _fetchBlobWithApiBases('/api/accounts/export-snapshot/');
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -5082,11 +5929,7 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
       const f = input.files?.[0];
       if (!f) return;
       try {
-        const base = _apiBasePrimary();
-        const fd = new FormData();
-        fd.append('file', f);
-        const res = await fetch(`${base}/api/accounts/import-snapshot/`, { method: 'POST', body: fd });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await _postFormDataJsonWithApiBases('/api/accounts/import-snapshot/', f, 'file');
         await onDataChanged?.();
         await uiAlert('CSV импортирован.', 'CSV');
       } catch (e) {
@@ -5129,6 +5972,10 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
           <label style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-dim)', fontSize: 13 }}>
             <span>Включать аккаунты скрытых профилей</span>
             <input type="checkbox" checked={includeHiddenProfile} onChange={(e) => setIncludeHiddenProfile(e.target.checked)} />
+          </label>
+          <label style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--ink-dim)', fontSize: 13 }}>
+            <span>Учитывать недоступные аккаунты</span>
+            <input type="checkbox" checked={includeUnavailable} onChange={(e) => setIncludeUnavailable(e.target.checked)} />
           </label>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -5284,6 +6131,7 @@ function App() {
   const [dataKey, setDataKey] = useStateApp(0);
   const [reloading, setReloading] = useStateApp(false);
   const [selectedAccountId, setSelectedAccountId] = useStateApp(null);
+  const [globalModal, setGlobalModal] = useStateApp(null); // refresh_all | schedule | add_list | add_one
   const autoRefreshInFlightRef = React.useRef(false);
 
   // Auto-apply accent to CSS variables
@@ -5334,6 +6182,29 @@ function App() {
     return () => clearInterval(id);
   }, [route]);
 
+  // После полуночи по Москве summary должен отдать новые yesterday_* — подтягиваем даже на вкладках с редким автообновлением.
+  useEffectApp(() => {
+    let lastMsk = _mskCalendarDateKey();
+    const id = setInterval(() => {
+      const cur = _mskCalendarDateKey();
+      if (cur === lastMsk) return;
+      lastMsk = cur;
+      if (autoRefreshInFlightRef.current) return;
+      autoRefreshInFlightRef.current = true;
+      (async () => {
+        try {
+          await loadDashboardData();
+          setDataKey((v) => v + 1);
+        } catch (e) {
+          console.warn('[new_frontend] calendar day change refresh failed', e);
+        } finally {
+          autoRefreshInFlightRef.current = false;
+        }
+      })();
+    }, 30000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffectApp(() => {
     if (route !== 'tv') return;
     if (autoRefreshInFlightRef.current) return;
@@ -5369,10 +6240,43 @@ function App() {
   return (
     <>
       {route === 'tv'        && <TVScreen tweaks={tweaks} onExit={() => setRoute('accounts')} />}
-      {route === 'accounts'  && <AccountsScreen key={`acc-${dataKey}`} tweaks={tweaks} onNavigate={setRoute} onDataChanged={reloadData} onOpenAccount={(id) => { setSelectedAccountId(id); setRoute('account_detail'); }} />}
+      {route === 'accounts'  && <AccountsScreen key={`acc-${dataKey}`} tweaks={tweaks} onNavigate={setRoute} onDataChanged={reloadData} onOpenGlobalModal={setGlobalModal} onOpenAccount={(id) => { setSelectedAccountId(id); setRoute('account_detail'); }} />}
       {route === 'account_detail' && selectedAccountId != null && <AccountDetailScreen key={`detail-${selectedAccountId}-${dataKey}`} accountId={selectedAccountId} onBack={() => setRoute('accounts')} onDataChanged={reloadData} />}
-      {route === 'analytics' && <AnalyticsScreen key={`an-${dataKey}`} tweaks={tweaks} />}
-      {route === 'settings'  && <SettingsScreen key={`set-${dataKey}`} tweaks={tweaks} onBack={() => setRoute('accounts')} onDataChanged={reloadData} />}
+      {route === 'analytics' && <AnalyticsScreen key={`an-${dataKey}`} tweaks={tweaks} onOpenGlobalModal={setGlobalModal} />}
+      {route === 'settings'  && <SettingsScreen key={`set-${dataKey}`} tweaks={tweaks} onBack={() => setRoute('accounts')} onDataChanged={reloadData} onOpenGlobalModal={setGlobalModal} />}
+
+      {globalModal && (
+        <ModalOverlay onClose={() => setGlobalModal(null)}>
+          {globalModal === 'refresh_all' && (
+            <RefreshAllModal
+              accent={tweaks.accent}
+              onClose={() => setGlobalModal(null)}
+              onDataChanged={reloadData}
+            />
+          )}
+          {globalModal === 'schedule' && (
+            <ScheduleModal
+              accent={tweaks.accent}
+              onDataChanged={reloadData}
+              onClose={() => setGlobalModal(null)}
+            />
+          )}
+          {globalModal === 'add_list' && (
+            <AddListModal
+              accent={tweaks.accent}
+              onDataChanged={reloadData}
+              onClose={() => setGlobalModal(null)}
+            />
+          )}
+          {globalModal === 'add_one' && (
+            <AddOneInline
+              accent={tweaks.accent}
+              onDataChanged={reloadData}
+              onClose={() => setGlobalModal(null)}
+            />
+          )}
+        </ModalOverlay>
+      )}
 
       {route !== 'tv' && route !== 'account_detail' && (
         <RouteFloater route={route} setRoute={setRoute} routes={ROUTES} accent={tweaks.accent} />
@@ -5420,31 +6324,46 @@ function RouteFloater({ route, setRoute, routes, accent }) {
     return label;
   };
   return (
-    <div style={{
-      position: 'fixed',
-      bottom: isMobile ? 8 : 24,
-      left: isMobile ? 8 : '50%',
-      right: isMobile ? 8 : 'auto',
-      transform: isMobile ? 'none' : 'translateX(-50%)',
-      display: 'flex', gap: 4, padding: 6, borderRadius: 999,
-      background: 'rgba(10,12,18,0.85)', backdropFilter: 'blur(14px)',
-      border: '1px solid var(--line-2)', zIndex: 90, boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
-    }}>
-      {navRoutes.map(r => (
-        <button key={r.id} onClick={() => setRoute(r.id)} style={{
-          flex: isMobile ? 1 : 'unset',
-          minWidth: 0,
-          padding: isMobile ? '9px 8px' : '9px 16px', borderRadius: 999, border: 'none', cursor: 'pointer',
-          background: route === r.id ? accent : 'transparent',
-          color: route === r.id ? '#000' : 'var(--ink-dim)',
-          fontSize: isMobile ? 11 : 12, fontWeight: route === r.id ? 600 : 500, letterSpacing: '0.02em',
-          fontFamily: 'inherit',
-          whiteSpace: 'nowrap',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}>{mobileLabel(r.id, r.label)}</button>
-      ))}
-    </div>
+    <>
+      {isMobile && (
+        <div style={{
+          position: 'fixed',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: 78,
+          background: 'linear-gradient(180deg, rgba(5,7,11,0), rgba(5,7,11,0.96) 42%, rgba(5,7,11,1) 100%)',
+          zIndex: 88,
+          pointerEvents: 'none',
+        }} />
+      )}
+      <div style={{
+        position: 'fixed',
+        bottom: isMobile ? 8 : 24,
+        left: isMobile ? 8 : '50%',
+        right: isMobile ? 8 : 'auto',
+        transform: isMobile ? 'none' : 'translateX(-50%)',
+        display: 'flex', gap: 4, padding: 6, borderRadius: 999,
+        background: isMobile ? 'rgba(10,12,18,0.96)' : 'rgba(10,12,18,0.85)',
+        backdropFilter: 'blur(16px)',
+        border: '1px solid var(--line-2)', zIndex: 90, boxShadow: '0 8px 30px rgba(0,0,0,0.5)',
+      }}>
+        {navRoutes.map(r => (
+          <button key={r.id} onClick={() => setRoute(r.id)} style={{
+            flex: isMobile ? 1 : 'unset',
+            minWidth: 0,
+            padding: isMobile ? '9px 8px' : '9px 16px', borderRadius: 999, border: 'none', cursor: 'pointer',
+            background: route === r.id ? accent : 'transparent',
+            color: route === r.id ? '#000' : 'var(--ink-dim)',
+            fontSize: isMobile ? 11 : 12, fontWeight: route === r.id ? 600 : 500, letterSpacing: '0.02em',
+            fontFamily: 'inherit',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}>{mobileLabel(r.id, r.label)}</button>
+        ))}
+      </div>
+    </>
   );
 }
 

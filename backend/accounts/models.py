@@ -104,6 +104,8 @@ class AutoRefreshState(models.Model):
     last_error = models.TextField(blank=True, default="")
     last_report_csv = models.TextField(blank=True, default="")
     last_report_generated_at = models.DateTimeField(null=True, blank=True)
+    # Прогресс текущего/последнего автообновления: { "worker_count": int, "items": [...] }
+    run_detail = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -127,6 +129,7 @@ class AutoRefreshState(models.Model):
                 "last_error": "",
                 "last_report_csv": "",
                 "last_report_generated_at": None,
+                "run_detail": {},
             },
         )
         return obj
@@ -174,7 +177,7 @@ class Account(models.Model):
         return f"{self.platform}/@{self.username}"
 
     def take_snapshot_if_needed(self):
-        today = timezone.now().date()
+        today = timezone.localdate()
         snap, created = AccountSnapshot.objects.get_or_create(
             account=self,
             date=today,
@@ -227,7 +230,7 @@ class Post(models.Model):
         return f"{self.account}/{self.external_id}"
 
     def take_snapshot_if_needed(self):
-        today = timezone.now().date()
+        today = timezone.localdate()
         PostSnapshot.objects.get_or_create(
             post=self,
             date=today,

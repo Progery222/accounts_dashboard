@@ -597,20 +597,20 @@ const PROFILES = [
 ];
 
 const ACCOUNTS = [
-  { name: 'thecapitolverdict', handle: '@thecapitolverdict', platform: 'tiktok',    profile: 'fil',   followers: null, views: 14300, dViews: 1200, likes: 222, dLikes: 29, posts: 24, dPosts: 2,  updated: '07.05, 14:05' },
-  { name: 'capital.watch4',    handle: '@capital.watch4',    platform: 'tiktok',    profile: 'fil',   followers: null, views: 8800,  dViews: 545,  likes: 15,  dLikes: 0,  posts: 21, dPosts: 2,  updated: '07.05, 13:50' },
-  { name: 'yllazenspace',      handle: '@yllazenspace',      platform: 'tiktok',    profile: 'music', followers: null, views: 8700,  dViews: 589,  likes: 379, dLikes: 33, posts: 31, dPosts: 0,  updated: '07.05, 10:43' },
-  { name: 'yllazenx',          handle: '@yllazenx',          platform: 'tiktok',    profile: 'music', followers: 1,    views: 8100,  dViews: 402,  likes: 188, dLikes: 0,  posts: 23, dPosts: 1,  updated: '07.05, 13:33' },
-  { name: 'yllazen.music',     handle: '@yllazen.music',     platform: 'tiktok',    profile: 'music', followers: null, views: 8000,  dViews: 125,  likes: 101, dLikes: 1,  posts: 24, dPosts: 0,  updated: '07.05, 06:26' },
-  { name: 'yllazenera',        handle: '@yllazenera',        platform: 'tiktok',    profile: 'music', followers: null, views: 7700,  dViews: 269,  likes: 99,  dLikes: 1,  posts: 31, dPosts: 2,  updated: '07.05, 06:25' },
-  { name: 'yllazen.officiall', handle: '@yllazen.officiall', platform: 'tiktok',    profile: 'music', followers: null, views: 6800,  dViews: 97,   likes: 178, dLikes: 4,  posts: 27, dPosts: 1,  updated: '07.05, 06:27' },
-  { name: 'yllazensound',      handle: '@yllazensound',      platform: 'tiktok',    profile: 'music', followers: null, views: 6700,  dViews: 583,  likes: 145, dLikes: 3,  posts: 22, dPosts: 1,  updated: '07.05, 06:24' },
-  { name: 'saint_f1_news',     handle: '@saint_f1_news',     platform: 'tiktok',    profile: 'sport', followers: 5,    views: 6500,  dViews: 65,   likes: 454, dLikes: -1, posts: 11, dPosts: 1,  updated: '07.05, 06:08' },
-  { name: 'yllazenlab',        handle: '@yllazenlab',        platform: 'tiktok',    profile: 'music', followers: 2,    views: 6200,  dViews: 21,   likes: 224, dLikes: 1,  posts: 30, dPosts: 0,  updated: '07.05, 06:25' },
-  { name: 'phil.cuts',         handle: '@phil.cuts',         platform: 'tiktok',    profile: 'fil',   followers: 4,    views: 5900,  dViews: 0,    likes: 26,  dLikes: 0,  posts: 11, dPosts: 0,  updated: '07.05, 13:42' },
-  { name: 'phil.highlights6',  handle: '@phil.highlights6',  platform: 'tiktok',    profile: 'fil',   followers: 5,    views: 5400,  dViews: 1,    likes: 32,  dLikes: 0,  posts: 11, dPosts: 0,  updated: '07.05, 13:41' },
-  { name: 'phil.redpill',      handle: '@phil.redpill',      platform: 'instagram', profile: 'fil',   followers: 12,   views: 4800,  dViews: 354,  likes: 48,  dLikes: 6,  posts: 18, dPosts: 1,  updated: '07.05, 12:18' },
-  { name: 'phil.daily',        handle: '@phil.daily',        platform: 'youtube',   profile: 'fil',   followers: 8,    views: 4100,  dViews: 87,   likes: 22,  dLikes: 1,  posts: 9,  dPosts: 0,  updated: '07.05, 09:55' },
+  { name: 'thecapitolverdict', handle: '@thecapitolverdict', platform: 'tiktok',    profile: 'fil',   followers: null, dFollowers: 0,  views: 14300, dViews: 1200, likes: 222, dLikes: 29, posts: 24, dPosts: 2,  updated: '07.05, 14:05' },
+  { name: 'capital.watch4',    handle: '@capital.watch4',    platform: 'tiktok',    profile: 'fil',   followers: null, dFollowers: 0,  views: 8800,  dViews: 545,  likes: 15,  dLikes: 0,  posts: 21, dPosts: 2,  updated: '07.05, 13:50' },
+  { name: 'yllazenspace',      handle: '@yllazenspace',      platform: 'tiktok',    profile: 'music', followers: null, dFollowers: 0,  views: 8700,  dViews: 589,  likes: 379, dLikes: 33, posts: 31, dPosts: 0,  updated: '07.05, 10:43' },
+  { name: 'yllazenx',          handle: '@yllazenx',          platform: 'tiktok',    profile: 'music', followers: 1,    dFollowers: 0,  views: 8100,  dViews: 402,  likes: 188, dLikes: 0,  posts: 23, dPosts: 1,  updated: '07.05, 13:33' },
+  { name: 'yllazen.music',     handle: '@yllazen.music',     platform: 'tiktok',    profile: 'music', followers: null, dFollowers: 0,  views: 8000,  dViews: 125,  likes: 101, dLikes: 1,  posts: 24, dPosts: 0,  updated: '07.05, 06:26' },
+  { name: 'yllazenera',        handle: '@yllazenera',        platform: 'tiktok',    profile: 'music', followers: null, dFollowers: 0,  views: 7700,  dViews: 269,  likes: 99,  dLikes: 1,  posts: 31, dPosts: 2,  updated: '07.05, 06:25' },
+  { name: 'yllazen.officiall', handle: '@yllazen.officiall', platform: 'tiktok',    profile: 'music', followers: null, dFollowers: 0,  views: 6800,  dViews: 97,   likes: 178, dLikes: 4,  posts: 27, dPosts: 1,  updated: '07.05, 06:27' },
+  { name: 'yllazensound',      handle: '@yllazensound',      platform: 'tiktok',    profile: 'music', followers: null, dFollowers: 0,  views: 6700,  dViews: 583,  likes: 145, dLikes: 3,  posts: 22, dPosts: 1,  updated: '07.05, 06:24' },
+  { name: 'saint_f1_news',     handle: '@saint_f1_news',     platform: 'tiktok',    profile: 'sport', followers: 5,    dFollowers: 0,  views: 6500,  dViews: 65,   likes: 454, dLikes: -1, posts: 11, dPosts: 1,  updated: '07.05, 06:08' },
+  { name: 'yllazenlab',        handle: '@yllazenlab',        platform: 'tiktok',    profile: 'music', followers: 2,    dFollowers: 0,  views: 6200,  dViews: 21,   likes: 224, dLikes: 1,  posts: 30, dPosts: 0,  updated: '07.05, 06:25' },
+  { name: 'phil.cuts',         handle: '@phil.cuts',         platform: 'tiktok',    profile: 'fil',   followers: 4,    dFollowers: 0,  views: 5900,  dViews: 0,    likes: 26,  dLikes: 0,  posts: 11, dPosts: 0,  updated: '07.05, 13:42' },
+  { name: 'phil.highlights6',  handle: '@phil.highlights6',  platform: 'tiktok',    profile: 'fil',   followers: 5,    dFollowers: 0,  views: 5400,  dViews: 1,    likes: 32,  dLikes: 0,  posts: 11, dPosts: 0,  updated: '07.05, 13:41' },
+  { name: 'phil.redpill',      handle: '@phil.redpill',      platform: 'instagram', profile: 'fil',   followers: 12,   dFollowers: 1,  views: 4800,  dViews: 354,  likes: 48,  dLikes: 6,  posts: 18, dPosts: 1,  updated: '07.05, 12:18' },
+  { name: 'phil.daily',        handle: '@phil.daily',        platform: 'youtube',   profile: 'fil',   followers: 8,    dFollowers: 0,  views: 4100,  dViews: 87,   likes: 22,  dLikes: 1,  posts: 9,  dPosts: 0,  updated: '07.05, 09:55' },
 ];
 
 const POSTS = [
@@ -945,13 +945,15 @@ function TVScreen({ tweaks, onExit }) {
   const [scene, setScene] = useStateTV(0);
   const [now, setNow] = useStateTV(new Date());
   const [pulse, setPulse] = useStateTV(0);
+  const [sceneAutoPaused, setSceneAutoPaused] = useStateTV(false);
 
   const SCENES = ['atom', 'pulse', 'top'];
 
   useEffectTV(() => {
-    const id = setInterval(() => setScene(s => (s + 1) % SCENES.length), 14000);
+    if (sceneAutoPaused) return undefined;
+    const id = setInterval(() => setScene((s) => (s + 1) % SCENES.length), 14000);
     return () => clearInterval(id);
-  }, []);
+  }, [sceneAutoPaused]);
   useEffectTV(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -979,7 +981,7 @@ function TVScreen({ tweaks, onExit }) {
       </div>
 
       <TVTicker accent={moodTone.accent} />
-      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} />
+      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} autoPaused={sceneAutoPaused} setAutoPaused={setSceneAutoPaused} />
     </div>
   );
 }
@@ -1103,7 +1105,7 @@ function BigStat({ label, value, delta, color, spark, align }) {
       <div className="mono" style={{ fontSize: 13, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em' }}>{label}</div>
       <div className="tnum" style={{ fontSize: 96, fontWeight: 700, color: '#fff', lineHeight: 0.95, letterSpacing: '-0.03em', marginTop: 8 }}>{fmt(value)}</div>
       <div className="mono tnum" style={{ marginTop: 8, fontSize: 22, color: color, fontWeight: 500 }}>
-        ▲ +{fmt(delta)} <span style={{ color: 'rgba(255,255,255,0.35)', fontWeight: 400 }}>/24H</span>
+        ▲ +{Number(delta) > 0 ? fmt(delta) : '0'} <span style={{ color: 'rgba(255,255,255,0.35)', fontWeight: 400 }}>/24H</span>
       </div>
       <div style={{ marginTop: 14, height: 50, display: 'flex', justifyContent: align === 'right' ? 'flex-end' : 'flex-start' }}>
         <Sparkline data={spark} color={color} width={280} height={50} />
@@ -1299,17 +1301,87 @@ function TVTicker({ accent }) {
   );
 }
 
-function TVSceneIndicator({ total, current, accent }) {
+function TVPauseIcon({ size = 13, color = 'currentColor' }) {
   return (
-    <div style={{ position: 'absolute', top: 110, right: 56, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+      <rect x="6" y="5" width="4.5" height="14" rx="1" fill={color} />
+      <rect x="13.5" y="5" width="4.5" height="14" rx="1" fill={color} />
+    </svg>
+  );
+}
+
+function TVPlayIcon({ size = 13, color = 'currentColor' }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+      <path d="M9 6.5v11L18 12z" fill={color} />
+    </svg>
+  );
+}
+
+function TVSceneTransport({ accent, autoPaused, setAutoPaused, compact }) {
+  const playing = !autoPaused;
+  const sz = compact ? 28 : 30;
+  const iconSz = compact ? 11 : 12;
+  const iconColor = accent;
+  const btnStyle = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: sz,
+    height: sz,
+    padding: 0,
+    borderRadius: 8,
+    flexShrink: 0,
+    cursor: 'pointer',
+    border: 'none',
+    boxShadow: 'none',
+    background: `${accent}28`,
+    color: iconColor,
+  };
+  const title = playing
+    ? 'Пауза: остановить автоматическое переключение сцен'
+    : 'Плей: снова переключать сцены автоматически';
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={playing ? 'true' : 'false'}
+      onClick={() => setAutoPaused?.(!autoPaused)}
+      style={btnStyle}
+    >
+      {playing ? (
+        <TVPauseIcon size={iconSz} color={iconColor} />
+      ) : (
+        <TVPlayIcon size={iconSz} color={iconColor} />
+      )}
+    </button>
+  );
+}
+
+function TVSceneIndicator({ total, current, accent, onSelect, autoPaused = false, setAutoPaused }) {
+  return (
+    <div style={{ position: 'absolute', top: 110, right: 20, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end', zIndex: 20 }}>
+      <TVSceneTransport accent={accent} autoPaused={autoPaused} setAutoPaused={setAutoPaused} compact={false} />
       {Array.from({ length: total }).map((_, i) => (
-        <div key={i} style={{
-          width: i === current ? 32 : 12, height: 3, borderRadius: 2,
-          background: i === current ? accent : 'rgba(255,255,255,0.15)',
-          transition: 'all 0.4s ease',
-        }} />
+        <button
+          key={i}
+          type="button"
+          onClick={() => onSelect?.(i)}
+          title={`Переключить на сцену ${i + 1}`}
+          style={{
+            width: i === current ? 32 : 12,
+            height: 3,
+            borderRadius: 2,
+            background: i === current ? accent : 'rgba(255,255,255,0.15)',
+            transition: 'all 0.25s ease',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+        />
       ))}
-      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.2em', marginTop: 6 }}>SCENE {current + 1}/{total}</div>
+      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.2em', marginTop: 2 }}>SCENE {current + 1}/{total}</div>
     </div>
   );
 }
@@ -1615,12 +1687,14 @@ function AccountsCards({ rows, accent }) {
               </div>
               <ProfileBadge id={a.profile} dense />
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-              {[['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d, c]) => (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+              {[['Followers', a.followers, a.dFollowers ?? 0, '#4ade80'], ['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d]) => (
                 <div key={l}>
                   <div className="mono" style={{ fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{l.toUpperCase()}</div>
                   <div className="mono tnum" style={{ fontSize: 17, fontWeight: 600 }}>{fmt(v)}</div>
-                  <div className="mono tnum" style={{ fontSize: 11, color: d >= 0 ? '#4ade80' : 'var(--danger)' }}>{d >= 0 ? '+' : ''}{fmt(d)}</div>
+                  {Number(d || 0) !== 0 && (
+                    <div className="mono tnum" style={{ fontSize: 11, color: d >= 0 ? '#4ade80' : 'var(--danger)' }}>{d >= 0 ? '+' : ''}{fmt(d)}</div>
+                  )}
                 </div>
               ))}
             </div>

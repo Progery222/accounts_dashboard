@@ -21,6 +21,22 @@ def _format_duration_human(seconds: int) -> str:
     return f"{s} с."
 
 
+def _sum_post_after_column(rows: list[dict[str, Any]]) -> int:
+    total = 0
+    for r in rows:
+        raw = r.get("post_after")
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if not s:
+            continue
+        try:
+            total += int(float(s))
+        except Exception:
+            continue
+    return total
+
+
 def build_auto_refresh_report_csv(
     *,
     rows: list[dict[str, Any]],
@@ -29,6 +45,9 @@ def build_auto_refresh_report_csv(
     source: str,
     total_accounts: int,
     run_note: str,
+    batch_post_total: int | None = None,
+    dashboard_post_total: int | None = None,
+    dashboard_account_count: int | None = None,
 ) -> str:
     """Возвращает текст CSV (без BOM — BOM добавляют при отдаче через HttpResponse)."""
     duration_sec = ""
@@ -141,5 +160,27 @@ def build_auto_refresh_report_csv(
             r.get("post_after", ""),
             r.get("detail", ""),
         ])
+
+    csv_posts_sum = _sum_post_after_column(rows)
+    w.writerow([])
+    w.writerow(["— Справка: суммы post_count (число публикаций на профиле по данным платформы) —"] + [""] * 11)
+    line = [""] * 12
+    line[0] = "Сумма колонки «Постов (стало)» по строкам этого файла"
+    line[10] = str(csv_posts_sum)
+    w.writerow(line)
+    if batch_post_total is not None:
+        line = [""] * 12
+        line[0] = "Эталон: сумма post_count по аккаунтам очереди этого прогона (должна совпадать с суммой столбца, если все строки заполнены)"
+        line[10] = str(int(batch_post_total))
+        w.writerow(line)
+    if dashboard_post_total is not None and dashboard_account_count is not None:
+        line = [""] * 12
+        line[0] = (
+            "Эталон: сумма post_count по всем аккаунтам сводки дашборда "
+            f"({int(dashboard_account_count)} акк., как GET /api/accounts/summary/ без скрытых платформ/профилей; "
+            "включает недоступные, если они не скрыты — планировщик может их не обновлять)"
+        )
+        line[10] = str(int(dashboard_post_total))
+        w.writerow(line)
 
     return buf.getvalue()

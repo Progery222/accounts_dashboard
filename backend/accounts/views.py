@@ -24,6 +24,7 @@ from django.db.models import (
     Subquery,
     IntegerField,
 )
+from django.db import transaction
 from django.db.utils import OperationalError, ProgrammingError
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, action
@@ -149,9 +150,10 @@ def _scrape(account: Account) -> dict:
 
 
 def _sync_posts(account: Account, posts_data: list) -> None:
-    today = timezone.now().date()
+    today = timezone.localdate()
     seen_external_ids: set[str] = set()
     is_instagram = account.platform == Platform.INSTAGRAM
+    is_threads = account.platform == Platform.THREADS
 
     def _to_int(v) -> int:
         if v is None:
@@ -182,7 +184,16 @@ def _sync_posts(account: Account, posts_data: list) -> None:
             if field in pd and pd[field] is not None:
                 setattr(post, field, pd[field])
         # Update numeric fields with resilient coercion + fallback aliases
-        post.view_count = _to_int(pd.get("view_count", pd.get("play_count", 0)))
+        parsed_views = _to_int(pd.get("view_count", pd.get("play_count", 0)))
+        # Threads / Instagram: 0 со скрапа часто «нет в DOM / не успели», а не реальные 0 просмотров.
+        # Не затираем сохранённые значения — иначе сумма по постам и дельты в UI падают в минус.
+        if is_threads or is_instagram:
+            if parsed_views > 0:
+                prev_v = int(post.view_count or 0)
+                post.view_count = max(prev_v, parsed_views)
+            # parsed_views == 0 — не трогаем post.view_count
+        else:
+            post.view_count = parsed_views
         parsed_like_count = _to_int(pd.get("like_count", pd.get("digg_count", 0)))
         # Instagram: 0 со скрапа = «данных нет», не уменьшаем сохранённые лайки.
         # Положительное значение считаем валидным и применяем только не ниже уже сохранённого.
@@ -231,6 +242,26 @@ def _sync_posts(account: Account, posts_data: list) -> None:
 _STAT_FIELDS = frozenset(
     ("follower_count", "like_count", "view_count", "post_count")
 )
+
+
+def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -> bool:
+    """Успешное обновление для UI «обновлён»: не недоступный профиль и не «обнуление» при ненулевой базе."""
+    if bool(getattr(account, "profile_unavailable", False)):
+        return False
+    # У Facebook view_count намеренно обнуляется в пайплайне — не считаем это сбоем.
+    fields = ["follower_count", "like_count", "post_count"]
+    if account.platform != Platform.FACEBOOK:
+        fields.insert(2, "view_count")
+    for f in fields:
+        prev = int(stats_before.get(f, 0) or 0)
+        cur = int(getattr(account, f, 0) or 0)
+        if prev > 0 and cur == 0:
+            return False
+    return True
+
+# Парсеры (особенно Instagram og:image при антиботе) иногда отдают пустую строку —
+# не затираем уже сохранённый CDN-URL, иначе в UI пропадает аватарка до следующего удачного парса.
+_SKIP_EMPTY_STR_UPDATE = frozenset({"avatar_url"})
 
 _PLATFORM_WORKERS = {
     Platform.TIKTOK: Path(__file__).parent.parent / "platforms" / "tiktok" / "worker.py",
@@ -351,6 +382,7 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
             "posts_authoritative": bool(data.get("_posts_authoritative", True)),
         },
     )
+    stats_before = {f: int(getattr(account, f) or 0) for f in _STAT_FIELDS}
     account.profile_unavailable = False
     # _partial=True means we only have non-stat fields (e.g. avatar from authenticated HTML
     # when follower counts were unavailable) — preserve existing DB stats.
@@ -366,132 +398,139 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
         if is_partial and field in _STAT_FIELDS:
             continue  # don't zero-out existing stats on a partial update
         if value is not None:
+            if field in _SKIP_EMPTY_STR_UPDATE and isinstance(value, str) and not value.strip():
+                continue
             setattr(account, field, value)
-    account.save()
 
-    if has_posts_key and (posts_authoritative or posts):
-        try:
-            _sync_posts(account, posts)
-            logger.info(
-                "refresh.posts_synced",
-                extra={
-                    "account_id": account.id,
-                    "platform": account.platform,
-                    "username": account.username,
-                    "posts_count": len(posts),
-                    "posts_authoritative": posts_authoritative,
-                },
+    with transaction.atomic():
+        if has_posts_key and (posts_authoritative or posts):
+            try:
+                _sync_posts(account, posts)
+                logger.info(
+                    "refresh.posts_synced",
+                    extra={
+                        "account_id": account.id,
+                        "platform": account.platform,
+                        "username": account.username,
+                        "posts_count": len(posts),
+                        "posts_authoritative": posts_authoritative,
+                    },
+                )
+            except Exception as e:
+                logger.exception(
+                    "refresh.posts_sync_failed",
+                    extra={"account_id": account.id, "platform": account.platform, "username": account.username},
+                )
+        elif has_posts_key and not posts_authoritative:
+            print(
+                f"[posts] keeping existing posts for @{account.username}: "
+                "empty non-authoritative list from scraper",
             )
-        except Exception as e:
-            logger.exception(
-                "refresh.posts_sync_failed",
-                extra={"account_id": account.id, "platform": account.platform, "username": account.username},
+
+        # Aggregate view_count from posts for most platforms.
+        # For YouTube and Telegram the like_count is also post-derived
+        # (the platform page doesn't expose a channel-level like counter).
+        agg = account.posts.aggregate(
+            total_views=Sum("view_count"),
+            total_likes=Sum("like_count"),
+        )
+        # Facebook view_count is partial/misleading as a profile-level metric
+        # (scraper visibility is inconsistent), keep it 0.
+        # Instagram now supports view aggregation from reels/posts.
+        if account.platform == Platform.FACEBOOK:
+            account.view_count = 0
+        # Rumble exposes account-level cumulative views on /about; keep scraper value.
+        elif account.platform == Platform.RUMBLE:
+            pass
+        else:
+            account.view_count = agg["total_views"] or 0
+        # For platforms that don't expose a channel-level like counter,
+        # aggregate from post likes instead.
+        if account.platform in (
+            Platform.YOUTUBE, Platform.TELEGRAM, Platform.INSTAGRAM,
+            Platform.X, Platform.THREADS, Platform.RUMBLE, Platform.REDDIT,
+        ):
+            account.like_count = agg["total_likes"] or 0
+        # If the scraper didn't return a post_count (returned 0/None), fall back to
+        # the number of posts we actually have stored — better than showing a dash.
+        stored_post_count = account.posts.count()
+        if not account.post_count and stored_post_count:
+            account.post_count = stored_post_count
+
+        if not _refresh_stats_trustworthy(account, stats_before):
+            raise ValueError(
+                "Данные выглядят как ошибка или недоступность: нулевые метрики при ненулевых в базе "
+                "или профиль помечен недоступным. Обновление не применено."
             )
-    elif has_posts_key and not posts_authoritative:
-        print(
-            f"[posts] keeping existing posts for @{account.username}: "
-            "empty non-authoritative list from scraper",
+
+        account.updated_at = timezone.now()
+        account.save()
+
+        # Keep today's snapshot up-to-date with the freshly-scraped/aggregated values.
+        # This is the baseline used by tomorrow's delta calculation.
+        snap.follower_count = account.follower_count
+        snap.like_count = account.like_count
+        snap.view_count = account.view_count
+        snap.post_count = account.post_count
+        snap.save(update_fields=[
+            "follower_count", "like_count", "view_count", "post_count",
+        ])
+        logger.info(
+            "refresh.snapshot_after",
+            extra={
+                "account_id": account.id,
+                "platform": account.platform,
+                "username": account.username,
+                "snapshot_date": str(snap.date),
+                "follower_count": account.follower_count,
+                "like_count": account.like_count,
+                "view_count": account.view_count,
+                "post_count": account.post_count,
+            },
         )
 
-    # Aggregate view_count from posts for most platforms.
-    # For YouTube and Telegram the like_count is also post-derived
-    # (the platform page doesn't expose a channel-level like counter).
-    agg = account.posts.aggregate(
-        total_views=Sum("view_count"),
-        total_likes=Sum("like_count"),
-    )
-    # Facebook view_count is partial/misleading as a profile-level metric
-    # (scraper visibility is inconsistent), keep it 0.
-    # Instagram now supports view aggregation from reels/posts.
-    if account.platform == Platform.FACEBOOK:
-        account.view_count = 0
-    # Rumble exposes account-level cumulative views on /about; keep scraper value.
-    elif account.platform == Platform.RUMBLE:
-        pass
-    else:
-        account.view_count = agg["total_views"] or 0
-    # For platforms that don't expose a channel-level like counter,
-    # aggregate from post likes instead.
-    if account.platform in (
-        Platform.YOUTUBE, Platform.TELEGRAM, Platform.INSTAGRAM,
-        Platform.X, Platform.THREADS, Platform.RUMBLE, Platform.REDDIT,
-    ):
-        account.like_count = agg["total_likes"] or 0
-    # If the scraper didn't return a post_count (returned 0/None), fall back to
-    # the number of posts we actually have stored — better than showing a dash.
-    stored_post_count = account.posts.count()
-    if not account.post_count and stored_post_count:
-        account.post_count = stored_post_count
-    # Always touch updated_at even when stats are unchanged so UI reflects
-    # the fact that refresh actually happened.
-    account.updated_at = timezone.now()
-    account.save(update_fields=["view_count", "like_count", "post_count", "updated_at"])
-
-    # Keep today's snapshot up-to-date with the freshly-scraped/aggregated values.
-    # This is the baseline used by tomorrow's delta calculation.
-    snap.follower_count = account.follower_count
-    snap.like_count = account.like_count
-    snap.view_count = account.view_count
-    snap.post_count = account.post_count
-    snap.save(update_fields=[
-        "follower_count", "like_count", "view_count", "post_count",
-    ])
-    logger.info(
-        "refresh.snapshot_after",
-        extra={
-            "account_id": account.id,
-            "platform": account.platform,
-            "username": account.username,
-            "snapshot_date": str(snap.date),
-            "follower_count": account.follower_count,
-            "like_count": account.like_count,
-            "view_count": account.view_count,
-            "post_count": account.post_count,
-        },
-    )
-
-    # Fix zero-value snapshots from before the first real scrape.
-    # Without this, any previous day's snapshot with all zeros causes tomorrow's
-    # delta to show the full subscriber count as a single-day gain.
-    account.snapshots.filter(
-        date__lt=snap.date,
-        follower_count=0,
-        post_count=0,
-    ).update(
-        follower_count=account.follower_count,
-        like_count=account.like_count,
-        view_count=account.view_count,
-        post_count=account.post_count,
-    )
-
-    # Fix snapshots where view_count is still 0 — these are snapshots created
-    # before the view_count field was added to AccountSnapshot (migration 0006).
-    # Without this, delta = current_view_count - 0 = full count (wrong).
-    account.snapshots.filter(
-        date__lt=snap.date,
-        view_count=0,
-    ).update(view_count=account.view_count)
-
-    # Fix snapshots where post_count is still 0 — happens when a scraper only
-    # recently started returning post_count (e.g. Threads). Without this, the
-    # first refresh would show the entire post count as a single-day delta.
-    if account.post_count:
+        # Fix zero-value snapshots from before the first real scrape.
+        # Without this, any previous day's snapshot with all zeros causes tomorrow's
+        # delta to show the full subscriber count as a single-day gain.
         account.snapshots.filter(
             date__lt=snap.date,
+            follower_count=0,
             post_count=0,
-        ).update(post_count=account.post_count)
+        ).update(
+            follower_count=account.follower_count,
+            like_count=account.like_count,
+            view_count=account.view_count,
+            post_count=account.post_count,
+        )
 
-    # For YouTube / Telegram / Instagram / X / Threads: like_count in old snapshots
-    # was 0 because it's post-derived, not a platform-level counter.
-    # Bring old zero snapshots in line with the current aggregated value.
-    if account.platform in (
-        Platform.YOUTUBE, Platform.TELEGRAM, Platform.INSTAGRAM,
-        Platform.X, Platform.THREADS, Platform.RUMBLE, Platform.REDDIT,
-    ):
+        # Fix snapshots where view_count is still 0 — these are snapshots created
+        # before the view_count field was added to AccountSnapshot (migration 0006).
+        # Without this, delta = current_view_count - 0 = full count (wrong).
         account.snapshots.filter(
             date__lt=snap.date,
-            like_count=0,
-        ).update(like_count=account.like_count)
+            view_count=0,
+        ).update(view_count=account.view_count)
+
+        # Fix snapshots where post_count is still 0 — happens when a scraper only
+        # recently started returning post_count (e.g. Threads). Without this, the
+        # first refresh would show the entire post count as a single-day delta.
+        if account.post_count:
+            account.snapshots.filter(
+                date__lt=snap.date,
+                post_count=0,
+            ).update(post_count=account.post_count)
+
+        # For YouTube / Telegram / Instagram / X / Threads: like_count in old snapshots
+        # was 0 because it's post-derived, not a platform-level counter.
+        # Bring old zero snapshots in line with the current aggregated value.
+        if account.platform in (
+            Platform.YOUTUBE, Platform.TELEGRAM, Platform.INSTAGRAM,
+            Platform.X, Platform.THREADS, Platform.RUMBLE, Platform.REDDIT,
+        ):
+            account.snapshots.filter(
+                date__lt=snap.date,
+                like_count=0,
+            ).update(like_count=account.like_count)
 
     return account
 
@@ -546,7 +585,7 @@ class AccountViewSet(viewsets.ModelViewSet):
         include_hidden_profiles = include_hidden or _coerce_bool(
             self.request.query_params.get("include_hidden_profiles"),
         )
-        today = timezone.now().date()
+        today = timezone.localdate()
         prev_snapshots = AccountSnapshot.objects.filter(
             account=OuterRef("pk"),
             date__lt=today,
@@ -644,10 +683,12 @@ class AccountViewSet(viewsets.ModelViewSet):
         state.last_error = ""
         state.started_at = timezone.now()
         state.finished_at = None
+        state.run_detail = {}
         state.save(update_fields=[
             "is_running", "source", "cancel_requested", "total_accounts",
             "processed_accounts", "success_accounts", "failed_accounts",
-            "current_account", "last_error", "started_at", "finished_at", "updated_at",
+            "current_account", "last_error", "started_at", "finished_at",
+            "run_detail", "updated_at",
         ])
 
         try:
@@ -722,9 +763,10 @@ class AccountViewSet(viewsets.ModelViewSet):
             state.cancel_requested = False
             state.current_account = ""
             state.finished_at = finished
+            state.run_detail = {}
             state.save(update_fields=[
                 "is_running", "cancel_requested", "current_account",
-                "finished_at", "updated_at",
+                "finished_at", "run_detail", "updated_at",
             ])
 
     @action(detail=False, methods=["get"], url_path="export-snapshot")
@@ -1024,7 +1066,7 @@ class AccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def posts(self, request, pk=None):
         account = self.get_object()
-        today = timezone.now().date()
+        today = timezone.localdate()
         prev_post_snapshots = PostSnapshot.objects.filter(
             post=OuterRef("pk"),
             date__lt=today,
@@ -1047,6 +1089,12 @@ class ProfileViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = Profile.objects.annotate(account_count=Count("accounts"))
         include_hidden_profiles = _coerce_bool(self.request.query_params.get("include_hidden_profiles"))
+        action = getattr(self, "action", "") or ""
+        # По списку скрытые не показываем без флага; по ID — всегда находим запись,
+        # иначе PATCH/DELETE скрытого профиля дают 404.
+        detail_actions = {"retrieve", "update", "partial_update", "destroy"}
+        if action in detail_actions:
+            return qs
         if not include_hidden_profiles:
             qs = qs.filter(is_hidden=False)
         return qs
@@ -1068,10 +1116,82 @@ def platforms(request):
     return Response(data)
 
 
+def _aggregate_yesterday_calendar_deltas(account_ids: list[int], today) -> tuple[int | None, int | None, int | None, int | None]:
+    """Сумма дневных дельт за календарный «вчера»: snap(вчера) − snap(позавчера) по каждому аккаунту.
+
+    `today` — календарный день в активной таймзоне (см. summary: timezone.localdate()), для продакшена Europe/Moscow.
+    Нужна для масштаба мини-графиков на TV: вчерашний прирост = 50% высоты при равенстве с сегодняшним.
+    """
+    if not account_ids:
+        return (None, None, None, None)
+    yesterday = today - datetime.timedelta(days=1)
+    before = today - datetime.timedelta(days=2)
+    rows = AccountSnapshot.objects.filter(
+        account_id__in=account_ids,
+        date__in=(yesterday, before),
+    ).values("account_id", "date", "follower_count", "like_count", "view_count", "post_count")
+    by_acc: dict[int, dict] = {}
+    for r in rows:
+        aid = int(r["account_id"])
+        by_acc.setdefault(aid, {})[r["date"]] = r
+    d_follow = d_like = d_view = d_post = 0
+    used = 0
+    for aid in account_ids:
+        sy = by_acc.get(aid, {}).get(yesterday)
+        sb = by_acc.get(aid, {}).get(before)
+        if sy is None or sb is None:
+            continue
+        used += 1
+        d_follow += int(sy["follower_count"]) - int(sb["follower_count"])
+        d_like += int(sy["like_count"]) - int(sb["like_count"])
+        d_view += int(sy["view_count"]) - int(sb["view_count"])
+        d_post += int(sy["post_count"]) - int(sb["post_count"])
+    if used == 0:
+        return (None, None, None, None)
+    return (d_follow, d_like, d_view, d_post)
+
+
+def _aggregate_prev_snapshot_pair_deltas(account_ids: list[int], today) -> tuple[int | None, int | None, int | None, int | None]:
+    """Сумма (последний снимок − предыдущий) по каждому аккаунту, оба с date < today.
+
+    Используется, когда нет пары снимков ровно за календарный «вчера» и «позавчера», но история уже есть
+    (например, дневной снимок за «вчера» ещё не создан до ночного цикла). Интервал между двумя датами
+    может быть больше суток — это всё равно осмысленная опорная дельта для масштаба графика, не выдумка.
+    """
+    if not account_ids:
+        return (None, None, None, None)
+    rows = list(
+        AccountSnapshot.objects.filter(account_id__in=account_ids, date__lt=today)
+        .order_by("account_id", "-date")
+        .values("account_id", "date", "follower_count", "like_count", "view_count", "post_count")
+    )
+    by_acc: dict[int, list[dict]] = {}
+    for r in rows:
+        aid = int(r["account_id"])
+        lst = by_acc.setdefault(aid, [])
+        if len(lst) >= 2:
+            continue
+        lst.append(r)
+    d_follow = d_like = d_view = d_post = 0
+    used = 0
+    for lst in by_acc.values():
+        if len(lst) < 2:
+            continue
+        s0, s1 = lst[0], lst[1]
+        d_follow += int(s0["follower_count"]) - int(s1["follower_count"])
+        d_like += int(s0["like_count"]) - int(s1["like_count"])
+        d_view += int(s0["view_count"]) - int(s1["view_count"])
+        d_post += int(s0["post_count"]) - int(s1["post_count"])
+        used += 1
+    if used == 0:
+        return (None, None, None, None)
+    return (d_follow, d_like, d_view, d_post)
+
+
 @api_view(["GET"])
 def summary(request):
     """Aggregate stats + deltas across all accounts, grouped by platform."""
-    today = timezone.now().date()
+    today = timezone.localdate()
     include_hidden = _coerce_bool(request.query_params.get("include_hidden"))
     include_hidden_platforms = include_hidden or _coerce_bool(request.query_params.get("include_hidden_platforms"))
     include_hidden_profiles = include_hidden or _coerce_bool(request.query_params.get("include_hidden_profiles"))
@@ -1115,6 +1235,11 @@ def summary(request):
         for key in ("follower_count", "like_count", "view_count", "post_count"):
             by_platform[p][key] += getattr(acc, key)
 
+    account_ids = [int(a.pk) for a in accounts]
+    y_follow, y_like, y_view, y_post = _aggregate_yesterday_calendar_deltas(account_ids, today)
+    if y_follow is None:
+        y_follow, y_like, y_view, y_post = _aggregate_prev_snapshot_pair_deltas(account_ids, today)
+
     return Response({
         "account_count": len(accounts),
         "follower_count": total["follower_count"],
@@ -1125,6 +1250,10 @@ def summary(request):
         "like_delta": total["like_count"] - snap_total["like_count"] if has_snaps else None,
         "view_delta": total["view_count"] - snap_total["view_count"] if has_snaps else None,
         "post_delta": total["post_count"] - snap_total["post_count"] if has_snaps else None,
+        "yesterday_follower_delta": y_follow,
+        "yesterday_like_delta": y_like,
+        "yesterday_view_delta": y_view,
+        "yesterday_post_delta": y_post,
         "by_platform": list(by_platform.values()),
     })
 
@@ -1294,22 +1423,17 @@ def refresh_schedule(request):
 
 @api_view(["GET"])
 def auto_refresh_series(request):
-    """Time series of auto-refresh points for a specific local date."""
+    """
+    Точки автообновления для графика.
+
+    - С параметром ``date=YYYY-MM-DD`` — все точки за календарный день (local_date).
+    - Без ``date`` — скользящие 24 часа по measured_at плюс синтетическая точка
+      в начале окна (последний известный суммарный total), чтобы линия на TV
+      не «обрывалась» до первого прогона текущих суток.
+    """
     try:
         date_raw = (request.query_params.get("date") or "").strip()
-        if date_raw:
-            try:
-                target_date = datetime.date.fromisoformat(date_raw)
-            except ValueError:
-                return Response(
-                    {"detail": "Неверный параметр date. Используйте формат YYYY-MM-DD."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-        else:
-            target_date = timezone.localtime(timezone.now()).date()
-
-        points_qs = AutoRefreshPoint.objects.filter(local_date=target_date).order_by("measured_at")
-        points = list(points_qs.values(
+        value_fields = (
             "id",
             "measured_at",
             "slot_label",
@@ -1318,9 +1442,70 @@ def auto_refresh_series(request):
             "view_delta_from_prev_point",
             "view_delta_from_day_start",
             "platform_deltas",
-        ))
+        )
+        if date_raw:
+            try:
+                target_date = datetime.date.fromisoformat(date_raw)
+            except ValueError:
+                return Response(
+                    {"detail": "Неверный параметр date. Используйте формат YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            points_qs = AutoRefreshPoint.objects.filter(local_date=target_date).order_by("measured_at")
+            points = list(points_qs.values(*value_fields))
+            return Response({
+                "date": str(target_date),
+                "count": len(points),
+                "points": points,
+            })
+
+        now = timezone.now()
+        window_start = now - datetime.timedelta(hours=24)
+        prev = (
+            AutoRefreshPoint.objects.filter(measured_at__lt=window_start)
+            .order_by("-measured_at")
+            .values(*value_fields)
+            .first()
+        )
+        in_window = list(
+            AutoRefreshPoint.objects.filter(measured_at__gte=window_start, measured_at__lte=now)
+            .order_by("measured_at")
+            .values(*value_fields)
+        )
+        points: list[dict] = []
+        if in_window:
+            first_ts = in_window[0]["measured_at"]
+            if first_ts > window_start:
+                baseline = int(prev["view_count_total"]) if prev else int(in_window[0]["view_count_total"])
+                points.append({
+                    "id": 0,
+                    "measured_at": window_start,
+                    "slot_label": "",
+                    "source": "anchor",
+                    "view_count_total": baseline,
+                    "view_delta_from_prev_point": 0,
+                    "view_delta_from_day_start": 0,
+                    "platform_deltas": {},
+                })
+            points.extend(in_window)
+        elif prev:
+            baseline = int(prev["view_count_total"])
+            points.append({
+                "id": 0,
+                "measured_at": window_start,
+                "slot_label": "",
+                "source": "anchor",
+                "view_count_total": baseline,
+                "view_delta_from_prev_point": 0,
+                "view_delta_from_day_start": 0,
+                "platform_deltas": {},
+            })
+
+        local_today = timezone.localtime(now).date()
         return Response({
-            "date": str(target_date),
+            "date": str(local_today),
+            "window": "rolling_24h",
             "count": len(points),
             "points": points,
         })
@@ -1332,11 +1517,22 @@ def auto_refresh_series(request):
 def auto_refresh_status(request):
     """Current/last auto-refresh run status for UI progress widget."""
     try:
+        from .models import RefreshScheduleConfig
+
+        sched = RefreshScheduleConfig.get()
+        try:
+            sched.refresh_from_db(fields=["skip_recent_hours"])
+        except Exception:
+            pass
+        skip_cfg = max(0, int(getattr(sched, "skip_recent_hours", 0) or 0))
         state = AutoRefreshState.get()
         total = max(0, int(state.total_accounts or 0))
         done = max(0, int(state.processed_accounts or 0))
         progress = 0 if total <= 0 else min(100, int(round((done / total) * 100)))
         report_csv = (getattr(state, "last_report_csv", None) or "").strip()
+        rd = getattr(state, "run_detail", None) or {}
+        if not isinstance(rd, dict):
+            rd = {}
         return Response({
             "is_running": bool(state.is_running),
             "source": state.source,
@@ -1353,6 +1549,8 @@ def auto_refresh_status(request):
             "updated_at": state.updated_at,
             "has_csv_report": bool(report_csv),
             "report_generated_at": state.last_report_generated_at,
+            "run_detail": rd,
+            "skip_recent_hours_config": skip_cfg,
         })
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)

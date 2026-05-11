@@ -3,7 +3,7 @@ Standalone subprocess — вызывается из platforms/instagram/scraper.
 (`python worker.py --daemon`, один Chromium на процесс; запросы по stdin/stdout JSON).
 
 Ориентиры по времени на один профиль (Reels): goto до 45 с, антибот до ~120 с при
-челлендже, пауза 2 с, скролл 14×520 мс ≈ 7.3 с; между профилями в батче пауза 3–5 с.
+челлендже, пауза ~3.2 с, скролл 16×650 мс + финальная пауза; между профилями в батче пауза 3–5 с.
 
 CLI для отладки: `python worker.py '{"username":"u","reels_views_only":true}'`.
 """
@@ -20,7 +20,7 @@ from playwright.async_api import async_playwright
 def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[dict]:
     """
     Объединяет посты с главной (timeline) и карточки только с /reels/.
-    Для shortcode из сетки Reels подставляются просмотры с вкладки, в т.ч. 0.
+    Просмотры: max(JSON главной, сетка) — нули из сетки при сбое DOM не затирают video_view_count.
     Рилсы, которых нет в первой порции JSON главной, добавляются в конец.
     """
     posts = [dict(p) for p in (posts or [])]
@@ -33,7 +33,9 @@ def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[di
         sid = p.get("external_id")
         if sid and sid in by_sc_grid:
             g = by_sc_grid[sid]
-            p["view_count"] = int(g.get("view_count") or 0)
+            tv = int(p.get("view_count") or 0)
+            gv = int(g.get("view_count") or 0)
+            p["view_count"] = max(tv, gv)
             if not p.get("thumbnail_url") and g.get("thumbnail_url"):
                 p["thumbnail_url"] = g["thumbnail_url"]
             if not p.get("description") and g.get("description"):
@@ -289,7 +291,7 @@ async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
         print(f"[instagram_worker] anti-bot на /reels/ @{u}: {exc}", file=sys.stderr)
         return []
 
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(3200)
 
     if "accounts/login" in page.url or "challenge" in page.url:
         raise ValueError(
@@ -297,11 +299,12 @@ async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
         )
 
     await page.evaluate("window.scrollTo(0, 0)")
-    await page.wait_for_timeout(400)
-    for _ in range(14):
+    await page.wait_for_timeout(500)
+    for _ in range(16):
         await page.evaluate("window.scrollBy(0, Math.min(window.innerHeight, 900))")
-        await page.wait_for_timeout(520)
+        await page.wait_for_timeout(650)
 
+    await page.wait_for_timeout(800)
     return await page.evaluate(_EXTRACT_REELS_GRID_ROWS_JS) or []
 
 

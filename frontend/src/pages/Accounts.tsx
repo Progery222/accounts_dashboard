@@ -11,6 +11,7 @@ import {
   getGlobalVisibility, setGlobalVisibility,
   downloadSnapshotExport, importSnapshotFile,
   type Account, type Platform, type RefreshSchedule, type AutoRefreshStatus,
+  type AutoRefreshRunItem, type AutoRefreshRunDetail,
 } from "../api/accounts";
 import {
   getProfiles, createProfile, updateProfile, deleteProfile,
@@ -23,6 +24,21 @@ type Tab = "accounts" | "analytics";
 type SortKey = "follower_count" | "view_count" | "like_count" | "post_count" | "updated_at";
 type SortOrder = "asc" | "desc";
 type AvailabilityMainFilter = "all" | "available" | "unavailable";
+
+/** Доп. фильтры: при включённом флаге показываем только аккаунты с положительным приростом по метрике. */
+type GrowthDeltaFiltersState = {
+  followers: boolean;
+  views: boolean;
+  likes: boolean;
+  posts: boolean;
+};
+
+const DEFAULT_GROWTH_DELTA_FILTERS: GrowthDeltaFiltersState = {
+  followers: false,
+  views: false,
+  likes: false,
+  posts: false,
+};
 type RefreshStatusLabel = "обновилось" | "нет обновлений" | "ошибка";
 type RefreshReportRow = {
   id: number;
@@ -481,6 +497,8 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
   });
   const [showHiddenAccounts, setShowHiddenAccounts] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState<number | "none" | null>(() => readMainProfileFilterFromStorage());
+  const [growthDeltaFilters, setGrowthDeltaFilters] = useState<GrowthDeltaFiltersState>(DEFAULT_GROWTH_DELTA_FILTERS);
+
   const [availabilityMainFilter, setAvailabilityMainFilter] = useState<AvailabilityMainFilter>(() => {
     try {
       const raw = window.localStorage.getItem(LS_MAIN_FILTER_AVAILABILITY);
@@ -511,6 +529,13 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
   const [showRefreshModal, setShowRefreshModal] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("view_count");
   const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+  const [sortByDelta, setSortByDelta] = useState(() => {
+    try {
+      return window.localStorage.getItem("nf_sort_by_delta") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   const qc = useQueryClient();
   const [showAutoRefreshWidget, setShowAutoRefreshWidget] = useState<boolean>(() => {
@@ -576,6 +601,14 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
       // ignore storage issues
     }
   }, [searchRaw]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("nf_sort_by_delta", sortByDelta ? "1" : "0");
+    } catch {
+      // ignore
+    }
+  }, [sortByDelta]);
 
   const { data: autoRefreshStatus } = useQuery<AutoRefreshStatus>({
     queryKey: ["auto-refresh-status"],
@@ -679,27 +712,32 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
   });
 
   const filteredAccounts = useMemo(() => {
+    let list = accounts;
     if (availabilityMainFilter === "available") {
-      return accounts.filter((a) => !a.profile_unavailable);
+      list = list.filter((a) => !a.profile_unavailable);
+    } else if (availabilityMainFilter === "unavailable") {
+      list = list.filter((a) => !!a.profile_unavailable);
     }
-    if (availabilityMainFilter === "unavailable") {
-      return accounts.filter((a) => !!a.profile_unavailable);
-    }
-    return accounts;
-  }, [accounts, availabilityMainFilter]);
+    const g = growthDeltaFilters;
+    const growthActive = g.followers || g.views || g.likes || g.posts;
+    if (!growthActive) return list;
+    return list.filter((a) => {
+      if (g.followers && ((a.follower_delta ?? 0) <= 0)) return false;
+      if (g.views && ((a.view_delta ?? 0) <= 0)) return false;
+      if (g.likes && ((a.like_delta ?? 0) <= 0)) return false;
+      if (g.posts && ((a.post_delta ?? 0) <= 0)) return false;
+      return true;
+    });
+  }, [accounts, availabilityMainFilter, growthDeltaFilters]);
 
   const sortedAccounts = useMemo(() => {
     const arr = [...filteredAccounts];
     arr.sort((a, b) => {
-      if (sortKey === "updated_at") {
-        const diff = new Date(a.updated_at).getTime() - new Date(b.updated_at).getTime();
-        return sortOrder === "asc" ? diff : -diff;
-      }
-      const diff = (a[sortKey] ?? 0) - (b[sortKey] ?? 0);
+      const diff = sortAccountField(a, sortKey, sortByDelta) - sortAccountField(b, sortKey, sortByDelta);
       return sortOrder === "asc" ? diff : -diff;
     });
     return arr;
-  }, [filteredAccounts, sortKey, sortOrder]);
+  }, [filteredAccounts, sortKey, sortOrder, sortByDelta]);
 
   const changeSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -715,6 +753,8 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
     setSelectedProfile(null);
     setAvailabilityMainFilter("all");
     setSearchRaw("");
+    setGrowthDeltaFilters(DEFAULT_GROWTH_DELTA_FILTERS);
+    setSortByDelta(false);
   };
 
   const togglePlatformHidden = async (platformValue: string) => {
@@ -1498,38 +1538,61 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
                     <EyeIcon crossed={!showHiddenAccounts} className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="w-full flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={resetMainFilters}
-                    className="h-8 px-2 sm:px-2.5 rounded-lg text-xs border border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500 transition-colors whitespace-nowrap inline-flex items-center gap-1"
-                    title="Сбросить фильтры платформ, профилей, статуса и поиска"
-                  >
-                    <span aria-hidden>↺</span>
-                    <span className="sm:hidden">Сбросить</span>
-                    <span className="hidden sm:inline">Сбросить фильтры</span>
-                  </button>
-                  <FilterBtn
-                    active={availabilityMainFilter === "all"}
-                    onClick={() => setAvailabilityMainFilter("all")}
-                  >
-                    Все статусы
-                  </FilterBtn>
-                  <FilterBtn
-                    active={availabilityMainFilter === "available"}
-                    onClick={() => setAvailabilityMainFilter("available")}
-                  >
-                    Доступные
-                  </FilterBtn>
-                  <FilterBtn
-                    active={availabilityMainFilter === "unavailable"}
-                    onClick={() => setAvailabilityMainFilter("unavailable")}
-                  >
-                    Недоступные
-                  </FilterBtn>
+                <div className="w-full flex flex-wrap gap-1.5 items-center justify-between">
+                  <div className="flex flex-wrap gap-1.5 items-center min-w-0">
+                    <button
+                      type="button"
+                      onClick={resetMainFilters}
+                      className="h-8 px-2 sm:px-2.5 rounded-lg text-xs border border-zinc-700 text-zinc-400 hover:text-white hover:border-zinc-500 transition-colors whitespace-nowrap inline-flex items-center gap-1"
+                      title="Сбросить фильтры платформ, профилей, статуса, прироста и поиска"
+                    >
+                      <span aria-hidden>↺</span>
+                      <span className="sm:hidden">Сбросить</span>
+                      <span className="hidden sm:inline">Сбросить фильтры</span>
+                    </button>
+                    <FilterBtn
+                      active={availabilityMainFilter === "all"}
+                      onClick={() => setAvailabilityMainFilter("all")}
+                    >
+                      Все статусы
+                    </FilterBtn>
+                    <FilterBtn
+                      active={availabilityMainFilter === "available"}
+                      onClick={() => setAvailabilityMainFilter("available")}
+                    >
+                      Доступные
+                    </FilterBtn>
+                    <FilterBtn
+                      active={availabilityMainFilter === "unavailable"}
+                      onClick={() => setAvailabilityMainFilter("unavailable")}
+                    >
+                      Недоступные
+                    </FilterBtn>
+                  </div>
+                  <GrowthDeltaFilterMenu value={growthDeltaFilters} onChange={setGrowthDeltaFilters} />
                 </div>
               </div>
 
+              <div className="mb-2 flex justify-center md:hidden">
+                <button
+                  type="button"
+                  onClick={() => setSortByDelta((v) => !v)}
+                  title={
+                    sortByDelta
+                      ? "Сортировка по приросту включена. Нажмите — по абсолютным значениям."
+                      : "Сортировать по приросту выбранного столбца (дельта)"
+                  }
+                  aria-pressed={sortByDelta}
+                  className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-lg text-[11px] border transition-colors ${
+                    sortByDelta
+                      ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-200"
+                      : "border-zinc-800 text-zinc-400 hover:border-zinc-600 hover:text-zinc-300"
+                  }`}
+                >
+                  <DeltaGrowthIcon className="w-3.5 h-3.5 shrink-0" />
+                  По приросту
+                </button>
+              </div>
               <div className="mb-4 grid grid-cols-2 sm:grid-cols-4 gap-1.5 md:hidden">
                 <button
                   type="button"
@@ -1638,8 +1701,16 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
                 </div>
               ) : sortedAccounts.length === 0 ? (
                 <div className="text-center py-20 text-zinc-600">
-                  <p className="text-lg mb-2">Нет аккаунтов</p>
-                  <p className="text-sm">{searchRaw ? "Попробуй изменить запрос" : "Нажми «+ Добавить» чтобы начать"}</p>
+                  <p className="text-lg mb-2">
+                    {accounts.length > 0 ? "Нет аккаунтов по фильтрам" : "Нет аккаунтов"}
+                  </p>
+                  <p className="text-sm">
+                    {accounts.length > 0
+                      ? "Ослабь фильтры прироста, статуса, платформы или поиска."
+                      : searchRaw
+                        ? "Попробуй изменить запрос"
+                        : "Нажми «+ Добавить» чтобы начать"}
+                  </p>
                 </div>
               ) : (
                 <>
@@ -1658,15 +1729,41 @@ export default function Accounts({ initialTab = "accounts" }: { initialTab?: Tab
                   <table className="w-full">
                     <thead>
                       <tr className="border-b border-zinc-800 bg-zinc-900/60">
-                        <Th>Аккаунт</Th>
+                        <th className="py-2 px-4 text-xs font-medium text-zinc-500 uppercase tracking-wide text-left min-w-[8rem]">
+                          Аккаунт
+                        </th>
                         <Th>Платформа</Th>
                         <Th>Профиль</Th>
-                        <SortableTh align="right" active={sortKey === "follower_count"} order={sortOrder} onClick={() => changeSort("follower_count")}>Подписчики</SortableTh>
-                        <SortableTh align="right" active={sortKey === "view_count"} order={sortOrder} onClick={() => changeSort("view_count")}>Просмотры</SortableTh>
-                        <SortableTh align="right" active={sortKey === "like_count"} order={sortOrder} onClick={() => changeSort("like_count")}>Лайки</SortableTh>
-                        <SortableTh align="right" active={sortKey === "post_count"} order={sortOrder} onClick={() => changeSort("post_count")}>Публикации</SortableTh>
+                        <SortableTh align="right" deltaMode={sortByDelta} active={sortKey === "follower_count"} order={sortOrder} onClick={() => changeSort("follower_count")}>Подписчики</SortableTh>
+                        <SortableTh align="right" deltaMode={sortByDelta} active={sortKey === "view_count"} order={sortOrder} onClick={() => changeSort("view_count")}>Просмотры</SortableTh>
+                        <SortableTh align="right" deltaMode={sortByDelta} active={sortKey === "like_count"} order={sortOrder} onClick={() => changeSort("like_count")}>Лайки</SortableTh>
+                        <SortableTh align="right" deltaMode={sortByDelta} active={sortKey === "post_count"} order={sortOrder} onClick={() => changeSort("post_count")}>Публикации</SortableTh>
                         <SortableTh active={sortKey === "updated_at"} order={sortOrder} onClick={() => changeSort("updated_at")}>Обновлён</SortableTh>
-                        <th />
+                        <th className="py-2 px-3 text-right align-middle whitespace-nowrap">
+                          <div className="flex flex-row items-center justify-end gap-2">
+                            <span className="text-xs font-medium uppercase tracking-wide text-zinc-500 truncate max-w-[7rem]">
+                              Действия
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => setSortByDelta((v) => !v)}
+                              title={
+                                sortByDelta
+                                  ? "Сортировка по приросту включена. Нажмите — по абсолютным значениям."
+                                  : "Сортировать по приросту выбранного столбца (дельта)"
+                              }
+                              aria-pressed={sortByDelta}
+                              aria-label={sortByDelta ? "Выключить сортировку по приросту" : "Включить сортировку по приросту"}
+                              className={`shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md border transition-colors ${
+                                sortByDelta
+                                  ? "border-emerald-500/60 bg-emerald-500/15 text-emerald-200"
+                                  : "border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-500"
+                              }`}
+                            >
+                              <DeltaGrowthIcon className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1784,6 +1881,102 @@ function FilterBtn({ active, onClick, children }: { active: boolean; onClick: ()
   );
 }
 
+function GrowthDeltaFilterMenu({
+  value,
+  onChange,
+}: {
+  value: GrowthDeltaFiltersState;
+  onChange: (next: GrowthDeltaFiltersState) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      const el = rootRef.current;
+      if (el && !el.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => document.removeEventListener("mousedown", onDocMouseDown);
+  }, [open]);
+
+  const anyActive =
+    value.followers || value.views || value.likes || value.posts;
+
+  const row = (
+    key: keyof GrowthDeltaFiltersState,
+    label: string,
+  ) => (
+    <label
+      key={key}
+      className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg hover:bg-zinc-800/90 cursor-pointer text-sm text-zinc-200"
+    >
+      <input
+        type="checkbox"
+        checked={value[key]}
+        onChange={(e) => onChange({ ...value, [key]: e.target.checked })}
+        className="h-3.5 w-3.5 rounded border-zinc-600 bg-zinc-950 text-emerald-500 focus:ring-emerald-500/40 focus:ring-offset-0"
+      />
+      <span>{label}</span>
+    </label>
+  );
+
+  return (
+    <div ref={rootRef} className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="true"
+        title="Ещё — фильтр по приросту метрик"
+        className={`h-8 w-9 rounded-lg border inline-flex items-center justify-center transition-colors ${
+          anyActive
+            ? "border-emerald-700/55 bg-emerald-950/30 text-white"
+            : "border-zinc-800 bg-zinc-900 text-zinc-200 hover:border-zinc-600 hover:text-white"
+        }`}
+      >
+        <span className="sr-only">Ещё</span>
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+          <circle cx="3" cy="8" r="1.6" />
+          <circle cx="8" cy="8" r="1.6" />
+          <circle cx="13" cy="8" r="1.6" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-[calc(100%+6px)] z-40 w-[min(100vw-24px,260px)] rounded-xl border border-zinc-700 bg-zinc-900/98 shadow-xl backdrop-blur-sm p-1.5"
+        >
+          <div className="px-2 pt-1 pb-1.5 border-b border-zinc-800/90">
+            <p className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">Прирост за период</p>
+            <p className="text-[11px] text-zinc-500 mt-0.5 leading-snug">
+              Показывать только аккаунты с положительным приростом по выбранным метрикам (можно несколько).
+            </p>
+          </div>
+          <div className="py-1">
+            {row("followers", "Подписчики")}
+            {row("views", "Просмотры")}
+            {row("likes", "Лайки")}
+            {row("posts", "Публикации")}
+          </div>
+          <div className="border-t border-zinc-800/90 pt-1">
+            <button
+              type="button"
+              className="w-full text-left text-xs text-zinc-400 hover:text-zinc-200 px-2.5 py-1.5 rounded-lg hover:bg-zinc-800/80"
+              onClick={() => {
+                onChange(DEFAULT_GROWTH_DELTA_FILTERS);
+              }}
+            >
+              Сбросить фильтр прироста
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PlatformFilterChip({
   active,
   platform,
@@ -1885,9 +2078,36 @@ function EyeIcon({ crossed = false, className = "w-4 h-4" }: { crossed?: boolean
   );
 }
 
+/** Иконка «прирост» — переключение сортировки по дельтам вместо абсолютных значений. */
+function DeltaGrowthIcon({ className = "w-4 h-4" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M4 19h16M7 15l4-4 3 3 6-7" />
+      <path d="M17 8h3.5V11.5" />
+    </svg>
+  );
+}
+
+function sortAccountField(account: Account, sortKey: SortKey, byDelta: boolean): number {
+  if (sortKey === "updated_at") return new Date(account.updated_at).getTime();
+  if (!byDelta) return Number(account[sortKey] ?? 0);
+  switch (sortKey) {
+    case "follower_count":
+      return Number(account.follower_delta ?? 0);
+    case "view_count":
+      return Number(account.view_delta ?? 0);
+    case "like_count":
+      return Number(account.like_delta ?? 0);
+    case "post_count":
+      return Number(account.post_delta ?? 0);
+    default:
+      return 0;
+  }
+}
+
 function Th({ children, align = "left" }: { children?: React.ReactNode; align?: "left" | "right" }) {
   return (
-    <th className={`py-2.5 px-4 text-xs font-medium text-zinc-500 uppercase tracking-wide whitespace-nowrap ${align === "right" ? "text-right" : "text-left"}`}>
+    <th className={`py-2 px-4 text-xs font-medium text-zinc-500 uppercase tracking-wide whitespace-nowrap ${align === "right" ? "text-right" : "text-left"}`}>
       {children}
     </th>
   );
@@ -1899,22 +2119,28 @@ function SortableTh({
   active,
   order,
   onClick,
+  deltaMode = false,
 }: {
   children?: React.ReactNode;
   align?: "left" | "right";
   active: boolean;
   order: SortOrder;
   onClick: () => void;
+  /** Показывать «Δ» у метрик, когда включена сортировка по приросту. */
+  deltaMode?: boolean;
 }) {
   return (
-    <th className={`py-2.5 px-4 text-xs font-medium uppercase tracking-wide whitespace-nowrap ${align === "right" ? "text-right" : "text-left"}`}>
+    <th className={`py-2 px-4 text-xs font-medium uppercase tracking-wide whitespace-nowrap ${align === "right" ? "text-right" : "text-left"}`}>
       <button
         type="button"
         onClick={onClick}
-        className={`inline-flex items-center gap-1 transition-colors ${active ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"}`}
+        className={`inline-flex max-w-full flex-nowrap items-center gap-1 whitespace-nowrap transition-colors ${active ? "text-zinc-200" : "text-zinc-500 hover:text-zinc-300"}`}
       >
-        <span>{children}</span>
-        <span className={active ? "text-zinc-300" : "text-zinc-600"}>
+        <span className="whitespace-nowrap">
+          {children}
+          {deltaMode ? " Δ" : ""}
+        </span>
+        <span className={`shrink-0 ${active ? "text-zinc-300" : "text-zinc-600"}`}>
           {active ? (order === "asc" ? "↑" : "↓") : "↕"}
         </span>
       </button>
@@ -2762,6 +2988,153 @@ function RefreshAllModal({
 const INTERVAL_OPTIONS = [1, 2, 3, 4, 6, 8, 12, 24];
 const TIME_PRESETS = ["06:00", "09:00", "12:00", "15:00", "18:00", "21:00", "00:00"];
 
+const AUTO_REFRESH_RUN_STATUS_RU: Record<string, string> = {
+  queued: "В очереди",
+  running: "Обновляется",
+  done: "Готово",
+  skipped: "Пропущен",
+  error: "Ошибка",
+  cancelled: "Отменён",
+};
+
+function AutoRefreshRunDetailModal({
+  status,
+  onClose,
+}: {
+  status?: AutoRefreshStatus;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  useEffect(() => {
+    const t = setInterval(() => {
+      void qc.invalidateQueries({ queryKey: ["auto-refresh-status"] });
+    }, 2000);
+    return () => clearInterval(t);
+  }, [qc]);
+
+  const rd: AutoRefreshRunDetail | undefined = status?.run_detail;
+  const items: AutoRefreshRunItem[] = Array.isArray(rd?.items) ? rd.items : [];
+  const workerCount = Math.max(0, Number(rd?.worker_count ?? 0));
+
+  const buckets = useMemo(() => {
+    const pick = (s: AutoRefreshRunItem["status"]) => items.filter((it) => it.status === s);
+    return {
+      running: pick("running"),
+      queued: pick("queued"),
+      done: pick("done"),
+      skipped: pick("skipped"),
+      error: pick("error"),
+      cancelled: pick("cancelled"),
+    };
+  }, [items]);
+
+  const renderSection = (title: string, list: AutoRefreshRunItem[], emptyHint?: string) => (
+    <div className="space-y-2">
+      <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">
+        {title}
+        <span className="text-zinc-600 font-normal normal-case"> · {list.length}</span>
+      </h3>
+      {list.length === 0 ? (
+        <p className="text-xs text-zinc-600">{emptyHint ?? "—"}</p>
+      ) : (
+        <ul className="max-h-40 overflow-y-auto rounded-lg border border-zinc-800/80 divide-y divide-zinc-800/80 bg-zinc-950/40">
+          {list.map((it) => (
+            <li key={it.account_id} className="flex items-start gap-2 px-2.5 py-2 text-xs">
+              <PlatformIcon platform={it.platform} className="w-3.5 h-3.5 shrink-0 text-zinc-400 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <div className="text-zinc-200 font-medium truncate">
+                  @{it.username}
+                  <span className="text-zinc-500 font-normal ml-1">· {it.platform}</span>
+                </div>
+                {it.detail ? (
+                  <p className="text-[11px] text-zinc-500 mt-0.5 line-clamp-2">{it.detail}</p>
+                ) : null}
+              </div>
+              <div className="shrink-0 text-right space-y-0.5">
+                <span
+                  className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    it.status === "running"
+                      ? "bg-sky-950/80 text-sky-200 border border-sky-800/60"
+                      : it.status === "done"
+                        ? "bg-emerald-950/60 text-emerald-200 border border-emerald-800/50"
+                        : it.status === "skipped"
+                          ? "bg-zinc-800 text-zinc-300 border border-zinc-700"
+                          : it.status === "error"
+                            ? "bg-red-950/50 text-red-200 border border-red-900/50"
+                            : it.status === "cancelled"
+                              ? "bg-amber-950/40 text-amber-200 border border-amber-900/40"
+                              : "bg-zinc-800 text-zinc-400 border border-zinc-700"
+                  }`}
+                >
+                  {AUTO_REFRESH_RUN_STATUS_RU[it.status] ?? it.status}
+                </span>
+                {it.worker != null && it.status === "running" ? (
+                  <div className="text-[10px] text-zinc-500 tabular-nums">слот {Number(it.worker) + 1}</div>
+                ) : null}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm px-3 py-6 sm:p-4"
+      onClick={(e) => e.target === e.currentTarget && onClose()}
+    >
+      <div
+        className="bg-zinc-900 border border-zinc-600 rounded-2xl p-4 sm:p-5 w-full max-w-lg max-h-[min(88dvh,640px)] overflow-y-auto shadow-2xl space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-[10px] uppercase tracking-widest text-zinc-500 mb-1">Автообновление</p>
+            <h2 className="text-base font-semibold text-white">Детали прогона</h2>
+            <p className="text-xs text-zinc-500 mt-1 leading-snug">
+              Параллельных потоков: {workerCount || "—"}. Номер слота (1…N) показывается только у аккаунта в статусе «Обновляется».
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Закрыть"
+            className="min-h-10 min-w-10 shrink-0 inline-flex items-center justify-center rounded-xl text-zinc-500 hover:text-white hover:bg-zinc-800"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        {items.length === 0 ? (
+          <p className="text-sm text-zinc-500">
+            Список аккаунтов для этого прогона ещё не загружен на сервер (старый бэкенд или прогон не из планировщика).
+          </p>
+        ) : (
+          <div className="space-y-5">
+            {renderSection("Сейчас обновляются", buckets.running, "Никто")}
+            {renderSection("В очереди", buckets.queued, "Пусто")}
+            {renderSection("Уже готово", buckets.done, "—")}
+            {renderSection("Пропущены (недавно обновлялись)", buckets.skipped, "—")}
+            {renderSection("Ошибки", buckets.error, "—")}
+            {renderSection("Отменены / не дошли", buckets.cancelled, "—")}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={onClose}
+          className="w-full min-h-11 rounded-xl border border-zinc-600 text-sm font-medium text-zinc-200 hover:bg-zinc-800"
+        >
+          Закрыть
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AutoRefreshProgressCard({
   status,
   enabled,
@@ -2799,10 +3172,17 @@ function AutoRefreshProgressCard({
       <div className="mt-1.5 h-1 rounded-full bg-zinc-800 overflow-hidden">
         <div className="h-full bg-white/90 transition-all" style={{ width: `${percent}%` }} />
       </div>
-      <div className="mt-1 flex items-center gap-2 text-[10px] sm:text-[11px] text-zinc-500">
-        <span className="tabular-nums">{percent}%</span>
-        {status?.current_account && <span className="text-zinc-400 truncate">{status.current_account}</span>}
-        {!!status?.failed_accounts && <span className="text-red-400 shrink-0">ошибок: {status.failed_accounts}</span>}
+      <div className="mt-1 flex flex-col gap-0.5 text-[10px] sm:text-[11px] text-zinc-500">
+        <div className="flex items-center gap-2">
+          <span className="tabular-nums">{percent}%</span>
+          {status?.current_account && <span className="text-zinc-400 truncate">{status.current_account}</span>}
+          {!!status?.failed_accounts && <span className="text-red-400 shrink-0">ошибок: {status.failed_accounts}</span>}
+        </div>
+        {Number(status?.skip_recent_hours_config ?? 0) > 0 && (
+          <span className="text-amber-200/90">
+            На сервере включён пропуск недавних: &lt; {status?.skip_recent_hours_config} ч (сохраните «Не пропускать», если нужно обновлять всех)
+          </span>
+        )}
       </div>
     </div>
   );
@@ -2839,6 +3219,7 @@ function ScheduleModal({
   const [customTime, setCustomTime] = useState("");
   const [saving, setSaving] = useState(false);
   const [reportDownloading, setReportDownloading] = useState(false);
+  const [runDetailOpen, setRunDetailOpen] = useState(false);
 
   useEffect(() => {
     setForm({ ...initial });
@@ -3122,6 +3503,21 @@ function ScheduleModal({
                 status={autoStatus}
                 enabled={form.enabled}
               />
+              {(autoStatus?.is_running || (autoStatus?.run_detail?.items?.length ?? 0) > 0) && (
+                <button
+                  type="button"
+                  onClick={() => setRunDetailOpen(true)}
+                  className="w-full mt-2 min-h-10 rounded-xl border border-zinc-600/90 bg-zinc-800/40 text-sm font-medium text-zinc-200 hover:bg-zinc-800 hover:text-white transition-colors touch-manipulation active:scale-[0.995]"
+                >
+                  Подробнее: очередь и слоты воркеров
+                </button>
+              )}
+              {runDetailOpen && (
+                <AutoRefreshRunDetailModal
+                  status={autoStatus}
+                  onClose={() => setRunDetailOpen(false)}
+                />
+              )}
             </div>
           </>
         )}

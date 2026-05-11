@@ -294,12 +294,14 @@ function AccountsCards({ rows, accent }) {
               </div>
               <ProfileBadge id={a.profile} dense />
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
-              {[['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d, c]) => (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
+              {[['Followers', a.followers, a.dFollowers ?? 0, '#4ade80'], ['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d]) => (
                 <div key={l}>
                   <div className="mono" style={{ fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{l.toUpperCase()}</div>
                   <div className="mono tnum" style={{ fontSize: 17, fontWeight: 600 }}>{fmt(v)}</div>
-                  <div className="mono tnum" style={{ fontSize: 11, color: d >= 0 ? '#4ade80' : 'var(--danger)' }}>{d >= 0 ? '+' : ''}{fmt(d)}</div>
+                  {Number(d || 0) !== 0 && (
+                    <div className="mono tnum" style={{ fontSize: 11, color: d >= 0 ? '#4ade80' : 'var(--danger)' }}>{d >= 0 ? '+' : ''}{fmt(d)}</div>
+                  )}
                 </div>
               ))}
             </div>

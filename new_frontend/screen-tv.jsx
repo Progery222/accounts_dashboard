@@ -12,13 +12,15 @@ function TVScreen({ tweaks, onExit }) {
   const [scene, setScene] = useStateTV(0);
   const [now, setNow] = useStateTV(new Date());
   const [pulse, setPulse] = useStateTV(0);
+  const [sceneAutoPaused, setSceneAutoPaused] = useStateTV(false);
 
   const SCENES = ['atom', 'pulse', 'top'];
 
   useEffectTV(() => {
-    const id = setInterval(() => setScene(s => (s + 1) % SCENES.length), 14000);
+    if (sceneAutoPaused) return undefined;
+    const id = setInterval(() => setScene((s) => (s + 1) % SCENES.length), 14000);
     return () => clearInterval(id);
-  }, []);
+  }, [sceneAutoPaused]);
   useEffectTV(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
@@ -46,7 +48,7 @@ function TVScreen({ tweaks, onExit }) {
       </div>
 
       <TVTicker accent={moodTone.accent} />
-      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} />
+      <TVSceneIndicator total={SCENES.length} current={scene} accent={moodTone.accent} onSelect={(i) => setScene(i)} autoPaused={sceneAutoPaused} setAutoPaused={setSceneAutoPaused} />
     </div>
   );
 }
@@ -160,7 +162,7 @@ function BigStat({ label, value, delta, color, spark, align }) {
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 18, marginTop: 12 }}>
         <div className="mono tnum" style={{ fontSize: 28, color: color, fontWeight: 500, whiteSpace: 'nowrap' }}>
-          ▲ +{fmt(delta)}
+          ▲ +{Number(delta) > 0 ? fmt(delta) : '0'}
         </div>
         <div style={{ flex: 1, height: 64, minWidth: 0 }}>
           <ResponsiveSpark data={spark} color={color} />
@@ -387,17 +389,87 @@ function TVTicker({ accent }) {
   );
 }
 
-function TVSceneIndicator({ total, current, accent }) {
+function TVPauseIcon({ size = 13, color = 'currentColor' }) {
   return (
-    <div style={{ position: 'absolute', top: 110, right: 56, display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+      <rect x="6" y="5" width="4.5" height="14" rx="1" fill={color} />
+      <rect x="13.5" y="5" width="4.5" height="14" rx="1" fill={color} />
+    </svg>
+  );
+}
+
+function TVPlayIcon({ size = 13, color = 'currentColor' }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+      <path d="M9 6.5v11L18 12z" fill={color} />
+    </svg>
+  );
+}
+
+function TVSceneTransport({ accent, autoPaused, setAutoPaused, compact }) {
+  const playing = !autoPaused;
+  const sz = compact ? 28 : 30;
+  const iconSz = compact ? 11 : 12;
+  const iconColor = accent;
+  const btnStyle = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: sz,
+    height: sz,
+    padding: 0,
+    borderRadius: 8,
+    flexShrink: 0,
+    cursor: 'pointer',
+    border: 'none',
+    boxShadow: 'none',
+    background: `${accent}28`,
+    color: iconColor,
+  };
+  const title = playing
+    ? 'Пауза: остановить автоматическое переключение сцен'
+    : 'Плей: снова переключать сцены автоматически';
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      aria-pressed={playing ? 'true' : 'false'}
+      onClick={() => setAutoPaused?.(!autoPaused)}
+      style={btnStyle}
+    >
+      {playing ? (
+        <TVPauseIcon size={iconSz} color={iconColor} />
+      ) : (
+        <TVPlayIcon size={iconSz} color={iconColor} />
+      )}
+    </button>
+  );
+}
+
+function TVSceneIndicator({ total, current, accent, onSelect, autoPaused = false, setAutoPaused }) {
+  return (
+    <div style={{ position: 'absolute', top: 110, right: 20, display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-end', zIndex: 20 }}>
+      <TVSceneTransport accent={accent} autoPaused={autoPaused} setAutoPaused={setAutoPaused} compact={false} />
       {Array.from({ length: total }).map((_, i) => (
-        <div key={i} style={{
-          width: i === current ? 32 : 12, height: 3, borderRadius: 2,
-          background: i === current ? accent : 'rgba(255,255,255,0.15)',
-          transition: 'all 0.4s ease',
-        }} />
+        <button
+          key={i}
+          type="button"
+          onClick={() => onSelect?.(i)}
+          title={`Переключить на сцену ${i + 1}`}
+          style={{
+            width: i === current ? 32 : 12,
+            height: 3,
+            borderRadius: 2,
+            background: i === current ? accent : 'rgba(255,255,255,0.15)',
+            transition: 'all 0.25s ease',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 0,
+          }}
+        />
       ))}
-      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.2em', marginTop: 6 }}>SCENE {current + 1}/{total}</div>
+      <div className="mono" style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.2em', marginTop: 2 }}>SCENE {current + 1}/{total}</div>
     </div>
   );
 }

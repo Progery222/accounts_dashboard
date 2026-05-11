@@ -112,7 +112,9 @@ def _merge_posts_with_reels_grid_scraper(posts: list[dict], rows: list[dict]) ->
         sid = p.get("external_id")
         if sid and sid in by_sc_grid:
             g = by_sc_grid[sid]
-            p["view_count"] = int(g.get("view_count") or 0)
+            tv = int(p.get("view_count") or 0)
+            gv = int(g.get("view_count") or 0)
+            p["view_count"] = max(tv, gv)
             if not p.get("thumbnail_url") and g.get("thumbnail_url"):
                 p["thumbnail_url"] = g["thumbnail_url"]
             if not p.get("description") and g.get("description"):
