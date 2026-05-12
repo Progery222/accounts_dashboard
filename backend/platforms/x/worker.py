@@ -1,7 +1,12 @@
 """
-Standalone subprocess — fetches X (Twitter) profile data via x.com.
+Standalone subprocess — fetches X (Twitter) profile data via x.com,
+или список подписчиков (``audience_followers`` → ``/{user}/followers`` и
+``/{user}/verified_followers``).
+
 Invoked by platforms/x/scraper.py as:
     python x/worker.py '{"username": "handle"}'
+
+Payload с ``"audience_followers": true`` — см. ``accounts.audience.fetch_audience_payload``.
 
 Uses the shared persistent Chrome profile. Requires an active X session
 (log in once via Settings → «Войти в X»).
@@ -71,6 +76,33 @@ def _load_worker_utils():
     _wu = _ilu.module_from_spec(_wu_spec)
     _wu_spec.loader.exec_module(_wu)
     return _wu
+
+
+async def execute_payload(page, _wu, arg: dict) -> dict:
+    if bool(arg.get("audience_followers")):
+        from platforms.x.audience_scrape import scrape_x_audience_followers
+
+        u = (arg.get("username") or "").lstrip("@").strip()
+        lim = int(arg.get("limit") or 100)
+        _mpp = arg.get("max_posts_per_follower")
+        mpp = int(_mpp) if _mpp is not None else 0
+        if not u:
+            return {"error": "Не указан username для съёма подписчиков."}
+        _raw_aid = arg.get("audience_account_id")
+        audience_account_id = int(_raw_aid) if _raw_aid is not None else None
+        return await scrape_x_audience_followers(
+            page,
+            _wu,
+            u,
+            lim,
+            max_posts_per_follower=mpp,
+            skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
+            audience_account_id=audience_account_id,
+        )
+    username = str(arg.get("username", "")).lstrip("@")
+    if not username:
+        return {"error": "Не указан username."}
+    return await _run_with_page(username, page, _wu)
 
 
 async def _run_with_page(username: str, page, _wu) -> dict:
@@ -352,7 +384,6 @@ async def _run_with_page(username: str, page, _wu) -> dict:
 
 
 async def run_once(arg: dict) -> dict:
-    username = arg["username"].lstrip("@")
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
@@ -360,7 +391,7 @@ async def run_once(arg: dict) -> dict:
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            return await _run_with_page(username, page, _wu)
+            return await execute_payload(page, _wu, arg)
         finally:
             await _wu.close_context(context, _browser)
 
@@ -389,8 +420,7 @@ async def daemon_main() -> None:
                     _write_response({"error": "Невалидный JSON payload"})
                     continue
                 try:
-                    username = str(payload.get("username", "")).lstrip("@")
-                    result = await _run_with_page(username, page, _wu)
+                    result = await execute_payload(page, _wu, payload)
                 except (KeyboardInterrupt, SystemExit):
                     raise
                 except asyncio.CancelledError:

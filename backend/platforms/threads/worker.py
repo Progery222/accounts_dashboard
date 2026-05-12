@@ -1,7 +1,11 @@
 """
-Standalone subprocess — fetches Threads profile data via threads.net.
+Standalone subprocess — fetches Threads profile data via threads.net,
+или список подписчиков (клик по «N подписчиков / followers / subscribers» → модалка).
+
 Invoked by platforms/threads/scraper.py as:
     python threads/worker.py '{"username": "handle"}'
+
+Payload с ``"audience_followers": true`` — см. ``accounts.audience.fetch_audience_payload``.
 
 Uses the shared persistent Chrome profile. Requires an active Threads session
 (log in once via Settings → «Войти в Threads»).
@@ -368,7 +372,6 @@ def _threads_body_indicates_profile_removed(body: str) -> bool:
 
 async def run_once(arg: dict):
     arg = dict(arg)
-    username = arg["username"].lstrip("@")
 
     try:
         _wu = _load_worker_utils()
@@ -385,9 +388,36 @@ async def run_once(arg: dict):
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            return await _run_with_page(username, page, _wu)
+            return await execute_payload(page, _wu, arg)
         finally:
             await _wu.close_context(context, _browser)
+
+
+async def execute_payload(page, _wu, arg: dict) -> dict:
+    if bool(arg.get("audience_followers")):
+        from platforms.threads.audience_scrape import scrape_threads_audience_followers
+
+        u = (arg.get("username") or "").lstrip("@").strip()
+        lim = int(arg.get("limit") or 100)
+        _mpp = arg.get("max_posts_per_follower")
+        mpp = int(_mpp) if _mpp is not None else 0
+        if not u:
+            return {"error": "Не указан username для съёма подписчиков."}
+        _raw_aid = arg.get("audience_account_id")
+        audience_account_id = int(_raw_aid) if _raw_aid is not None else None
+        return await scrape_threads_audience_followers(
+            page,
+            _wu,
+            u,
+            lim,
+            max_posts_per_follower=mpp,
+            skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
+            audience_account_id=audience_account_id,
+        )
+    username = str(arg.get("username", "")).lstrip("@")
+    if not username:
+        return {"error": "Не указан username."}
+    return await _run_with_page(username, page, _wu)
 
 
 async def _run_with_page(username: str, page, _wu):
@@ -940,7 +970,7 @@ async def daemon_main() -> None:
                     username = str(payload.get("username", "")).lstrip("@")
                     try:
                         result = await asyncio.wait_for(
-                            _run_with_page(username, page, _wu),
+                            execute_payload(page, _wu, payload),
                             timeout=_scrape_timeout_s,
                         )
                     except (KeyboardInterrupt, SystemExit):

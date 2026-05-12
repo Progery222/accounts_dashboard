@@ -1,13 +1,44 @@
 """
 Standalone subprocess — fetches Facebook Page / profile data.
-Invoked by platforms/facebook/scraper.py as:
-    python facebook/worker.py '{"username": "pagename"}'
+Invoked by Django через worker_pool как ``python .../worker.py --daemon`` (одно окно Chromium на процесс).
+
+Отладка вручную: ``python platforms/facebook/worker.py --once path/to/payload.json``
+или ``--once '{"username":"pagename"}'``; либо ``python .../worker.py --daemon`` со строками JSON в stdin;
 
 Uses the shared persistent Chrome profile (force_persistent=True).
 Runs headless=False with the window placed off-screen.
 
 Публичный скрапинг без обязательного входа: при «стене» логина всё равно
 пытаемся вытащить og:title / main — раньше жёстко падали на ложном auth.
+
+Переход **ровно два раза** на www: (1) основной URL профиля (без ``sk=…``),
+(2) тот же профиль с ``sk=reels_tab`` — вкладка Reels (``page.goto``, без клика по UI).
+После (2) **не** уходим на mbasic/timeline за подписчиками, если уже на ``sk=reels_tab`` —
+это давало лишний «уход с Reels на профиль». Запасной mbasic только если
+``FACEBOOK_MBASIC_FALLBACK=1`` и страница **не** на www ``sk=reels_tab``.
+Опционально: ``FACEBOOK_REELS_UI_CLICK_FALLBACK=1`` или ``FACEBOOK_PHOTOS_UI_CLICK_FALLBACK=1`` —
+если после (2) в URL нет ``sk=reels_tab``, один раз пробуем клик по вкладке Reels.
+
+Детальные лайки Reels: **одно открытие на пост** — либо клик по карточке на сетке (модалка),
+либо (если нет ``sk=reels_tab`` / mbasic) один ``page.goto`` на URL Reel и возврат на сетку;
+**не** цепочка «клик + goto» для одного и того же ролика. По умолчанию **включено**
+(``FACEBOOK_DETAIL_LIKES_ENABLED=0`` — выключить). Перед кликом по карточке при необходимости
+**возврат на URL с sk=reels_tab** — после модалки Facebook часто уводит со вкладки.
+Порог просмотров: ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS`` (по умолчанию **2000**): кандидаты enrich —
+посты с ``view_count >= порог - 1`` (пограница округления); у постов с ``view_count ≤`` порогу
+лайки с сетки не используются (**0**), сумма по аккаунту — из постов.
+До ``FACEBOOK_DETAIL_LIKES_MAX_OPENS`` постов за проход (ветка enrich отключена, если
+``FACEBOOK_DETAIL_LIKES_ENABLED=0``).
+XPath текста лайков: ``FACEBOOK_POST_LIKES_XPATH`` или встроенный дефолт
+(хрупко при смене вёрстки Facebook).
+Одноразовый запуск ``run_once``: ``FACEBOOK_RUN_ONCE_KEEP_BROWSER=1`` — после парса
+не вызывать закрытие Chromium (процесс ждёт Ctrl+C, окно остаётся).
+
+После окончания stdin демон **не** вызывает ``close_context``: окно остаётся,
+процесс ждёт бесконечно (закрытие — остановка worker-процесса / Django /
+``shutdown_all_workers``). Для явного закрытия при выходе процесса:
+``FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT=1``. Чтобы при остановке Django не
+убивать воркеры через atexit: ``PLAYWRIGHT_POOL_SKIP_ATEXIT=1`` (осторожно: зомби Chromium).
 """
 import asyncio
 import json
@@ -15,10 +46,13 @@ import os
 import random
 import re
 import sys
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
 from playwright.async_api import async_playwright
+
+from platforms.facebook.profile_url import normalize_facebook_profile_input
 
 NAV_TIMEOUT         = 35_000
 LOAD_TIMEOUT        = 25_000
@@ -33,11 +67,215 @@ PAUSE_PRE_M_BASIC_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_MBASIC_MAX_MS", "18
 PAUSE_BETWEEN_TASKS_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_BETWEEN_TASKS_MIN_MS", "1000") or "1000")
 PAUSE_BETWEEN_TASKS_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_BETWEEN_TASKS_MAX_MS", "2200") or "2200")
 
+# Детальные лайки Reels (XPath к узлу с цифрой лайков после открытия поста).
+# Блок «лайк + иконка» (шире): …/div[2]/div[1]/div[3]/div/div/div[2]/div/div/div/div/div/div/div[1]
+# — при смене вёрстки можно подставить через FACEBOOK_POST_LIKES_XPATH узел с текстом или span.
+_DEFAULT_FB_REEL_LIKES_XPATH = (
+    "/html/body/div[1]/div/div[1]/div/div[5]/div/div/div[3]/div[2]/div/div/div/div/"
+    "div/div/div/div[2]/div[1]/div[3]/div/div/div[2]/div/div/div/div/div/div/div[1]/"
+    "div/div[1]/div/div[1]/div/div[2]/div/span/span"
+)
+
+
+def _facebook_detail_likes_enabled() -> bool:
+    return os.getenv("FACEBOOK_DETAIL_LIKES_ENABLED", "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _facebook_detail_likes_min_views() -> int:
+    """Порог просмотров для детальных лайков (env ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS``, по умолчанию 2000)."""
+    try:
+        return max(0, int(os.getenv("FACEBOOK_DETAIL_LIKES_MIN_VIEWS", "2000") or "2000"))
+    except (TypeError, ValueError):
+        return 2000
+
+
+def _facebook_run_once_keep_browser() -> bool:
+    """Для отладки: после run_once не закрывать Chromium (процесс ждёт Ctrl+C)."""
+    return os.getenv("FACEBOOK_RUN_ONCE_KEEP_BROWSER", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+_FB_XPATH_LIKE_TEXT_JS = """(xp) => {
+    try {
+        const r = document.evaluate(
+            xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+        );
+        const el = r.singleNodeValue;
+        if (el && el.textContent)
+            return String(el.textContent).trim().slice(0, 48);
+    } catch (e) {}
+    return '';
+}"""
+
+
+_FB_FALLBACK_LIKES_TEXT_JS = """() => {
+    const clean = (s) => String(s || '').replace(/[\\u00a0\\u202f]/g, ' ').replace(/\\s+/g, ' ').trim();
+    function parseCompact(t) {
+        let s = clean(t || '').trim();
+        const ru = s.match(/^([\\d]+(?:[.,][\\d]+)?)\\s*(млрд|млн|тыс)\\.?/i);
+        if (ru) {
+            const n = parseFloat(ru[1].replace(',', '.'));
+            const m = { млн: 1e6, тыс: 1e3, млрд: 1e9 }[ru[2].toLowerCase()] || 1;
+            return Math.round(n * m);
+        }
+        s = s.replace(/[\\s,]/g, '').replace(',', '.');
+        const la = s.match(/^([\\d]+(?:\\.[\\d]+)?)([KkMmBb]?)$/);
+        if (!la) return 0;
+        const mult = { K: 1e3, M: 1e6, B: 1e9 }[la[2].toUpperCase()] || 1;
+        return Math.round(parseFloat(la[1]) * mult);
+    }
+    function numFromLikeLabel(a) {
+        if (!a || a.length > 320) return 0;
+        if (/просмотр|\\bviews?\\b|\\bwatch\\b|play count|воспроизвед/i.test(a)) return 0;
+        if (/комментар|\\bcomments?\\b|подел|shares?/i.test(a) && !/нравится|лайк|reaction|\\blike\\b/i.test(a))
+            return 0;
+        const patterns = [
+            /([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)\\s*(?:отметок\\s*«?Нравится»?|reactions?|лайков?)/i,
+            /([\\d][\\d\\s.,]*)\\s*(?:отметок\\s*«?Нравится»?|reactions?|лайков?)/i,
+            /([\\d][\\d\\s.,]*)\\s*нравится/i,
+            /нравится[:\\s]+([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)/i,
+            /нравится[:\\s]+([\\d][\\d\\s.,]*)/i,
+            /(?:reactions?|likes?|лайк\\w*)[:\\s]+([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)/i,
+            /(?:reactions?|likes?|лайк\\w*)[:\\s]+([\\d][\\d\\s.,]*)/i,
+            /(?:^|[\\s"«(])([\\d][\\d\\s.,]*)\\s*(?:people|person|persons)\\s+(?:liked|like)/i,
+        ];
+        for (const re of patterns) {
+            const m = a.match(re);
+            if (m) {
+                const n = parseCompact(m[1].trim());
+                if (n > 0 && n < 1e9) return n;
+            }
+        }
+        return 0;
+    }
+    /** Reels: число лайков отдельным span под иконкой (напр. «9»), без цифр в aria-label. */
+    function digitBelowLikeControl(container) {
+        let local = 0;
+        if (!container) return 0;
+        function tryDigits(raw) {
+            const t = clean(String(raw || ''));
+            if (!/^\\d{1,7}$/.test(t)) return 0;
+            const n = parseInt(t, 10);
+            return (n > 0 && n < 9999999) ? n : 0;
+        }
+        function scanTextFrom(el) {
+            if (!el) return 0;
+            let n = tryDigits(el.innerText) || tryDigits(el.textContent);
+            if (n) return n;
+            for (const sp of el.querySelectorAll('span')) {
+                n = tryDigits(sp.innerText);
+                if (n) return n;
+            }
+            return 0;
+        }
+        for (const el of container.querySelectorAll('[role="button"][aria-label], [aria-pressed][aria-label]')) {
+            const a = clean(el.getAttribute('aria-label') || '');
+            if (!a || a.length > 240) continue;
+            if (/просмотр|\\bviews?\\b|watch|play|воспроизвед/i.test(a)) continue;
+            if (/комментар|комменти|\\bcomment\\b|поделиться|\\bshare\\b|отправить|^send\\b/i.test(a) && !/нравится|like|лайк/i.test(a)) continue;
+            if (!/нравится|лайк|\\breaction|\\blike\\b|«Нравится»|мне нравится/i.test(a)) continue;
+            if (numFromLikeLabel(a) > 0) continue;
+            let n = 0;
+            let w = el.nextElementSibling;
+            for (let s = 0; s < 6 && w && !n; s++, w = w.nextElementSibling)
+                n = scanTextFrom(w);
+            if (!n && el.parentElement) {
+                const ch = [...el.parentElement.children];
+                const ix = ch.indexOf(el);
+                for (let k = ix + 1; k < Math.min(ix + 6, ch.length) && !n; k++)
+                    n = scanTextFrom(ch[k]);
+            }
+            if (!n) {
+                for (const sub of el.querySelectorAll(':scope > span')) {
+                    n = tryDigits(sub.innerText);
+                    if (n) break;
+                }
+            }
+            if (n > local) local = n;
+        }
+        return local;
+    }
+    const roots = [];
+    for (const d of document.querySelectorAll('[role="dialog"],[aria-modal="true"]')) roots.push(d);
+    const m0 = document.querySelector('[role="main"]');
+    if (m0) roots.push(m0);
+    let best = 0;
+    for (const r of roots) {
+        if (!r) continue;
+        for (const el of r.querySelectorAll('[aria-label]')) {
+            const a = clean(el.getAttribute('aria-label'));
+            if (!a) continue;
+            if (!/нравится|лайк|\\breaction|\\blike\\b|«Нравится»/i.test(a)) continue;
+            const n = numFromLikeLabel(a);
+            if (n > best) best = n;
+        }
+        for (const el of r.querySelectorAll('[role="button"][aria-label]')) {
+            const a = clean(el.getAttribute('aria-label'));
+            if (!a) continue;
+            if (!/нравится|лайк|\\breaction|\\blike\\b/i.test(a)) continue;
+            const n = numFromLikeLabel(a);
+            if (n > best) best = n;
+        }
+    }
+    for (const el of document.querySelectorAll('[aria-pressed]')) {
+        const a = clean(el.getAttribute('aria-label') || '');
+        if (!a || !/нравится|лайк|\\breaction|\\blike\\b|«Нравится»/i.test(a)) continue;
+        if (/просмотр|\\bviews?\\b/i.test(a)) continue;
+        const v = numFromLikeLabel(a);
+        if (v > best) best = v;
+    }
+    const passRoots = roots.length ? roots : [document.body];
+    for (const r of passRoots) {
+        if (!r) continue;
+        const d = digitBelowLikeControl(r);
+        if (d > best) best = d;
+    }
+    if (best > 0) return String(best);
+    const blob = clean((document.body && document.body.innerText) || '').slice(0, 20000);
+    for (const ln of blob.split(/[\\n\\r]+/)) {
+        const t = ln.trim();
+        if (!t || t.length > 120 || /просмотр|\\bviews?\\b|watch/i.test(t)) continue;
+        const m = t.match(/^([\\d][\\d\\s.,]*(?:\\s*(?:млрд|млн|тыс)\\.?)?)\\s*(?:нравится|likes?|reactions?|лайк)/i);
+        if (m) {
+            const n = parseCompact(m[1].trim());
+            if (n > best) best = n;
+        }
+    }
+    return best > 0 ? String(best) : '';
+}"""
+
+
+def _facebook_mbasic_fallback_enabled() -> bool:
+    """Второй переход на mbasic — только по явному env (по умолчанию выключено)."""
+    return os.getenv("FACEBOOK_MBASIC_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _facebook_daemon_should_close_browser_on_exit() -> bool:
+    """По умолчанию не закрываем Chromium при завершении цикла stdin (см. daemon_main)."""
+    return os.getenv("FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
 
 def _ms_jitter(min_ms: int, max_ms: int) -> float:
     lo = max(0, min_ms)
     hi = max(lo, max_ms)
     return random.uniform(lo, hi) / 1000.0
+
+
+def _iter_incoming_json_lines(cli_first_json: str | None) -> Iterator[str]:
+    """Сначала опциональная строка из argv (CLI), затем строки stdin (демон Django)."""
+    if cli_first_json is not None:
+        s = cli_first_json.strip()
+        if s:
+            yield s
+    for line in sys.stdin:
+        s = line.strip()
+        if s:
+            yield s
 
 
 # ── Python parse helper ───────────────────────────────────────────────────────
@@ -72,6 +310,76 @@ def _parse_count(text: str) -> int:
         return int(num * mult)
     digits = re.sub(r'[^\d]', '', text)
     return int(digits) if digits else 0
+
+
+def _facebook_zero_like_if_equals_views(posts: list[dict]) -> None:
+    """Совпадение лайков и просмотров на малых числах — почти всегда артефакт (в т.ч. первый пост в ленте)."""
+    cap = int(os.getenv("FACEBOOK_REEL_LIKE_VIEW_EQUAL_CAP", "500000") or "500000")
+    for p in posts:
+        v = int(p.get("view_count") or 0)
+        l = int(p.get("like_count") or 0)
+        if l > 0 and l == v and v <= cap:
+            p["like_count"] = 0
+
+
+def _facebook_dedupe_phantom_likes(posts: list[dict]) -> None:
+    """
+    Одинаковый положительный like_count у нескольких постов с сильно разными просмотрами —
+    типичный «фантом» (DOM/GraphQL). Обнуляем такую группу.
+    """
+    from collections import defaultdict
+
+    by_like: dict[int, list[dict]] = defaultdict(list)
+    for p in posts:
+        lk = int(p.get("like_count") or 0)
+        if lk > 0:
+            by_like[lk].append(p)
+    for k, group in by_like.items():
+        if k < 2 or len(group) < 3:
+            continue
+        views_set = {int(p.get("view_count") or 0) for p in group}
+        if len(views_set) < 3:
+            continue
+        for p in group:
+            p["like_count"] = 0
+
+
+def _facebook_zero_likes_if_like_is_other_post_view_count(posts: list[dict]) -> None:
+    """
+    like_count близок к view_count *какого-то* поста в той же выборке (но не к просмотрам
+    этого поста) — типично «первое число на странице» подтянуло чужие просмотры; во время
+    скрапа просмотры растут, поэтому совпадение не обязано быть точным (162 vs 163/166).
+    Малые числа не трогаем (случайные совпадения).
+    """
+    floor = int(os.getenv("FACEBOOK_LIKE_VIEW_COLLISION_MIN", "30") or "30")
+    drift = int(os.getenv("FACEBOOK_LIKE_VIEW_COLLISION_DRIFT", "8") or "8")
+    if drift < 0:
+        drift = 0
+    view_vals = [int(p.get("view_count") or 0) for p in posts if int(p.get("view_count") or 0) > 0]
+    if not view_vals:
+        return
+    for p in posts:
+        v = int(p.get("view_count") or 0)
+        l = int(p.get("like_count") or 0)
+        if l < max(1, floor) or l <= 0:
+            continue
+        if l == v:
+            continue
+        nearest = min(abs(l - x) for x in view_vals)
+        if nearest <= drift:
+            p["like_count"] = 0
+
+
+def _fb_aria_label_looks_like_views(text: str) -> bool:
+    if not text:
+        return False
+    return bool(
+        re.search(
+            r"просмотр|\bviews?\b|\bwatch\b|play\s*count|воспроизвед|played|\bviewers\b",
+            str(text),
+            re.I,
+        ),
+    )
 
 
 def _extract_post_id_from_url(url: str) -> str:
@@ -133,6 +441,14 @@ def _collect_post_metrics_from_json(payload, out: dict[str, dict]) -> None:
             if "/facebook.com/" in u or "/fb.watch/" in u:
                 metrics["post_url"] = u
                 break
+
+        if (
+            metrics["reactions"] > 0
+            and metrics["views"] > 0
+            and metrics["reactions"] == metrics["views"]
+            and metrics["views"] <= 500_000
+        ):
+            metrics["reactions"] = 0
 
         if pid_candidates and any(metrics[k] > 0 for k in ("reactions", "comments", "shares", "views")):
             for pid in pid_candidates:
@@ -226,6 +542,11 @@ _PROFILE_JS = """(username) => {
 
     // ── Display name ─────────────────────────────────────────────────────────
     let displayName = '';
+    const badDisplay = (s) => {
+        s = (s || '').trim();
+        if (!s || s.length > 120) return true;
+        return /уведомлен|notification|поиск|search|меню|menu|^\\d+$|^photo$/i.test(s);
+    };
     const ogTitle = document.querySelector('meta[property="og:title"]');
     if (ogTitle) {
         displayName = (ogTitle.getAttribute('content') || '').trim()
@@ -246,10 +567,42 @@ _PROFILE_JS = """(username) => {
             .trim();
     }
 
-    // ── Avatar ───────────────────────────────────────────────────────────────
+    function svgImageHref(el) {
+        if (!el) return '';
+        return (el.getAttribute('href') || el.getAttribute('xlink:href') || '').trim();
+    }
+
+    // ── Avatar (+ имя из aria-label ссылки на фото) ─────────────────────────
     let avatar = '';
     const ogImg = document.querySelector('meta[property="og:image"]');
     if (ogImg) avatar = (ogImg.getAttribute('content') || '').trim();
+    const photoLink = document.querySelector(
+        '[role="main"] a[href*="/photo/"][aria-label], ' +
+        '[role="main"] a[href*="fbid="][aria-label], ' +
+        'header a[href*="/photo/"][aria-label], ' +
+        'a[href*="facebook.com/photo"][aria-label]'
+    );
+    if (photoLink) {
+        const lab = (photoLink.getAttribute('aria-label') || '').trim();
+        if (lab && !badDisplay(lab)) displayName = lab;
+        const svgIm = photoLink.querySelector('svg image');
+        const h = svgImageHref(svgIm);
+        if (h && (h.includes('scontent') || h.includes('fbcdn')) &&
+            !h.includes('emoji.php') && !/\\/1f[0-9a-f]{2}/i.test(h)) {
+            avatar = h;
+        }
+    }
+    if (!avatar) {
+        for (const ie of document.querySelectorAll('[role="main"] svg image, header svg image, [role="banner"] svg image')) {
+            const h = svgImageHref(ie);
+            if (h && (h.includes('scontent') || h.includes('fbcdn')) &&
+                !h.includes('emoji.php') && !/\\/1f[0-9a-f]{2}/i.test(h) &&
+                !h.includes('/p40x40/') && !h.includes('/p16x16/') &&
+                !h.includes('/p32x32/') && !h.includes('/p48x48/')) {
+                avatar = h; break;
+            }
+        }
+    }
     if (!avatar) {
         for (const img of document.querySelectorAll('img')) {
             const src = img.src || '';
@@ -257,6 +610,38 @@ _PROFILE_JS = """(username) => {
                 !src.includes('/p40x40/') && !src.includes('/p16x16/') &&
                 !src.includes('/p32x32/') && !src.includes('/p48x48/')) {
                 avatar = src; break;
+            }
+        }
+    }
+    if (badDisplay(displayName) && photoLink) {
+        const lab2 = (photoLink.getAttribute('aria-label') || '').trim();
+        if (lab2 && !badDisplay(lab2)) displayName = lab2;
+    }
+
+    // ── sk=reels_tab: первое фото до заголовка Reels (если есть) — кандидат в аватар ───
+    if ((location.search || '').includes('sk=reels_tab') ||
+        (location.href || '').toLowerCase().includes('sk%3dreels_tab')) {
+        const mainEl = document.querySelector('[role="main"]');
+        if (mainEl) {
+            let reelsM = null;
+            for (const el of mainEl.querySelectorAll('span, strong, h2, div[role="heading"], a')) {
+                const t = (el.textContent || '').trim();
+                if (/^Reels$/i.test(t) || /Видео\\s+Reels/i.test(t)) { reelsM = el; break; }
+            }
+            for (const pa of mainEl.querySelectorAll('a[href*="/photo/"]')) {
+                const hr = pa.getAttribute('href') || '';
+                if (!/fbid=/i.test(hr)) continue;
+                if (reelsM && !(reelsM.compareDocumentPosition(pa) & Node.DOCUMENT_POSITION_PRECEDING)) continue;
+                const sih = svgImageHref(pa.querySelector('svg image'));
+                const ig = pa.querySelector('img');
+                const cand = (sih || (ig && ig.src) || '').trim();
+                if (cand && (cand.includes('scontent') || cand.includes('fbcdn')) &&
+                    !cand.includes('emoji.php')) {
+                    avatar = cand;
+                    const labp = (pa.getAttribute('aria-label') || '').trim();
+                    if (labp && !badDisplay(labp)) displayName = labp;
+                    break;
+                }
             }
         }
     }
@@ -296,6 +681,33 @@ _PROFILE_JS = """(username) => {
             break;
         }
     }
+    if (!pageLikes) {
+        for (const a of document.querySelectorAll(
+            '[role="banner"] a,[role="navigation"] a'
+        )) {
+            const lab = (a.getAttribute('aria-label') || a.getAttribute('title') || '').trim();
+            if (!lab || !/нравится|likes?/i.test(lab)) continue;
+            const m = lab.match(/([\\d][\\d\\s\\u00a0.,]*)\\s*(млрд|млн|тыс)?/i);
+            if (m) {
+                pageLikes = m[1].trim();
+                if (m[2] && !/(млн|тыс|млрд)/i.test(pageLikes))
+                    pageLikes += ' ' + m[2];
+                break;
+            }
+        }
+    }
+    if (!pageLikes) {
+        const banner = document.querySelector('[role="banner"]');
+        if (banner) {
+            const bt = (banner.innerText || '').replace(/\\u00a0/g, ' ');
+            const m = bt.match(/([\\d][\\d\\s.,]*)\\s*(млрд|млн|тыс)?[^\\n]{0,12}нравится/iu);
+            if (m) {
+                pageLikes = m[1].trim().replace(/\\s+/g, ' ');
+                if (m[2] && !/(млн|тыс|млрд)/i.test(pageLikes))
+                    pageLikes += ' ' + m[2];
+            }
+        }
+    }
 
     // ── Followers (подписчиков) ───────────────────────────────────────────────
     // Formats: "15 млн — подписчиков", "15M followers", "N people follow this"
@@ -312,6 +724,36 @@ _PROFILE_JS = """(username) => {
             if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
                 followers += ' ' + m[2];
             break;
+        }
+    }
+    // Шапка / навигация: на вкладке «Фото» в body часто нет «X — подписчиков».
+    if (!followers) {
+        const selF = '[role="banner"] a[href*="followers"],[role="banner"] a[href*="sk=followers"],' +
+            '[role="navigation"] a[href*="followers"],[role="navigation"] a[href*="sk=followers"]';
+        for (const a of document.querySelectorAll(selF)) {
+            const lab = (a.getAttribute('aria-label') || a.getAttribute('title') || '').trim();
+            if (!lab) continue;
+            let m = lab.match(/([\\d][\\d\\s\\u00a0.,]*)\\s*(млрд|млн|тыс)?[^\\d\\w]{0,40}подписчик/i);
+            if (!m) m = lab.match(/([\\d][\\d\\s.,]*)\\s*(?:[KkMmBb])?\\s*followers?/i);
+            if (m) {
+                followers = m[1].trim();
+                if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
+                    followers += ' ' + m[2];
+                break;
+            }
+        }
+    }
+    if (!followers) {
+        const banner = document.querySelector('[role="banner"]');
+        if (banner) {
+            const bt = (banner.innerText || '').replace(/\\u00a0/g, ' ');
+            let m = bt.match(/([\\d][\\d\\s.,]*)\\s*(млрд|млн|тыс)?\\s*подписчик/iu);
+            if (!m) m = bt.match(/([\\d][\\d\\s.,]*)\\s*(?:[KkMmBb])?\\s*followers?/i);
+            if (m) {
+                followers = m[1].trim().replace(/\\s+/g, ' ');
+                if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
+                    followers += ' ' + m[2];
+            }
         }
     }
 
@@ -372,11 +814,64 @@ _POSTS_JS = """(params) => {
         return Math.round(parseFloat(la[1]) * mult);
     }
 
+    function lblLooksLikeViews(lbl) {
+        const low = (lbl || '').toLowerCase();
+        return /просмотр|\\bviews?\\b|\\bwatch\\b|play count|воспроизвед|played|viewers/i.test(low);
+    }
+
+    /** Только явные подписи счётчика просмотров (не *=view — цепляется «overview» и т.п.). */
+    function lblIsExplicitViewCount(lbl) {
+        if (!lbl) return false;
+        if (/просмотр/i.test(lbl)) return true;
+        if (/\\bviews?\\b/i.test(lbl)) return true;
+        if (/\\bwatch\\b|play count|просмотрено/i.test(lbl.toLowerCase())) return true;
+        return false;
+    }
+
+    /** «16 тыс. просмотров», «1,2 млн просмотров», «734 просмотра» — между числом и словом может быть млн/тыс. */
+    function parseViewsFromAriaLabel(lbl) {
+        if (!lbl) return 0;
+        let m = lbl.match(
+            /([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)\\s*(?:просмотр|views?|watch(?:es)?)/i
+        );
+        if (m) return parseNum(m[1].replace(/\\s+/g, ' ').trim());
+        m = lbl.match(/([\\d][\\d\\s.,]*)\\s*(?:просмотр|views?|watch(?:es)?)/i);
+        if (m) return parseNum(m[1].trim());
+        m = lbl.match(/(?:views?|просмотр)\\s*[:\\-]?\\s*([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)/i);
+        if (m) return parseNum(m[1].replace(/\\s+/g, ' ').trim());
+        m = lbl.match(/(?:views?|просмотр)\\s*[:\\-]?\\s*([\\d][\\d\\s.,]*)/i);
+        if (m) return parseNum(m[1].trim());
+        return 0;
+    }
+
+    /** Отдельно от getBtnCount: там lblLooksLikeViews() обнуляет корректные «11 views». */
+    function getViewCountFromControl(el) {
+        if (!el) return 0;
+        const lbl = el.getAttribute('aria-label') || '';
+        if (lbl) {
+            const fromLbl = parseViewsFromAriaLabel(lbl);
+            if (fromLbl > 0) return fromLbl;
+        }
+        for (const node of [...el.querySelectorAll('span,div')].reverse()) {
+            if (node.children.length > 0) continue;
+            const raw = (node.textContent || '').replace(/[\\u00a0\\u202f]/g, ' ').trim();
+            if (/^[\\d]+(?:[.,][\\d]+)?\\s*(?:млрд|млн|тыс)\\.?$/i.test(raw)) {
+                const v = parseNum(raw);
+                if (v > 0) return v;
+            }
+            if (/^[\\d][\\d.,]*[KkMmBb]?$/.test(raw)) return parseNum(raw);
+        }
+        return 0;
+    }
+
     function getBtnCount(btn) {
         if (!btn) return 0;
         const lbl = btn.getAttribute('aria-label') || '';
+        if (lblLooksLikeViews(lbl)) return 0;
         const mL = lbl.match(/([\\d][\\d\\s,.]*)\\s*(?:reactions?|comments?|shares?|reacts?)/i);
         if (mL) return parseNum(mL[1]);
+        // Нет цифры в подписи — у FB часто только иконка (0 лайков не пишут текстом).
+        if (!/\\d/.test(lbl)) return 0;
         for (const el of [...btn.querySelectorAll('span,div')].reverse()) {
             if (el.children.length > 0) continue;
             const t = (el.textContent || '').trim();
@@ -392,18 +887,34 @@ _POSTS_JS = """(params) => {
     for (const art of document.querySelectorAll('[role="article"]')) {
         if (results.length >= MAX) break;
         try {
+            // Важно: для Reels в DOM часто есть и /posts/, и story_fbid — если взять их первыми,
+            // id не совпадёт с сеткой sk=reels_tab (/reel/NUM) и merge не обнулит фантомные лайки (162).
             let postId = '', postUrl = '';
-            for (const a of art.querySelectorAll(
-                'a[href*="/posts/"],a[href*="/videos/"],' +
-                'a[href*="story_fbid"],a[href*="/reel/"],a[href*="/permalink/"]'
-            )) {
-                const href = a.getAttribute('href') || '';
-                const m = href.match(/\\/posts\\/([\\w-]+)/)  ||
-                          href.match(/story_fbid=([\\w-]+)/)  ||
-                          href.match(/\\/videos\\/([\\w-]+)/) ||
-                          href.match(/\\/reel\\/([\\w-]+)/)   ||
-                          href.match(/\\/permalink\\/([\\w-]+)/);
-                if (m) { postId = m[1]; postUrl = a.href || ('https://www.facebook.com' + href); break; }
+            const anchorSelectors = [
+                'a[href*="/reel/"]',
+                'a[href*="/videos/"]',
+                'a[href*="/posts/"]',
+                'a[href*="story_fbid"]',
+                'a[href*="/permalink/"]',
+                'a[href*="/photo/"]',
+                'a[href*="fbid="]',
+            ];
+            outerId:
+            for (const sel of anchorSelectors) {
+                for (const a of art.querySelectorAll(sel)) {
+                    const href = a.getAttribute('href') || '';
+                    let m = href.match(/\\/reel\\/([\\w-]+)/);
+                    if (!m) m = href.match(/\\/videos\\/([\\w-]+)/);
+                    if (!m) m = href.match(/\\/posts\\/([\\w-]+)/);
+                    if (!m) m = href.match(/story_fbid=([\\w-]+)/);
+                    if (!m) m = href.match(/\\/permalink\\/([\\w-]+)/);
+                    if (!m) m = href.match(/[?&]fbid=(\\d{8,})/);
+                    if (m) {
+                        postId = m[1];
+                        postUrl = a.href || ('https://www.facebook.com' + href);
+                        break outerId;
+                    }
+                }
             }
             if (!postId || seen.has(postId)) continue;
             seen.add(postId);
@@ -430,17 +941,32 @@ _POSTS_JS = """(params) => {
                     thumb = src; break;
                 }
             }
+            if (!thumb) {
+                const svgIm = art.querySelector('svg image');
+                if (svgIm) {
+                    const h = (svgIm.getAttribute('href') || svgIm.getAttribute('xlink:href') || '').trim();
+                    if (h && (h.includes('scontent') || h.includes('fbcdn')) &&
+                        !h.includes('emoji.php')) thumb = h;
+                }
+            }
 
             // Reactions
             let reactions = 0;
             const reactBar = art.querySelector(
                 '[aria-label*="reaction"],[aria-label*="React"],[aria-label*="реакц"]'
             );
-            if (reactBar) reactions = getBtnCount(reactBar);
+            if (reactBar) {
+                const rlab = reactBar.getAttribute('aria-label') || '';
+                if (!lblLooksLikeViews(rlab)) reactions = getBtnCount(reactBar);
+            }
             if (!reactions) {
                 for (const btn of art.querySelectorAll('[role="button"]')) {
-                    const lbl = (btn.getAttribute('aria-label') || '').toLowerCase();
-                    if (lbl.includes('reaction') || lbl.includes('like') || lbl.includes('нравится')) {
+                    const rawLab = btn.getAttribute('aria-label') || '';
+                    if (lblLooksLikeViews(rawLab)) continue;
+                    const lbl = rawLab.toLowerCase();
+                    if (lbl.includes('unlike') || (lbl.includes('убрать') && lbl.includes('нрав'))) continue;
+                    if (lbl.includes('reaction') || lbl.includes('реакц') || lbl.includes('нравится') ||
+                        /\\b(likes?|like)\\b/i.test(lbl)) {
                         const v = getBtnCount(btn);
                         if (v > 0) { reactions = v; break; }
                     }
@@ -453,8 +979,13 @@ _POSTS_JS = """(params) => {
                     if (!/^[\\d][\\d,.]*[KkMmBb]?$/.test(t)) continue;
                     const p = span.closest('[aria-label]');
                     if (!p) continue;
-                    const pl = (p.getAttribute('aria-label') || '').toLowerCase();
-                    if (pl.includes('react') || pl.includes('like') || pl.includes('нрав')) {
+                    const rawPl = p.getAttribute('aria-label') || '';
+                    if (!/\\d/.test(rawPl)) continue;
+                    const pl = rawPl.toLowerCase();
+                    if (lblLooksLikeViews(rawPl)) continue;
+                    if (pl.includes('unlike')) continue;
+                    if (pl.includes('react') || pl.includes('реакц') || pl.includes('нравится') ||
+                        /\\b(likes?|like)\\b/i.test(pl)) {
                         reactions = parseNum(t); break;
                     }
                 }
@@ -480,24 +1011,275 @@ _POSTS_JS = """(params) => {
                 }
             }
 
-            // Views
+            // Views: getBtnCount() раньше возвращал 0 для «N views» из‑за lblLooksLikeViews →
+            // срабатывал regex по всему innerText и бралось чужое большое число (часто у первого article).
             let views = 0;
-            const viewsEl = art.querySelector(
-                '[aria-label*="view"],[aria-label*="Views"],[aria-label*="просмотр"]'
-            );
-            if (viewsEl) views = getBtnCount(viewsEl);
-            if (!views) {
-                const vm = (art.innerText || '').match(
-                    /([\\d][\\d\\s,.]*(?:млн|тыс|млрд|[KkMmBb])?)\\s*(?:views?|просмотр)/i
-                );
-                if (vm) views = parseNum(vm[1].trim());
+            const viewCandidates = [];
+            for (const el of art.querySelectorAll('[aria-label]')) {
+                const lab = el.getAttribute('aria-label') || '';
+                if (!lblIsExplicitViewCount(lab)) continue;
+                const v = getViewCountFromControl(el);
+                if (v > 0) viewCandidates.push(v);
             }
+            if (viewCandidates.length === 1) views = viewCandidates[0];
+            else if (viewCandidates.length > 1) views = Math.max.apply(null, viewCandidates);
+            if (!views) {
+                const txt = (art.innerText || '').replace(/\\r/g, '');
+                const vals = [];
+                const re =
+                    /([\\d][\\d\\s,.]*(?:\\s*(?:млн|тыс|млрд)\\.?)?(?:[KkMmBb])?)\\s*(?:views?|просмотр)\\b/gi;
+                let m;
+                while ((m = re.exec(txt)) !== null) {
+                    const val = parseNum(m[1].trim());
+                    if (val > 0) vals.push(val);
+                }
+                if (vals.length === 1) views = vals[0];
+                else if (vals.length > 1) views = Math.max.apply(null, vals);
+            }
+
+            if (reactions > 0 && views > 0 && reactions === views) reactions = 0;
 
             results.push({ id: postId, url: postUrl, text, ts, thumb,
                            reactions, comments, shares, views });
         } catch(_) {}
     }
+    // Reels: одинаковое число «лайков» на карточках с разными просмотрами — артефакт UI.
+    const reelPhantomReset = () => {
+        const rows = results.filter(
+            r => /\\/reel\\//i.test(r.url || '') && (Number(r.reactions) || 0) > 0
+        );
+        const by = new Map();
+        for (const r of rows) {
+            const k = Number(r.reactions) || 0;
+            if (!by.has(k)) by.set(k, []);
+            by.get(k).push(r);
+        }
+        for (const rowsK of by.values()) {
+            if (rowsK.length < 3) continue;
+            const k = Number(rowsK[0].reactions) || 0;
+            if (k < 2) continue;
+            const viewSet = new Set(rowsK.map(r => Number(r.views) || 0));
+            if (viewSet.size < 3) continue;
+            for (const r of rowsK) r.reactions = 0;
+        }
+    };
+    reelPhantomReset();
     return results;
+}"""
+
+
+_SK_PHOTOS_REELS_JS = """(params) => {
+    const maxPosts = Math.max(1, Number((params && params.maxPosts) || 12));
+    const main = document.querySelector('[role="main"]') || document.body;
+    const out = [];
+    const seen = new Set();
+
+    function parseNum(t) {
+        t = (t || '').toString().replace(/[\\u00a0\\u202f]/g, '').trim();
+        const ru = t.match(/^([\\d]+(?:[.,][\\d]+)?)\\s*(млрд|млн|тыс)/i);
+        if (ru) {
+            const n = parseFloat(ru[1].replace(',', '.'));
+            const m = { млн: 1e6, тыс: 1e3, млрд: 1e9 }[ru[2].toLowerCase()] || 1;
+            return Math.round(n * m);
+        }
+        t = t.replace(/[\\s,]/g, '').replace(',', '.');
+        const la = t.match(/^([\\d]+(?:\\.[\\d]+)?)([KkMmBb]?)$/);
+        if (!la) return 0;
+        const mult = { K: 1e3, M: 1e6, B: 1e9 }[la[2].toUpperCase()] || 1;
+        return Math.round(parseFloat(la[1]) * mult);
+    }
+    function parseViewsFromAriaLabel(lbl) {
+        if (!lbl) return 0;
+        let m = lbl.match(
+            /([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)\\s*(?:просмотр|views?|watch(?:es)?)/i
+        );
+        if (m) return parseNum(m[1].replace(/\\s+/g, ' ').trim());
+        m = lbl.match(/([\\d][\\d\\s.,]*)\\s*(?:просмотр|views?|watch(?:es)?)/i);
+        if (m) return parseNum(m[1].trim());
+        m = lbl.match(/(?:views?|просмотр)\\s*[:\\-]?\\s*([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)/i);
+        if (m) return parseNum(m[1].replace(/\\s+/g, ' ').trim());
+        m = lbl.match(/(?:views?|просмотр)\\s*[:\\-]?\\s*([\\d][\\d\\s.,]*)/i);
+        if (m) return parseNum(m[1].trim());
+        return 0;
+    }
+
+    function pickViews(root) {
+        if (!root) return 0;
+        for (const el of root.querySelectorAll('[aria-label]')) {
+            const al = (el.getAttribute('aria-label') || '');
+            const vAria = parseViewsFromAriaLabel(al);
+            if (vAria > 0 && vAria < 1e10) return vAria;
+        }
+        const blob = (root.innerText || '').replace(/\\r/g, '');
+        /** Оверлей сетки Reels: один span «16\\u00a0тыс.» без aria «просмотр». */
+        const ruRe = /([\\d]+(?:[.,][\\d]+)?)\\s*(?:млрд|млн|тыс)\\.?/gi;
+        const ruVals = [];
+        let rm;
+        while ((rm = ruRe.exec(blob)) !== null) {
+            const v = parseNum(rm[0]);
+            if (v > 0 && v < 1e11) ruVals.push(v);
+        }
+        if (ruVals.length === 1) return ruVals[0];
+        if (ruVals.length > 1) return Math.max.apply(null, ruVals);
+        const m2 = blob.match(
+            /([\\d][\\d\\s,.]*(?:\\s*(?:млн|тыс|млрд)\\.?)?[KkMmBb]?)\\s*(?:просмотр|views?)/i
+        );
+        if (m2) {
+            const v = parseNum(m2[1].trim());
+            if (v > 0 && v < 1e10) return v;
+        }
+        for (const sp of root.querySelectorAll('span')) {
+            const t0 = (sp.textContent || '').replace(/[\\u00a0\\u202f]/g, ' ').trim();
+            if (/^[\\d]+(?:[.,][\\d]+)?\\s*(?:млрд|млн|тыс)\\.?$/i.test(t0)) {
+                const vAb = parseNum(t0);
+                if (vAb > 0 && vAb < 1e11) return vAb;
+            }
+        }
+        for (const sp of root.querySelectorAll('span')) {
+            const t = (sp.textContent || '').replace(/[\\u00a0\\u202f]/g, '').trim();
+            if (!/^\\d{1,9}$/.test(t)) continue;
+            let piece = t;
+            let nx = sp.nextElementSibling;
+            while (nx && nx.tagName === 'SPAN') {
+                const u = (nx.textContent || '').trim();
+                if (/^(млрд|млн|тыс)\\.?$/i.test(u) || /^[KkMmBb]$/i.test(u)) {
+                    piece += ' ' + u;
+                    nx = nx.nextElementSibling;
+                    continue;
+                }
+                break;
+            }
+            const num = parseNum(piece);
+            if (num < 1 || num >= 1e11) continue;
+            let p = sp.parentElement;
+            for (let d = 0; d < 4 && p; d++) {
+                const al = (p.getAttribute && p.getAttribute('aria-label')) || '';
+                if (/просмотр|view/i.test(al)) return num;
+                p = p.parentElement;
+            }
+        }
+        return 0;
+    }
+
+    function parseLikesFromAriaLabel(lbl) {
+        if (!lbl) return 0;
+        if (/просмотр|\\bviews?\\b|\\bwatch\\b|play count|воспроизвед/i.test(lbl)) return 0;
+        let m = lbl.match(
+            /([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)\\s*(?:reactions?|likes?|лайк|нравится|отметок)/i
+        );
+        if (m) return parseNum(m[1].replace(/\\s+/g, ' ').trim());
+        m = lbl.match(/([\\d][\\d\\s.,]*)\\s*(?:reactions?|likes?|лайк|нравится|отметок)/i);
+        if (m) return parseNum(m[1].trim());
+        m = lbl.match(
+            /(?:reactions?|likes?|лайк|нравится)\\s*[:\\-]?\\s*([\\d][\\d\\s.,]*\\s*(?:млрд|млн|тыс)\\.?)/i
+        );
+        if (m) return parseNum(m[1].replace(/\\s+/g, ' ').trim());
+        m = lbl.match(/(?:reactions?|likes?|лайк|нравится)\\s*[:\\-]?\\s*([\\d][\\d\\s.,]*)/i);
+        if (m) return parseNum(m[1].trim());
+        return 0;
+    }
+
+    /** Лайки/реакции на карточке сетки Reels (рядом с просмотрами, отдельный span). */
+    function pickLikes(root) {
+        if (!root) return 0;
+        for (const el of root.querySelectorAll('[aria-label]')) {
+            const al = (el.getAttribute('aria-label') || '');
+            const n = parseLikesFromAriaLabel(al);
+            if (n > 0 && n < 1e10) return n;
+        }
+        const blob = (root.innerText || '').replace(/\\r/g, '');
+        const lines = blob.split(/[\\n\\r]+/).map((s) => s.trim()).filter(Boolean);
+        for (const line of lines) {
+            if (/просмотр|\\bviews?\\b|watch/i.test(line)) continue;
+            const m = line.match(
+                /^([\\d][\\d\\s.,]*(?:\\s*(?:млрд|млн|тыс)\\.?)?)\\s*(?:нравится|likes?|reactions?|лайк)\\b\\.?$/i
+            );
+            if (m) {
+                const n = parseNum(m[1].trim());
+                if (n > 0 && n < 1e10) return n;
+            }
+        }
+        const likeRe =
+            /([\\d]+(?:[.,][\\d]+)?(?:\\s*(?:млрд|млн|тыс)\\.?)?)\\s*(?:нравится|likes?|reactions?)\\b/gi;
+        const vals = [];
+        let lm;
+        while ((lm = likeRe.exec(blob)) !== null) {
+            const n = parseNum(lm[1].trim());
+            if (n > 0 && n < 1e10) vals.push(n);
+        }
+        if (vals.length === 1) return vals[0];
+        if (vals.length > 1) return Math.max.apply(null, vals);
+        for (const sp of root.querySelectorAll('span')) {
+            const t0 = (sp.textContent || '').replace(/[\\u00a0\\u202f]/g, ' ').trim();
+            if (!/^[\\d]{1,9}$/.test(t0)) continue;
+            let p = sp.parentElement;
+            for (let d = 0; d < 5 && p; d++) {
+                const al = (p.getAttribute && p.getAttribute('aria-label')) || '';
+                if (!al) {
+                    p = p.parentElement;
+                    continue;
+                }
+                if (/просмотр|\\bviews?\\b/i.test(al)) {
+                    p = p.parentElement;
+                    continue;
+                }
+                if (/нравится|reaction|\\blike\\b|лайк/i.test(al)) return parseNum(t0);
+                p = p.parentElement;
+            }
+        }
+        return 0;
+    }
+
+    for (const a of main.querySelectorAll('a[href*="/reel/"]')) {
+        const href = a.getAttribute('href') || '';
+        const m = href.match(/\\/reel\\/(\\d+)/);
+        if (!m) continue;
+        const id = m[1];
+        if (seen.has(id)) continue;
+        seen.add(id);
+        let card = a.closest('[role="article"]');
+        if (!card) {
+            let p = a.parentElement;
+            for (let d = 0; d < 10 && p; d++) {
+                if (p.querySelector && p.querySelectorAll('img').length >= 1) {
+                    card = p;
+                    break;
+                }
+                p = p.parentElement;
+            }
+        }
+        if (!card) card = a.parentElement;
+        const views = pickViews(card || a);
+        const likes = pickLikes(card || a);
+        let thumb = '';
+        for (const im of (card || a).querySelectorAll('img')) {
+            const s = im.getAttribute('src') || '';
+            if (s && (s.includes('scontent') || s.includes('fbcdn')) && !s.includes('emoji.php')) {
+                thumb = s;
+                break;
+            }
+        }
+        if (!thumb) {
+            const si = (card || a).querySelector('svg image');
+            if (si) {
+                const h = (si.getAttribute('href') || si.getAttribute('xlink:href') || '').trim();
+                if (h && (h.includes('scontent') || h.includes('fbcdn'))) thumb = h;
+            }
+        }
+        out.push({
+            id,
+            url: a.href || href,
+            text: '',
+            ts: '',
+            thumb,
+            reactions: likes,
+            comments: 0,
+            shares: 0,
+            views,
+        });
+        if (out.length >= maxPosts) break;
+    }
+    return out;
 }"""
 
 
@@ -555,17 +1337,342 @@ _MBASIC_FALLBACK_JS = """(params) => {
 }"""
 
 
-async def _extract_mbasic_fallback(page, username: str) -> dict:
+def _merge_facebook_post_rows(primary: list, sk_reels: list) -> list:
+    """Объединить посты из [role=article] и сетки Reels на sk=reels_tab (просмотры)."""
+    by_id: dict[str, dict] = {}
+    for p in primary or []:
+        rid = str(p.get("id") or "").strip()
+        if rid:
+            by_id[rid] = dict(p)
+    for row in sk_reels or []:
+        rid = str(row.get("id") or "").strip()
+        if not rid:
+            continue
+        if rid not in by_id:
+            by_id[rid] = dict(row)
+            continue
+        ex = by_id[rid]
+        rv = int(row.get("views") or 0)
+        if rv > int(ex.get("views") or 0):
+            ex["views"] = row.get("views", 0)
+        sk_r = int(row.get("reactions") or 0)
+        ex_r = int(ex.get("reactions") or 0)
+        if sk_r > ex_r:
+            ex["reactions"] = row.get("reactions", 0)
+        # Просмотры/превью с сетки; лайки — max(article, сетка pickLikes), затем enrich и анти-артефакты.
+        t = row.get("thumb") or ""
+        if t and (not ex.get("thumb") or len(str(t)) > len(str(ex.get("thumb") or ""))):
+            ex["thumb"] = t
+        u = row.get("url") or ""
+        if u and "/reel/" in str(u):
+            ex["url"] = u
+    return list(by_id.values())
+
+
+def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
+    """
+    Слияние снимка профиля до и после ``sk=reels_tab``: подписчики/лайки с основной
+    страницы, аватар и отладка со страницы Reels приоритетнее, если качество выше.
+    """
+    t = dict(timeline or {})
+    if not photos:
+        return t
+    p = dict(photos or {})
+
+    fb_t = _parse_count(str(t.get("followers") or ""))
+    fb_p = _parse_count(str(p.get("followers") or ""))
+    merged_followers = (p.get("followers") or "").strip() if fb_p > fb_t else (t.get("followers") or "").strip()
+
+    pl_t = _parse_count(str(t.get("pageLikes") or ""))
+    pl_p = _parse_count(str(p.get("pageLikes") or ""))
+    merged_likes = (p.get("pageLikes") or "").strip() if pl_p > pl_t else (t.get("pageLikes") or "").strip()
+
+    dn_t = (t.get("displayName") or "").strip()
+    dn_p = (p.get("displayName") or "").strip()
+    merged_name = dn_p or dn_t
+
+    av_t = (t.get("avatar") or "").strip()
+    av_p = (p.get("avatar") or "").strip()
+
+    def av_score(u: str) -> int:
+        if not u or "emoji.php" in u:
+            return 0
+        sc = min(len(u) // 15, 40)
+        if "scontent" in u or "fbcdn" in u:
+            sc += 40
+        if "s200x200" in u or "p200x200" in u or "s720x" in u or "s960x" in u:
+            sc += 20
+        return sc
+
+    merged_avatar = av_p if av_score(av_p) >= av_score(av_t) else av_t
+
+    bio_t = (t.get("bio") or "").strip()
+    bio_p = (p.get("bio") or "").strip()
+    merged_bio = bio_p if len(bio_p) > len(bio_t) else bio_t
+
+    dbg_tl = (t.get("dbg") or "")[:140]
+    dbg_ph = (p.get("dbg") or "")[:140]
+    merged_dbg = (dbg_ph + " |TL " + dbg_tl)[:300]
+
+    return {
+        "displayName": merged_name,
+        "avatar": merged_avatar,
+        "bio": merged_bio,
+        "followers": merged_followers,
+        "pageLikes": merged_likes,
+        "dbg": merged_dbg,
+        "dbgLikes": (p.get("dbgLikes") or t.get("dbgLikes") or ""),
+        "likeDbg": (p.get("likeDbg") or t.get("likeDbg") or []),
+        "nravLines": list(t.get("nravLines") or []) + list(p.get("nravLines") or []),
+    }
+
+
+async def _facebook_ensure_reels_sk_page(page, reels_sk_url: str | None) -> None:
+    """Если ушли со страницы ``sk=reels_tab``, вернуться по сохранённому URL (иначе клики по сетке ломаются)."""
+    if not (reels_sk_url or "").strip():
+        return
+    u = (page.url or "").lower()
+    if "sk=reels_tab" in u or "sk%3dreels_tab" in u:
+        return
+    try:
+        print("[facebook_worker] возврат на sk=reels_tab перед Reel", file=sys.stderr)
+        await page.goto(reels_sk_url.strip(), wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+        await page.wait_for_timeout(1200)
+    except Exception as exc:
+        print(f"[facebook_worker] sk=reels_tab restore: {exc}", file=sys.stderr)
+
+
+async def _fb_xpath_like_text(page, xpath: str) -> str:
+    try:
+        return str(await page.evaluate(_FB_XPATH_LIKE_TEXT_JS, xpath) or "").strip()
+    except Exception:
+        return ""
+
+
+async def _fb_dom_like_text_combined(page, xpath: str) -> int:
+    """Сначала эвристика по открытому Reel (aria / текст), затем XPath — дефолтный XPath часто не тот узел."""
+    try:
+        fb = str(await page.evaluate(_FB_FALLBACK_LIKES_TEXT_JS) or "").strip()
+        n_fb = _parse_count(fb)
+        if n_fb > 0:
+            return n_fb
+    except Exception:
+        pass
+    raw = await _fb_xpath_like_text(page, xpath)
+    return _parse_count(raw)
+
+
+async def _facebook_try_reel_likes_modal(
+    page, reel_id: str, xpath: str, reels_sk_url: str | None = None
+) -> int:
+    """Клик по карточке Reel на текущей странице, чтение XPath, закрытие по Escape."""
+    try:
+        link = page.locator(f'[role="main"] a[href*="/reel/{reel_id}"]').first
+        await link.scroll_into_view_if_needed(timeout=6000)
+        pre_click = int(os.getenv("FACEBOOK_DETAIL_LIKES_PRE_CLICK_MS", "350") or "350")
+        await page.wait_for_timeout(max(0, min(3000, pre_click)))
+        await link.click(timeout=12_000, force=True)
+        try:
+            await page.wait_for_selector(
+                '[role="dialog"],[aria-modal="true"],[role="main"] video',
+                timeout=9000,
+            )
+        except Exception:
+            pass
+        try:
+            await page.locator("[role='main'] video").first.wait_for(state="attached", timeout=5000)
+        except Exception:
+            pass
+        wait_ms = int(os.getenv("FACEBOOK_DETAIL_LIKES_MODAL_WAIT_MS", "3800") or "3800")
+        await page.wait_for_timeout(max(1000, min(10_000, wait_ms)))
+        return await _fb_dom_like_text_combined(page, xpath)
+    except Exception as exc:
+        print(f"[facebook_worker] modal likes reel={reel_id}: {exc}", file=sys.stderr)
+        return 0
+    finally:
+        for _ in range(3):
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(280)
+            except Exception:
+                break
+        if reels_sk_url:
+            u = (page.url or "").lower()
+            if "sk=reels_tab" not in u and "sk%3dreels_tab" not in u:
+                try:
+                    await page.goto(reels_sk_url.strip(), wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+                    await page.wait_for_timeout(900)
+                except Exception as exc:
+                    print(f"[facebook_worker] sk=reels_tab после модалки: {exc}", file=sys.stderr)
+
+
+async def _facebook_try_reel_likes_same_tab(
+    page, reel_url: str, xpath: str, reels_sk_url: str | None
+) -> int:
+    """Та же вкладка: открыть Reel по URL, прочитать лайки, вернуться на sk=reels_tab."""
+    restore = (reels_sk_url or "").strip()
+    if not restore:
+        print(
+            "[facebook_worker] same-tab likes: пропуск — нет URL вкладки Reels для возврата после просмотра",
+            file=sys.stderr,
+        )
+        return 0
+    n = 0
+    try:
+        await page.goto(reel_url, wait_until="domcontentloaded", timeout=28_000)
+        try:
+            await page.locator("[role='main'] video, video").first.wait_for(state="attached", timeout=8000)
+        except Exception:
+            pass
+        wait_ms = int(os.getenv("FACEBOOK_DETAIL_LIKES_PAGE_WAIT_MS", "5500") or "5500")
+        await page.wait_for_timeout(max(800, min(12_000, wait_ms)))
+        n = await _fb_dom_like_text_combined(page, xpath)
+        if n > 0:
+            return n
+        try:
+            loc = page.locator(
+                '[aria-label*="нравится" i], [aria-label*="like" i], [aria-label*="reaction" i]'
+            )
+            cnt = await loc.count()
+            for i in range(min(cnt, 30)):
+                try:
+                    lab_s = str(await loc.nth(i).get_attribute("aria-label", timeout=1500) or "")
+                    if _fb_aria_label_looks_like_views(lab_s):
+                        continue
+                    parsed = _parse_count(lab_s)
+                    if parsed > n:
+                        n = parsed
+                except Exception:
+                    continue
+            if n > 0:
+                return n
+        except Exception:
+            pass
+        try:
+            lab = await page.locator('[aria-label*="нравится" i], [aria-label*="like" i]').first.get_attribute(
+                "aria-label", timeout=4000
+            )
+            lab_s = str(lab or "")
+            if not _fb_aria_label_looks_like_views(lab_s):
+                n = max(n, _parse_count(lab_s))
+        except Exception:
+            pass
+        if n <= 0:
+            try:
+                print(
+                    "[facebook_worker] same-tab likes: 0 после открытия Reel "
+                    f"title={(await page.title())!r} url={(page.url or '')[:140]!r}",
+                    file=sys.stderr,
+                )
+            except Exception:
+                pass
+        return n
+    except Exception as exc:
+        print(f"[facebook_worker] same-tab likes {reel_url[:72]}…: {exc}", file=sys.stderr)
+        return 0
+    finally:
+        try:
+            await page.goto(restore, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            await page.wait_for_timeout(900)
+        except Exception as exc:
+            print(f"[facebook_worker] same-tab restore sk=reels_tab: {exc}", file=sys.stderr)
+
+
+async def _facebook_enrich_reel_likes_from_detail(
+    page,
+    posts: list[dict],
+    *,
+    reels_sk_url: str | None = None,
+) -> int:
+    """
+    Ровно одно открытие на кандидата: на сетке Reels — только клик по карточке (модалка); иначе —
+    один ``goto`` на URL Reel. Лайки: XPath + эвристики по aria/тексту.
+    Порог ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS``: кандидаты — ``view_count >= порог - 1``; до enrich для
+    ``view_count <=`` порога лайки с сетки обнуляются в ``_run_with_page_core``.
+    """
+    if not _facebook_detail_likes_enabled() or not posts:
+        return 0
+    min_v = _facebook_detail_likes_min_views()
+    max_op = int(os.getenv("FACEBOOK_DETAIL_LIKES_MAX_OPENS", "12") or "12")
+    max_op = max(1, min(30, max_op))
+    xpath = (os.getenv("FACEBOOK_POST_LIKES_XPATH") or "").strip() or _DEFAULT_FB_REEL_LIKES_XPATH
+
+    try_modal = bool(reels_sk_url) and "mbasic" not in (page.url or "").lower()
+
+    candidates: list[dict] = []
+    thr = 0
+    if min_v > 0:
+        thr = max(0, min_v - 1)
+    for p in posts:
+        try:
+            v = int(p.get("view_count") or 0)
+        except (TypeError, ValueError):
+            v = 0
+        if min_v > 0:
+            if v >= thr:
+                candidates.append(p)
+        else:
+            if v > 0:
+                candidates.append(p)
+    candidates.sort(key=lambda x: int(x.get("view_count") or 0), reverse=True)
+    candidates = candidates[:max_op]
+
+    improved = 0
+    for p in candidates:
+        url = str(p.get("post_url") or "").strip()
+        if "/reel/" not in url.lower():
+            continue
+        m = re.search(r"/reel/(\d+)", url, re.I)
+        reel_id = m.group(1) if m else str(p.get("external_id") or "").strip()
+        if not reel_id:
+            continue
+        prev = int(p.get("like_count") or 0)
+        vcount = int(p.get("view_count") or 0)
+        likes = 0
+        await _facebook_ensure_reels_sk_page(page, reels_sk_url)
+        if try_modal:
+            print(
+                f"[facebook_worker] enrich reel: id={reel_id} views={vcount} (один раз: клик по карточке)",
+                file=sys.stderr,
+            )
+            likes = await _facebook_try_reel_likes_modal(page, reel_id, xpath, reels_sk_url)
+        else:
+            print(
+                f"[facebook_worker] enrich reel: id={reel_id} views={vcount} (один раз: открытие по URL)",
+                file=sys.stderr,
+            )
+            likes = await _facebook_try_reel_likes_same_tab(page, url, xpath, reels_sk_url)
+        if likes > prev:
+            if vcount > 0 and likes == vcount:
+                print(
+                    f"[facebook_worker] detail likes: пропуск like==views ({likes}) reel={reel_id}",
+                    file=sys.stderr,
+                )
+            else:
+                p["like_count"] = likes
+                improved += 1
+                print(
+                    f"[facebook_worker] detail likes reel={reel_id}: {likes} (min_views={min_v})",
+                    file=sys.stderr,
+                )
+        await asyncio.sleep(_ms_jitter(350, 900))
+
+    return improved
+
+
+async def _extract_mbasic_fallback(page, mbasic_timeline_url: str, *, profile_label: str) -> dict:
     """Fallback для Facebook: более простой HTML на mbasic."""
     try:
         await asyncio.sleep(_ms_jitter(PAUSE_PRE_M_BASIC_MIN_MS, PAUSE_PRE_M_BASIC_MAX_MS))
         await page.goto(
-            f"https://mbasic.facebook.com/{username}?v=timeline",
+            mbasic_timeline_url,
             wait_until="domcontentloaded",
             timeout=NAV_TIMEOUT,
         )
         await page.wait_for_timeout(1800)
-        data = await page.evaluate(_MBASIC_FALLBACK_JS, {"username": username, "maxPosts": MAX_POSTS})
+        data = await page.evaluate(
+            _MBASIC_FALLBACK_JS, {"username": profile_label, "maxPosts": MAX_POSTS}
+        )
         if not isinstance(data, dict):
             return {"followers": "", "pageLikes": "", "posts": []}
         return {
@@ -580,6 +1687,30 @@ async def _extract_mbasic_fallback(page, username: str) -> dict:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _facebook_reels_sk_url_from_nav(nav_url: str) -> str:
+    """Стабильный URL вкладки Reels (``sk=reels_tab``) без повторного клика по UI."""
+    u = (nav_url or "").strip().split("#", 1)[0].rstrip("/")
+    if not u:
+        return ""
+    low = u.lower()
+    if "sk=reels_tab" in low or "sk%3dreels_tab" in low:
+        return u
+    sep = "&" if "?" in u else "?"
+    return f"{u}{sep}sk=reels_tab"
+
+
+def _facebook_page_on_reels_sk(url: str | None) -> bool:
+    u = (url or "").lower()
+    return "sk=reels_tab" in u or "sk%3dreels_tab" in u
+
+
+def _facebook_reels_ui_click_fallback_enabled() -> bool:
+    for key in ("FACEBOOK_REELS_UI_CLICK_FALLBACK", "FACEBOOK_PHOTOS_UI_CLICK_FALLBACK"):
+        if os.getenv(key, "").strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
 def _load_worker_utils():
     import importlib.util as _ilu
     _wu_path = Path(__file__).parent.parent / "worker_utils.py"
@@ -591,25 +1722,98 @@ def _load_worker_utils():
     return _wu
 
 
+async def _facebook_open_reels_sk_tab_ui(page) -> bool:
+    """
+    Клик по вкладке/ссылке Reels до появления ``sk=reels_tab`` в URL.
+
+    Основной путь — второй ``page.goto`` на URL с ``sk=reels_tab``; эта функция
+    используется только при ``FACEBOOK_REELS_UI_CLICK_FALLBACK=1`` (или legacy
+    ``FACEBOOK_PHOTOS_UI_CLICK_FALLBACK``), если прямой ``goto`` не дал ``sk=reels_tab``.
+    """
+    url = page.url or ""
+    if _facebook_page_on_reels_sk(url):
+        return True
+
+    selectors = (
+        'div[role="tablist"] a[href*="sk=reels_tab"], div[role="tablist"] a[href*="sk%3Dreels_tab"]',
+        '[role="navigation"] a[href*="sk=reels_tab"], [role="navigation"] a[href*="sk%3Dreels_tab"]',
+        '[role="banner"] a[href*="sk=reels_tab"], [role="banner"] a[href*="sk%3Dreels_tab"]',
+        'a[href*="sk=reels_tab"], a[href*="sk%3Dreels_tab"]',
+    )
+    clicked = False
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            await loc.wait_for(state="visible", timeout=5_000)
+            await loc.click(timeout=8_000)
+            clicked = True
+            break
+        except Exception:
+            continue
+
+    if not clicked:
+        try:
+            tab = page.get_by_role("tab", name=re.compile(r"reels|ролик|видео", re.I)).first
+            await tab.wait_for(state="visible", timeout=6_000)
+            await tab.click(timeout=8_000)
+            clicked = True
+        except Exception:
+            return False
+
+    try:
+        await page.wait_for_function(
+            """() => {
+                const h = (location.href || '').toLowerCase();
+                const s = (location.search || '').toLowerCase();
+                return s.includes('sk=reels_tab') || h.includes('sk=reels_tab') ||
+                    h.includes('sk%3dreels_tab');
+            }""",
+            timeout=15_000,
+        )
+    except Exception:
+        await page.wait_for_timeout(2500)
+
+    u = page.url or ""
+    return _facebook_page_on_reels_sk(u)
+
+
 async def _run_with_page(username: str, page, _wu):
-    display_name   = username
-    follower_count = 0
-    like_count_val = 0
-    avatar_url     = ""
-    bio            = ""
-    posts_raw      = []
     network_post_metrics: dict[str, dict] = {}
 
     async def _on_response(resp):
         await _capture_response_post_metrics(resp, network_post_metrics)
 
-    page.on("response", lambda resp: asyncio.create_task(_on_response(resp)))
+    def _on_response_sync(resp):
+        asyncio.create_task(_on_response(resp))
+
+    page.on("response", _on_response_sync)
+    try:
+        return await _run_with_page_core(
+            username, page, _wu, network_post_metrics
+        )
+    finally:
+        try:
+            page.remove_listener("response", _on_response_sync)
+        except Exception:
+            pass
+
+
+async def _run_with_page_core(
+    username_raw: str,
+    page,
+    _wu,
+    network_post_metrics: dict[str, dict],
+):
+    try:
+        nav_url, mbasic_url, post_base = normalize_facebook_profile_input(username_raw)
+    except ValueError as exc:
+        raise ValueError(str(exc)) from exc
 
     # ── 1. Navigate ───────────────────────────────────────────────
-    print(f"[facebook_worker] navigating to facebook.com/{username}", file=sys.stderr)
+    print(f"[facebook_worker] navigating to {nav_url}", file=sys.stderr)
     await asyncio.sleep(_ms_jitter(PAUSE_PRE_NAV_MIN_MS, PAUSE_PRE_NAV_MAX_MS))
     await page.goto(
-        f"https://www.facebook.com/{username}",
+        nav_url,
         wait_until="domcontentloaded",
         timeout=NAV_TIMEOUT,
     )
@@ -640,10 +1844,62 @@ async def _run_with_page(username: str, page, _wu):
         pass
     await page.wait_for_timeout(2500)
 
-    # ── 4. Profile data ───────────────────────────────────────────
-    info = await page.evaluate(_PROFILE_JS, username)
+    # Снимок с основной страницы до Reels — подписчики / «Нравится» часто только здесь.
+    info_timeline = await page.evaluate(_PROFILE_JS, username_raw)
+    print(
+        f"[facebook_worker] до Reels (sk=reels_tab): followers_raw={info_timeline.get('followers')!r} "
+        f"pageLikes_raw={info_timeline.get('pageLikes')!r}",
+        file=sys.stderr,
+    )
 
-    display_name   = (info.get("displayName") or "").strip() or username
+    # ── 3b. Reels (sk=reels_tab) — второй и последний навигационный переход на www в этом проходе.
+    reels_sk_nav = _facebook_reels_sk_url_from_nav(nav_url)
+    print(f"[facebook_worker] navigating to Reels (sk=reels_tab): {reels_sk_nav}", file=sys.stderr)
+    await asyncio.sleep(_ms_jitter(PAUSE_PRE_NAV_MIN_MS, PAUSE_PRE_NAV_MAX_MS))
+    await page.goto(
+        reels_sk_nav,
+        wait_until="domcontentloaded",
+        timeout=NAV_TIMEOUT,
+    )
+    await _wu.wait_for_anti_bot_clear(page, platform="facebook")
+    await page.wait_for_timeout(2000)
+    on_reels_sk = _facebook_page_on_reels_sk(page.url)
+    if not on_reels_sk and _facebook_reels_ui_click_fallback_enabled():
+        print(
+            "[facebook_worker] после goto нет sk=reels_tab в URL — пробуем клик по вкладке Reels "
+            "(FACEBOOK_REELS_UI_CLICK_FALLBACK / FACEBOOK_PHOTOS_UI_CLICK_FALLBACK)",
+            file=sys.stderr,
+        )
+        on_reels_sk = await _facebook_open_reels_sk_tab_ui(page)
+    if on_reels_sk:
+        print("[facebook_worker] страница Reels (sk=reels_tab) открыта", file=sys.stderr)
+        await page.wait_for_timeout(2000)
+        info_reels = await page.evaluate(_PROFILE_JS, username_raw)
+        info = _merge_facebook_profile_js(info_timeline, info_reels)
+        print(
+            f"[facebook_worker] после merge профиля: followers_raw={info.get('followers')!r} "
+            f"pageLikes_raw={info.get('pageLikes')!r}",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[facebook_worker] sk=reels_tab не подтверждён в URL — парсим как есть (без merge сетки Reels)",
+            file=sys.stderr,
+        )
+        info = info_timeline
+
+    # Сохранение URL sk=reels_tab для enrich (модалка / goto Reel и возврат).
+    reels_sk_url_saved: str | None = None
+    if on_reels_sk:
+        u_sk = (page.url or "").lower()
+        if "sk=reels_tab" in u_sk or "sk%3dreels_tab" in u_sk:
+            reels_sk_url_saved = page.url
+        else:
+            reels_sk_url_saved = _facebook_reels_sk_url_from_nav(nav_url) or None
+
+    # ── 4. Profile data (уже в info) ───────────────────────────────
+
+    display_name   = (info.get("displayName") or "").strip() or username_raw
     follower_count = _parse_count(info.get("followers") or "")
     like_count_val = _parse_count(info.get("pageLikes") or "")
     avatar_url     = info.get("avatar") or ""
@@ -664,43 +1920,87 @@ async def _run_with_page(username: str, page, _wu):
     for line in (info.get('nravLines') or []):
         print(f"[facebook_worker] нравится line: {line}", file=sys.stderr)
 
-    # ── 5. Scroll — stop early once MAX_POSTS links visible ───────
-    for i in range(3):
-        n = await page.evaluate("""() =>
-            document.querySelectorAll(
-                '[role="article"] a[href*="/posts/"],'  +
-                '[role="article"] a[href*="story_fbid"],' +
-                '[role="article"] a[href*="/videos/"],' +
-                '[role="article"] a[href*="/reel/"]'
-            ).length
-        """)
+    # ── 5. Scroll — подгрузка ленты (больше итераций + scrollBy) ─────────────
+    scroll_rounds = int(os.getenv("FACEBOOK_SCROLL_ROUNDS", "14") or "14")
+    scroll_rounds = max(5, min(40, scroll_rounds))
+    for i in range(scroll_rounds):
+        n = await page.evaluate("""() => {
+            const sel = '[role="main"] a[href*="/posts/"],' +
+                '[role="main"] a[href*="story_fbid"],' +
+                '[role="main"] a[href*="/videos/"],' +
+                '[role="main"] a[href*="/reel/"],' +
+                '[role="main"] a[href*="/permalink/"],' +
+                '[role="main"] a[href*="/photo/"],' +
+                '[role="main"] a[href*="fbid="],' +
+                '[role="article"] a[href*="/reel/"]';
+            return document.querySelectorAll(sel).length;
+        }""")
         print(f"[facebook_worker] scroll {i}: {n} post-links visible", file=sys.stderr)
         if n >= MAX_POSTS:
             break
         await page.keyboard.press("End")
+        try:
+            await page.evaluate(
+                "() => { window.scrollBy(0, Math.min(2800, "
+                "Math.max(400, document.body.scrollHeight - window.scrollY - window.innerHeight))); }"
+            )
+        except Exception:
+            pass
         await asyncio.sleep(_ms_jitter(PAUSE_SCROLL_MIN_MS, PAUSE_SCROLL_MAX_MS))
-    await page.wait_for_timeout(1000)
+        await page.wait_for_timeout(650)
+    await page.wait_for_timeout(1200)
 
     # ── 6. Extract posts ──────────────────────────────────────────
-    posts_raw = await page.evaluate(_POSTS_JS, {"username": username, "maxPosts": MAX_POSTS})
+    posts_raw = await page.evaluate(_POSTS_JS, {"username": username_raw, "maxPosts": MAX_POSTS})
 
-    # ── 7. Fallback to mbasic when data is sparse ────────────────────────────
+    if on_reels_sk or _facebook_page_on_reels_sk(page.url):
+        try:
+            sk_reels = await page.evaluate(_SK_PHOTOS_REELS_JS, {"maxPosts": MAX_POSTS})
+        except Exception as e:
+            print(f"[facebook_worker] sk=reels_tab reels extract: {e}", file=sys.stderr)
+            sk_reels = []
+        if isinstance(sk_reels, list) and sk_reels:
+            posts_raw = _merge_facebook_post_rows(posts_raw, sk_reels)
+            print(
+                f"[facebook_worker] Reels (sk=reels_tab): после merge {len(posts_raw)} пост(ов)",
+                file=sys.stderr,
+            )
+
+    # ── 7. Fallback на mbasic — только если не на www sk=reels_tab (иначе лишний уход с Reels).
+    u_after = (page.url or "").lower()
+    on_www_reels_sk = _facebook_page_on_reels_sk(page.url) and "mbasic." not in u_after
+
     mbasic_data = {"followers": "", "pageLikes": "", "posts": []}
-    if (len(posts_raw) < 3) or (follower_count <= 0):
-        mbasic_data = await _extract_mbasic_fallback(page, username)
-        fb_fallback = _parse_count(mbasic_data.get("followers", ""))
-        likes_fallback = _parse_count(mbasic_data.get("pageLikes", ""))
-        if fb_fallback > follower_count:
-            follower_count = fb_fallback
-        if likes_fallback > like_count_val:
-            like_count_val = likes_fallback
-        # Merge posts by external id
-        existing_ids = {str(p.get("id", "")).strip() for p in posts_raw if p.get("id")}
-        for row in (mbasic_data.get("posts") or []):
-            rid = str(row.get("id", "")).strip()
-            if rid and rid not in existing_ids:
-                posts_raw.append(row)
-                existing_ids.add(rid)
+    need_mbasic = (len(posts_raw) < 3) or (follower_count <= 0)
+    if _facebook_mbasic_fallback_enabled() and need_mbasic:
+        if on_www_reels_sk:
+            print(
+                "[facebook_worker] mbasic пропуск: уже на www Reels (sk=reels_tab), "
+                "без перехода на mbasic/timeline за подписчиками.",
+                file=sys.stderr,
+            )
+        else:
+            mbasic_data = await _extract_mbasic_fallback(
+                page, mbasic_url, profile_label=username_raw
+            )
+            fb_fallback = _parse_count(mbasic_data.get("followers", ""))
+            likes_fallback = _parse_count(mbasic_data.get("pageLikes", ""))
+            if fb_fallback > follower_count:
+                follower_count = fb_fallback
+            if likes_fallback > like_count_val:
+                like_count_val = likes_fallback
+            existing_ids = {str(p.get("id", "")).strip() for p in posts_raw if p.get("id")}
+            for row in (mbasic_data.get("posts") or []):
+                rid = str(row.get("id", "")).strip()
+                if rid and rid not in existing_ids:
+                    posts_raw.append(row)
+                    existing_ids.add(rid)
+    elif need_mbasic:
+        print(
+            "[facebook_worker] mbasic fallback выключен — остаёмся на текущей странице. "
+            "Для включения: FACEBOOK_MBASIC_FALLBACK=1",
+            file=sys.stderr,
+        )
 
     # ── 8. Post-process ───────────────────────────────────────────────────────
     posts = []
@@ -719,17 +2019,72 @@ async def _run_with_page(username: str, page, _wu):
                     posted_at = datetime.fromisoformat(ts.replace("Z", "+00:00")).isoformat()
                 except Exception:
                     pass
+        raw_url = nmeta.get("post_url") or p.get("url", f"{post_base}/posts/{post_id}")
+        post_url_final = str(raw_url or "").strip()
+        dom_likes = _parse_count(p.get("reactions", 0))
+        dom_views = _parse_count(p.get("views", 0))
+        net_views = int(nmeta.get("views", 0) or 0)
+        view_count = max(dom_views, net_views)
+        # Лайки с сетки; для постов с большим числом просмотров ниже — дообогащение через enrich.
+        like_count = dom_likes
         posts.append({
             "external_id":   post_id,
             "description":   p.get("text", ""),
             "thumbnail_url": p.get("thumb", ""),
-            "post_url":      nmeta.get("post_url") or p.get("url", f"https://www.facebook.com/{username}/posts/{post_id}"),
-            "view_count":    max(_parse_count(p.get("views", 0)), int(nmeta.get("views", 0) or 0)),
-            "like_count":    max(_parse_count(p.get("reactions", 0)), int(nmeta.get("reactions", 0) or 0)),
+            "post_url":      post_url_final,
+            "view_count":    view_count,
+            "like_count":    like_count,
             "comment_count": max(_parse_count(p.get("comments", 0)), int(nmeta.get("comments", 0) or 0)),
             "share_count":   max(_parse_count(p.get("shares", 0)), int(nmeta.get("shares", 0) or 0)),
             "posted_at":     posted_at,
         })
+
+    min_detail_v = _facebook_detail_likes_min_views()
+    if min_detail_v > 0:
+        cleared = 0
+        for p in posts:
+            try:
+                v = int(p.get("view_count") or 0)
+            except (TypeError, ValueError):
+                v = 0
+            if v <= min_detail_v:
+                if int(p.get("like_count") or 0) != 0:
+                    cleared += 1
+                p["like_count"] = 0
+        if cleared:
+            print(
+                f"[facebook_worker] лайки с сетки сброшены (view_count ≤ {min_detail_v}): "
+                f"{cleared} пост(ов)",
+                file=sys.stderr,
+            )
+
+    _facebook_zero_like_if_equals_views(posts)
+    _facebook_dedupe_phantom_likes(posts)
+    reels_sk_url: str | None = (reels_sk_url_saved or "").strip() or None
+    if not reels_sk_url:
+        ufin = (page.url or "").lower()
+        if "sk=reels_tab" in ufin or "sk%3dreels_tab" in ufin:
+            reels_sk_url = page.url
+    if not reels_sk_url and on_reels_sk:
+        reels_sk_url = _facebook_reels_sk_url_from_nav(nav_url) or None
+    # Всегда иметь URL вкладки Reels для same-tab (возврат после /reel/…): иначе enrich не заходит в пост.
+    if not (reels_sk_url or "").strip():
+        reels_sk_url = _facebook_reels_sk_url_from_nav(nav_url) or None
+    print(
+        f"[facebook_worker] enrich: restore_sk={'1' if (reels_sk_url or '').strip() else '0'} "
+        f"posts={len(posts)}",
+        file=sys.stderr,
+    )
+    detail_like_updates = 0
+    try:
+        detail_like_updates = await _facebook_enrich_reel_likes_from_detail(
+            page, posts, reels_sk_url=reels_sk_url
+        )
+    except Exception as exc:
+        print(f"[facebook_worker] enrich reel likes: {exc}", file=sys.stderr)
+    _facebook_zero_like_if_equals_views(posts)
+    _facebook_dedupe_phantom_likes(posts)
+    _facebook_zero_likes_if_like_is_other_post_view_count(posts)
 
     print(f"[facebook_worker] extracted {len(posts)} posts", file=sys.stderr)
 
@@ -746,6 +2101,7 @@ async def _run_with_page(username: str, page, _wu):
             "network_metrics_used": len(network_post_metrics) > 0,
             "mbasic_fallback_used": bool(mbasic_data.get("posts") or mbasic_data.get("followers") or mbasic_data.get("pageLikes")),
             "partial_posts": len(posts) < max(3, min(MAX_POSTS, 8)),
+            "reel_detail_like_posts_updated": detail_like_updates,
         },
     }
 
@@ -754,6 +2110,7 @@ async def run_once(arg: dict):
     arg = dict(arg)
     username = arg["username"].lstrip("@")
     _wu = _load_worker_utils()
+    keep = _facebook_run_once_keep_browser()
     try:
         async with async_playwright() as pw:
             context, _browser = await _wu.launch_context(
@@ -762,9 +2119,21 @@ async def run_once(arg: dict):
             )
             page = context.pages[0] if context.pages else await context.new_page()
             try:
-                return await _run_with_page(username, page, _wu)
-            finally:
+                result = await _run_with_page(username, page, _wu)
+            except Exception:
+                if not keep:
+                    await _wu.close_context(context, _browser)
+                raise
+            if keep:
+                print(
+                    "[facebook_worker] FACEBOOK_RUN_ONCE_KEEP_BROWSER=1 — Chromium не закрываем; "
+                    "остановите процесс (Ctrl+C), затем закройте окно вручную.",
+                    file=sys.stderr,
+                )
+                await asyncio.Future()
+            else:
                 await _wu.close_context(context, _browser)
+            return result
     except Exception as exc:
         print(f"[facebook_worker] exception: {exc}", file=sys.stderr)
         return {"error": f"Ошибка: {exc}"}
@@ -776,7 +2145,7 @@ def _write_response(payload: dict) -> None:
     write_json_line(payload)
 
 
-async def daemon_main() -> None:
+async def daemon_main(*, cli_first_json: str | None = None) -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
@@ -784,38 +2153,75 @@ async def daemon_main() -> None:
             locale="ru-RU", force_persistent=True,
         )
         page = context.pages[0] if context.pages else await context.new_page()
-        try:
-            for line in sys.stdin:
-                line = line.strip()
-                if not line:
+
+        async def _ensure_live_page() -> None:
+            nonlocal page
+            if page.is_closed():
+                print(
+                    "[facebook_worker] вкладка закрыта — открываю новую в том же Chromium",
+                    file=sys.stderr,
+                )
+                page = await context.new_page()
+
+        if cli_first_json is not None and sys.stdin.isatty():
+            print(
+                "[facebook_worker] Окно остаётся открытым. Следующие задания — "
+                "одна строка JSON; конец ввода — Ctrl+Z Enter (Windows) или Ctrl+D (Unix).",
+                file=sys.stderr,
+            )
+        for line in _iter_incoming_json_lines(cli_first_json):
+            try:
+                payload = json.loads(line)
+            except Exception:
+                _write_response({"error": "Невалидный JSON payload"})
+                continue
+            await _ensure_live_page()
+            try:
+                username = str(payload.get("username", "")).lstrip("@")
+                if not username:
+                    _write_response({"error": "Не указан username"})
                     continue
-                try:
-                    payload = json.loads(line)
-                except Exception:
-                    _write_response({"error": "Невалидный JSON payload"})
-                    continue
-                try:
-                    username = str(payload.get("username", "")).lstrip("@")
-                    result = await _run_with_page(username, page, _wu)
-                except Exception as exc:
-                    _write_response({"error": f"Ошибка worker: {exc}"})
-                    continue
-                _write_response(result)
-                await asyncio.sleep(_ms_jitter(PAUSE_BETWEEN_TASKS_MIN_MS, PAUSE_BETWEEN_TASKS_MAX_MS))
-        finally:
+                result = await _run_with_page(username, page, _wu)
+            except Exception as exc:
+                _write_response({"error": f"Ошибка worker: {exc}"})
+                continue
+            _write_response(result)
+            await asyncio.sleep(_ms_jitter(PAUSE_BETWEEN_TASKS_MIN_MS, PAUSE_BETWEEN_TASKS_MAX_MS))
+        if _facebook_daemon_should_close_browser_on_exit():
+            print("[facebook_worker] stdin закрыт — закрываю Chromium (FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT=1)", file=sys.stderr)
             await _wu.close_context(context, _browser)
+        else:
+            print(
+                "[facebook_worker] stdin закрыт — Chromium не закрываем; "
+                "процесс в ожидании. Остановите worker / Django или включите "
+                "FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT=1 чтобы закрыть браузер.",
+                file=sys.stderr,
+            )
+            await asyncio.Future()
 
 
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "--daemon":
         asyncio.run(daemon_main())
-    else:
-        if len(sys.argv) < 2:
-            _write_response({"error": "Отсутствует payload"})
-            sys.exit(1)
+    elif len(sys.argv) >= 3 and sys.argv[1] == "--once":
+        _path_arg = sys.argv[2].strip()
         try:
-            one_payload = json.loads(sys.argv[1])
-        except Exception:
-            _write_response({"error": "Невалидный JSON payload"})
+            _p = Path(_path_arg)
+            if _p.is_file():
+                _once_payload = json.loads(_p.read_text(encoding="utf-8"))
+            else:
+                _once_payload = json.loads(_path_arg)
+        except Exception as exc:
+            _write_response({"error": f"Невалидный JSON в --once: {exc}"})
             sys.exit(1)
-        _write_response(asyncio.run(run_once(one_payload)))
+
+        async def _once_main() -> None:
+            r = await run_once(_once_payload)
+            _write_response(r if isinstance(r, dict) else {"error": "Пустой ответ worker"})
+
+        asyncio.run(_once_main())
+    elif len(sys.argv) >= 2:
+        asyncio.run(daemon_main(cli_first_json=sys.argv[1]))
+    else:
+        _write_response({"error": "Отсутствует payload"})
+        sys.exit(1)

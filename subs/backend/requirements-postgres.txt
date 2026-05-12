@@ -1,0 +1,3 @@
+# После основного pip install -r requirements.txt, если используете Postgres:
+#   pip install -r requirements-postgres.txt
+psycopg[binary]>=3.2

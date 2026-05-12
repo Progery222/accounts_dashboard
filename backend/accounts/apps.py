@@ -129,7 +129,7 @@ class AccountsConfig(AppConfig):
         try:
             from apscheduler.schedulers.background import BackgroundScheduler
             from apscheduler.triggers.cron import CronTrigger
-            from .models import AutoRefreshState
+            from .models import AutoRefreshState, RefreshAllState
 
             _scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
             # If process was restarted in the middle of an auto-refresh run, mark
@@ -143,12 +143,27 @@ class AccountsConfig(AppConfig):
                     state.save(update_fields=["is_running", "current_account", "last_error", "updated_at"])
             except Exception:
                 pass
+            try:
+                rr = RefreshAllState.get()
+                if rr.is_running:
+                    rr.is_running = False
+                    rr.current_account = ""
+                    rr.last_error = "Сбор всех аккаунтов был прерван перезапуском процесса."
+                    rr.save(update_fields=["is_running", "current_account", "last_error", "updated_at"])
+            except Exception:
+                pass
 
             # Fixed nightly refresh at 03:00 Moscow — always present
             _scheduler.add_job(
                 _scheduled_refresh,
                 CronTrigger(hour=3, minute=0, timezone=SCHEDULER_TZ),
                 id="daily_refresh_03",
+                replace_existing=True,
+            )
+            _scheduler.add_job(
+                _scheduled_audience_refresh,
+                CronTrigger(hour=4, minute=15, timezone=SCHEDULER_TZ),
+                id="daily_audience_0415",
                 replace_existing=True,
             )
 
@@ -173,6 +188,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         Account,
         AutoRefreshPoint,
         AutoRefreshState,
+        RefreshAllState,
         RefreshScheduleConfig,
         GlobalVisibilityConfig,
     )
@@ -192,6 +208,13 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             _queued_refresh_source = source or "scheduler"
             _queued_refresh_fast_start = bool(_queued_refresh_fast_start or fast_start)
         return
+
+    try:
+        if RefreshAllState.get().is_running:
+            _auto_refresh_lock.release()
+            return
+    except Exception:
+        pass
 
     cfg = RefreshScheduleConfig.get()
     # Свежая строка из БД: иначе при «Запустить сейчас» после POST расписания
@@ -772,3 +795,52 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 ).start()
             except Exception as e:
                 print(f"[scheduled_refresh] failed to start queued run: {e}")
+
+
+def _scheduled_audience_refresh() -> None:
+    """Съём аудитории TikTok/Instagram в фоне (не блокирует планировщик)."""
+
+    def _run() -> None:
+        from django.db import close_old_connections
+        from django.utils import timezone
+
+        from .audience import refresh_audience_for_account
+        from .models import Account, GlobalVisibilityConfig, Platform, RefreshScheduleConfig
+
+        close_old_connections()
+        try:
+            cfg = RefreshScheduleConfig.get()
+            hidden_platforms: set[str] = set()
+            if not bool(getattr(cfg, "include_hidden_platform_accounts", False)):
+                try:
+                    hidden_platforms = {
+                        str(v).strip().lower()
+                        for v in (GlobalVisibilityConfig.get().hidden_platforms or [])
+                        if str(v).strip()
+                    }
+                except Exception:
+                    hidden_platforms = set()
+            qs = Account.objects.filter(
+                platform__in=(Platform.TIKTOK, Platform.INSTAGRAM),
+                profile_unavailable=False,
+            ).select_related("profile")
+            if hidden_platforms:
+                qs = qs.exclude(platform__in=hidden_platforms)
+            if not bool(getattr(cfg, "include_hidden_profile_accounts", False)):
+                qs = qs.exclude(profile__is_hidden=True)
+            cutoff = timezone.now() - timedelta(hours=20)
+            for acc in qs.iterator(chunk_size=20):
+                try:
+                    if acc.audience_last_synced_at and acc.audience_last_synced_at >= cutoff:
+                        continue
+                    refresh_audience_for_account(acc)
+                except Exception as e:
+                    print(f"[audience_scheduled] account {acc.id} {acc.platform}/@{acc.username}: {e}")
+                time.sleep(10)
+        finally:
+            close_old_connections()
+
+    try:
+        threading.Thread(target=_run, daemon=True, name="scheduled-audience").start()
+    except Exception as e:
+        print(f"[audience_scheduled] failed to start thread: {e}")

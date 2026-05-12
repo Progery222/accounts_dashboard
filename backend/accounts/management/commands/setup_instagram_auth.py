@@ -13,11 +13,12 @@ After running, all Instagram scraping uses the saved session — no browser need
 import base64
 import json
 import os
-import sqlite3
 from pathlib import Path
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
+
+from accounts.chromium_cookie_store import open_cookie_store
 
 
 def _copy_locked_file(src: Path, dst: Path) -> Path:
@@ -277,7 +278,7 @@ class Command(BaseCommand):
         if not cookies_db.exists():
             raise CommandError("Файл куков Chrome не найден.")
 
-        # Copy to temp first (SQLite URI has issues with spaces on Windows paths)
+        # Копия файла во временный каталог (путь с пробелами надёжнее, чем URI).
         import shutil, tempfile
         tmp_dir = Path(tempfile.mkdtemp())
         tmp_db = tmp_dir / "cookies.db"
@@ -288,7 +289,7 @@ class Command(BaseCommand):
             tmp_db = _copy_locked_file(cookies_db, tmp_db)
 
         try:
-            con = sqlite3.connect(str(tmp_db))
+            con = open_cookie_store(tmp_db)
         except Exception as e:
             raise CommandError(f"Не удалось открыть БД куков Chrome: {e}")
 

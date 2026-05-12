@@ -18,6 +18,6 @@ def _run_worker(worker_path: Path, payload: dict, platform_name: str) -> dict:
 
 
 def fetch_facebook_profile(username: str) -> dict:
-    """Fetch Facebook profile/page data via Playwright subprocess."""
+    """Данные страницы/профиля Facebook: username, vanity-URL или profile.php?id=…"""
     username = username.lstrip("@")
     return _run_worker(_WORKER, {"username": username}, f"Facebook @{username}")

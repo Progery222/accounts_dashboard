@@ -3,7 +3,7 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
 
-FRONTEND = "http://127.0.0.1:5174"
+FRONTEND = "http://127.0.0.1:5173"
 BACKEND = "http://127.0.0.1:8000"
 LISTEN = ("127.0.0.1", 5190)
 

@@ -1,7 +1,9 @@
-from rest_framework import serializers
+from datetime import timedelta
+
 from django.utils import timezone
+from rest_framework import serializers
 import re
-from .models import Account, Platform, Post, Profile
+from .models import Account, Platform, Post, Profile, AudienceMember, AudienceMemberPost
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -32,6 +34,7 @@ class AccountSerializer(serializers.ModelSerializer):
     post_delta = serializers.SerializerMethodField()
     is_platform_hidden = serializers.SerializerMethodField()
     is_profile_hidden = serializers.SerializerMethodField()
+    audience_members_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Account
@@ -41,11 +44,19 @@ class AccountSerializer(serializers.ModelSerializer):
             "display_name", "avatar_url", "bio",
             "follower_count", "like_count", "view_count", "post_count",
             "profile_unavailable",
+            "audience_last_synced_at",
+            "audience_members_count",
             "follower_delta", "like_delta", "view_delta", "post_delta",
             "is_platform_hidden", "is_profile_hidden",
             "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at", "profile_unavailable"]
+        read_only_fields = [
+            "id",
+            "created_at",
+            "updated_at",
+            "profile_unavailable",
+            "audience_last_synced_at",
+        ]
 
     def validate_username(self, value):
         value = str(value).strip().lstrip("@")
@@ -78,42 +89,68 @@ class AccountSerializer(serializers.ModelSerializer):
                 parts = parts[1:]
             if parts:
                 attrs["username"] = parts[0]
+        if username is not None and platform == Platform.FACEBOOK:
+            from platforms.facebook.profile_url import canonical_facebook_username_for_storage
+
+            try:
+                attrs["username"] = canonical_facebook_username_for_storage(str(username).strip())
+            except ValueError as exc:
+                raise serializers.ValidationError({"username": str(exc)}) from exc
         return attrs
 
-    def _yesterday_snap(self, obj):
+    def _baseline_snap(self, obj):
         snaps = getattr(obj, "_yesterday_snaps", None)
         if snaps is not None:
             return snaps[0] if snaps else None
-        today = timezone.now().date()
-        return obj.snapshots.filter(date__lt=today).order_by("-date").first()
+        period = int(self.context.get("account_delta_period_days", 1) or 1)
+        if period not in (1, 7, 30):
+            period = 1
+        today = timezone.localdate()
+        cutoff = today - timedelta(days=period)
+        return obj.snapshots.filter(date__lte=cutoff).order_by("-date").first()
 
     def get_follower_delta(self, obj):
         annotated = getattr(obj, "_follower_delta", None)
         if annotated is not None:
             return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.follower_count - snap.follower_count if snap else None
+        snap = self._baseline_snap(obj)
+        if snap:
+            return obj.follower_count - snap.follower_count
+        # Нет снимка не старше cutoff — baseline считаем нулевым.
+        return obj.follower_count
 
     def get_like_delta(self, obj):
         annotated = getattr(obj, "_like_delta", None)
         if annotated is not None:
             return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.like_count - snap.like_count if snap else None
+        snap = self._baseline_snap(obj)
+        if snap:
+            return obj.like_count - snap.like_count
+        return obj.like_count
 
     def get_view_delta(self, obj):
         annotated = getattr(obj, "_view_delta", None)
         if annotated is not None:
-            return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.view_count - snap.view_count if snap else None
+            raw = annotated
+        else:
+            snap = self._baseline_snap(obj)
+            raw = (
+                int(obj.view_count or 0) - int(snap.view_count or 0)
+                if snap
+                else int(obj.view_count or 0)
+            )
+        if raw is not None and obj.platform in (Platform.INSTAGRAM, Platform.THREADS):
+            return max(0, int(raw))
+        return raw
 
     def get_post_delta(self, obj):
         annotated = getattr(obj, "_post_delta", None)
         if annotated is not None:
             return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.post_count - snap.post_count if snap else None
+        snap = self._baseline_snap(obj)
+        if snap:
+            return obj.post_count - snap.post_count
+        return obj.post_count
 
     def get_is_platform_hidden(self, obj):
         hidden = self.context.get("hidden_platforms") or set()
@@ -121,6 +158,14 @@ class AccountSerializer(serializers.ModelSerializer):
 
     def get_is_profile_hidden(self, obj):
         return bool(getattr(obj.profile, "is_hidden", False))
+
+    def get_audience_members_count(self, obj):
+        ann = getattr(obj, "audience_members_count", None)
+        if ann is not None:
+            return int(ann)
+        if hasattr(obj, "audience_memberships"):
+            return obj.audience_memberships.count()
+        return 0
 
 
 class PostSerializer(serializers.ModelSerializer):
@@ -138,33 +183,103 @@ class PostSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["id", "updated_at"]
 
-    def _yesterday_snap(self, obj):
+    def _baseline_snap(self, obj):
         snaps = getattr(obj, "_yesterday_snaps", None)
         if snaps is not None:
             return snaps[0] if snaps else None
-        today = timezone.now().date()
-        return obj.snapshots.filter(date__lt=today).order_by("-date").first()
+        period = int(self.context.get("account_delta_period_days", 1) or 1)
+        if period not in (1, 7, 30):
+            period = 1
+        today = timezone.localdate()
+        cutoff = today - timedelta(days=period)
+        return obj.snapshots.filter(date__lte=cutoff).order_by("-date").first()
 
     def get_view_delta(self, obj):
         annotated = getattr(obj, "_view_delta", None)
         if annotated is not None:
-            return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.view_count - snap.view_count if snap else None
+            raw = annotated
+        else:
+            snap = self._baseline_snap(obj)
+            raw = (
+                int(obj.view_count or 0) - int(snap.view_count or 0)
+                if snap
+                else int(obj.view_count or 0)
+            )
+        plat = self.context.get("parent_account_platform") or getattr(
+            getattr(obj, "account", None), "platform", None
+        )
+        if raw is not None and plat in (Platform.INSTAGRAM, Platform.THREADS):
+            return max(0, int(raw))
+        return raw
 
     def get_like_delta(self, obj):
         annotated = getattr(obj, "_like_delta", None)
         if annotated is not None:
             return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.like_count - snap.like_count if snap else None
+        snap = self._baseline_snap(obj)
+        if snap:
+            return obj.like_count - snap.like_count
+        return obj.like_count
 
     def get_comment_delta(self, obj):
         annotated = getattr(obj, "_comment_delta", None)
         if annotated is not None:
             return annotated
-        snap = self._yesterday_snap(obj)
-        return obj.comment_count - snap.comment_count if snap else None
+        snap = self._baseline_snap(obj)
+        if snap:
+            return obj.comment_count - snap.comment_count
+        return obj.comment_count
+
+
+class AudienceMemberPostSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AudienceMemberPost
+        fields = [
+            "id",
+            "external_id",
+            "description",
+            "thumbnail_url",
+            "post_url",
+            "view_count",
+            "like_count",
+            "comment_count",
+            "share_count",
+            "posted_at",
+        ]
+        read_only_fields = fields
+
+
+class AudienceMemberListSerializer(serializers.ModelSerializer):
+    follows_tracked_accounts_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = AudienceMember
+        fields = [
+            "id",
+            "username",
+            "external_id",
+            "display_name",
+            "avatar_url",
+            "bio",
+            "is_private",
+            "follower_count",
+            "following_count",
+            "like_count",
+            "profile_language",
+            "timezone_name",
+            "follows_tracked_accounts_count",
+        ]
+        read_only_fields = fields
+
+
+class AudienceMemberDetailSerializer(serializers.ModelSerializer):
+    follows_tracked_accounts_count = serializers.IntegerField(read_only=True)
+    posts = AudienceMemberPostSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AudienceMember
+        fields = AudienceMemberListSerializer.Meta.fields + ["posts"]
+        read_only_fields = AudienceMemberListSerializer.Meta.fields + ["posts"]
 
 
 class PlatformSerializer(serializers.Serializer):

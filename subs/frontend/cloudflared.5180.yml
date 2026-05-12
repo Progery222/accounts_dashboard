@@ -1,0 +1,6 @@
+# Quick Tunnel (npm run tunnel): публичный https://….trycloudflare.com без своего домена.
+# Нужны одновременно: subs API на :8010 и Vite на :5180 (npm run dev).
+# Vite проксирует /api → 8010; пустой VITE_API_URL в dev — запросы идут на тот же хост (см. .env.example).
+# Разово: cloudflared tunnel login
+ingress:
+  - service: http://127.0.0.1:5180

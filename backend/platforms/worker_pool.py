@@ -181,6 +181,9 @@ def ensure_worker(worker_path: Path) -> None:
 
 @atexit.register
 def _shutdown_workers() -> None:
+    """При выходе Python закрыть дочерние worker-процессы. Обход: PLAYWRIGHT_POOL_SKIP_ATEXIT=1."""
+    if os.getenv("PLAYWRIGHT_POOL_SKIP_ATEXIT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
     for h in list(_HANDLES.values()):
         h.close()
 

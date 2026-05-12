@@ -1,4 +1,6 @@
 .env
+# MCP с секретами (скопируйте из .cursor/mcp.json.example)
+.cursor/mcp.json
 __pycache__/
 *.pyc
 .venv/

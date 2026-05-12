@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "lazyweb": {
+      "url": "https://www.lazyweb.com/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_LAZYWEB_TOKEN"
+      }
+    }
+  }
+}

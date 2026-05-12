@@ -10,11 +10,20 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # localhost вместо DATABASE_URL провайдера.
 load_dotenv(BASE_DIR / ".env", override=False)
 
+# Чужой DATABASE_URL в окружении процесса (IDE/терминал) при override=False
+# перебивает значение из .env — сбрасываем только не-Postgres URL и подгружаем .env снова.
+_raw_db_url = os.getenv("DATABASE_URL", "").strip().lower()
+if _raw_db_url and not _raw_db_url.startswith(("postgres://", "postgresql://", "postgis://")):
+    os.environ.pop("DATABASE_URL", None)
+    load_dotenv(BASE_DIR / ".env", override=False)
+
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-s)66ib*p(f+^813d+^2do6@*w4b^f57g787=hv)@lu7t=g^7!k")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
 if ".trycloudflare.com" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".trycloudflare.com")
+if ".loca.lt" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(".loca.lt")
 
 # На Railway публичный домен сервиса доступен в RAILWAY_PUBLIC_DOMAIN.
 # Добавляем его автоматически, чтобы health-check и публичный URL работали без
@@ -101,10 +110,10 @@ def _apply_postgres_connection_hardening(db: dict) -> None:
 _database_url = os.getenv("DATABASE_URL", "").strip()
 if _database_url:
     low = _database_url.lower()
-    if "sqlite" in low or low.startswith("file:") or ":memory:" in low:
+    if not low.startswith(("postgres://", "postgresql://", "postgis://")):
         raise ImproperlyConfigured(
-            "Поддерживается только PostgreSQL. DATABASE_URL не должен указывать на SQLite или file:/memory: "
-            "— удалите переменную из окружения или задайте postgresql://… Можно оставить только DB_* без DATABASE_URL."
+            "Поддерживается только PostgreSQL: DATABASE_URL должен начинаться с postgresql://, postgres:// или postgis://. "
+            "Или удалите DATABASE_URL и задайте подключение через переменные DB_*."
         )
 
     import dj_database_url
@@ -174,9 +183,20 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 _extra_origins = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5180",
+    "http://127.0.0.1:5180",
     "http://localhost:3000",
 ] + _extra_origins
 CORS_ALLOW_ALL_ORIGINS = DEBUG
+# При DEBUG=False список выше не покрывает эфемерные Quick Tunnel. Если фронт и API
+# на разных *.trycloudflare.com (или localStorage new_frontend_api_base на другой
+# origin), без regex браузер режет CORS. Один туннель с path /api → :8000 — same-origin, regex не мешает.
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https://[a-z0-9-]+\.trycloudflare\.com$",
+    r"^https://[a-z0-9-]+\.loca\.lt$",
+]
 
 # CSRF_EXTRA_ORIGINS — публичные origin'ы (VPS, кастомный домен, второй
 # Railway-сервис со SPA).
@@ -184,11 +204,17 @@ _csrf_extra = [o.strip() for o in os.getenv("CSRF_EXTRA_ORIGINS", "").split(",")
 
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5180",
+    "http://127.0.0.1:5180",
     "http://localhost:3000",
     "http://localhost:8000",
 ] + _csrf_extra
 if "https://*.trycloudflare.com" not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append("https://*.trycloudflare.com")
+if "https://*.loca.lt" not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append("https://*.loca.lt")
 if _railway_domain:
     railway_https = f"https://{_railway_domain}"
     if railway_https not in CSRF_TRUSTED_ORIGINS:
@@ -218,6 +244,15 @@ if _railway_fe:
 # Railway: TLS на edge, до контейнера — HTTP. Без этого Django считает
 # запросы небезопасными и ломаются редиректы/CSRF для админки.
 if os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip() or os.getenv("RAILWAY_ENVIRONMENT", "").strip():
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
+elif DEBUG:
+    # Локально за trycloudflare / ngrok: браузер — HTTPS, cloudflared — HTTP на :8000.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    USE_X_FORWARDED_HOST = True
+elif os.getenv("DJANGO_USE_TLS_PROXY_HEADERS", "").lower() in ("1", "true", "yes", "on"):
+    # Тот же случай при DEBUG=False (часто в .env): без этого POST с https://*.trycloudflare.com
+    # на локальный :8000 даёт 403 CSRF / неверный scheme.
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     USE_X_FORWARDED_HOST = True
 
@@ -252,8 +287,10 @@ TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 # Session file created by: python manage.py setup_telegram_auth
 TELEGRAM_SESSION_FILE = os.getenv("TELEGRAM_SESSION_FILE", "telegram.session")
 
-# Пауза между аккаунтами в POST /api/accounts/refresh_all/ (секунды). 0,0 — без паузы.
-# Для снижения нагрузки на платформы можно задать, например, REFRESH_ALL_DELAY_MIN=5 REFRESH_ALL_DELAY_MAX=12.
+# Глобальные границы паузы между аккаунтами в refresh_all / автообновлении (секунды).
+# 0,0 — не задавать глобальный clamp (остаются паузы по платформе, см. accounts.views._refresh_all_delay_seconds).
+# Для жёсткого ограничения всех платформ: REFRESH_ALL_DELAY_MIN=5 REFRESH_ALL_DELAY_MAX=12.
+# Пер-платформа: REFRESH_ALL_DELAY_YOUTUBE_MIN / _MAX и т.д. (имя платформы в env — UPPER).
 REFRESH_ALL_DELAY_MIN = float(os.getenv("REFRESH_ALL_DELAY_MIN", "0") or "0")
 REFRESH_ALL_DELAY_MAX = float(os.getenv("REFRESH_ALL_DELAY_MAX", "0") or "0")
 

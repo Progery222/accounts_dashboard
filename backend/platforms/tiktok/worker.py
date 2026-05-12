@@ -122,6 +122,31 @@ async def _run_with_context(
     page=None,
 ) -> dict:
     data = dict(data)
+    if data.get("audience_followers"):
+        from platforms.tiktok.audience_scrape import scrape_tiktok_audience_followers
+
+        username = (data.get("username") or "").lstrip("@").strip().lower()
+        lim = int(data.get("limit") or 100)
+        _mpp = data.get("max_posts_per_follower")
+        mpp = int(_mpp) if _mpp is not None else 35
+        if not username:
+            return {"error": "Не указан username для съёма подписчиков."}
+        own_page = page is None
+        if page is None:
+            page = await context.new_page()
+        try:
+            _raw_aid = data.get("audience_account_id")
+            audience_account_id = int(_raw_aid) if _raw_aid is not None else None
+            return await scrape_tiktok_audience_followers(
+                page, _wu, username, lim,
+                max_posts_per_follower=mpp,
+                skip_existing_member_profiles=bool(data.get("skip_existing_member_profiles")),
+                audience_account_id=audience_account_id,
+            )
+        finally:
+            if own_page:
+                await page.close()
+
     url: str = data["url"]
     m_user = re.search(r"/@([^/?#]+)", url)
     profile_username = m_user.group(1).strip().lower() if m_user else ""
@@ -186,10 +211,23 @@ async def _run_with_context(
 
             page.on("response", on_response)
 
-            # Navigate to the profile page
-            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
-                await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
+            # Navigate to the profile page (без двойного goto: сразу стабилизация URL)
+            if profile_username and "/@" in (url or ""):
+                from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+
+                u0 = url.split("#")[0]
+                if not await _tiktok_goto_profile_with_redirect_recovery(
+                    page, profile_username, u0, _wu, rounds=4, dwell_s=9.0,
+                ):
+                    print(
+                        f"[tiktok_worker] не удалось удержать страницу профиля @{profile_username}, "
+                        f"url={page.url!r}",
+                        file=sys.stderr,
+                    )
+            else:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
+                    await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
 
             # Read profile counters from rendered header (small accounts often
             # have missing SSR stats but visible UI counters).
@@ -291,15 +329,20 @@ async def _run_with_context(
                 # Local dev: wait up to 2 min for manual login
                 print("[worker] требуется вход — войдите в TikTok в открытом окне", file=sys.stderr)
                 await page.wait_for_url("**/tiktok.com/**/", timeout=120_000)
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                if profile_username and "/@" in (url or ""):
+                    from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+
+                    await _tiktok_goto_profile_with_redirect_recovery(
+                        page, profile_username, url.split("#")[0], _wu, rounds=4, dwell_s=9.0,
+                    )
+                else:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
             # ── Error-page retry ─────────────────────────────────────────────
             # TikTok's SSR occasionally shows "Something went wrong" in a fresh
-            # (cold-start) browser session. The fix: navigate back through the
-            # homepage each time — this re-warms the session with TikTok's cookies
-            # and JavaScript state, exactly as a real user would do by going back
-            # and re-entering the profile URL.  Simple page.reload() doesn't work
-            # because TikTok keeps serving the error for cold sessions.
+            # (cold-start) browser session. Сначала reload; если не помогло —
+            # повторный goto на целевой URL профиля (без главной: у залогиненных
+            # она часто открывает /foryou и мешает).
             for _err_retry in range(5):
                 if items_captured:
                     break
@@ -324,7 +367,7 @@ async def _run_with_context(
                 if is_error_page:
                     print(
                         f"[worker] error page on attempt {_err_retry + 1}, "
-                        "trying page.reload() and then re-routing via homepage…",
+                        "trying page.reload() then повторный заход на целевой URL…",
                         file=sys.stderr,
                     )
                     try:
@@ -349,15 +392,15 @@ async def _run_with_context(
                             print("[worker] page.reload() cleared error page", file=sys.stderr)
                             continue
 
-                        # Step 1: go back to homepage (warms up session)
-                        await page.goto(
-                            "https://www.tiktok.com/",
-                            wait_until="domcontentloaded",
-                            timeout=20_000,
-                        )
-                        await asyncio.sleep(2)
-                        # Step 2: navigate to profile again (fresh SPA load)
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                        # Без захода на главную: для залогиненных она часто = /foryou, ломает сценарий.
+                        if profile_username and "/@" in (url or ""):
+                            from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+
+                            await _tiktok_goto_profile_with_redirect_recovery(
+                                page, profile_username, url.split("#")[0], _wu, rounds=6, dwell_s=9.0,
+                            )
+                        else:
+                            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                         await asyncio.sleep(2)
                     except Exception as _nav_exc:
                         print(f"[worker] re-route failed: {_nav_exc}", file=sys.stderr)

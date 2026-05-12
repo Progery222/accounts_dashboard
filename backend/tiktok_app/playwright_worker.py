@@ -13,6 +13,7 @@ Local dev mode (BROWSER_HEADLESS=false or not set):
 import asyncio
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -176,18 +177,27 @@ async def main() -> None:
 
             page.on("response", on_response)
 
-            # ── Warm up: visit homepage first so TikTok sees a natural referrer ──
-            # Jumping straight to a profile from a cold session is a common bot
-            # signal; visiting the homepage first produces a realistic navigation
-            # history that lowers TikTok's automation score.
-            try:
-                await page.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=20_000)
-                await asyncio.sleep(1.5)
-            except Exception as _warm_exc:
-                print(f"[worker] homepage warm-up failed (non-fatal): {_warm_exc}", file=sys.stderr)
+            m_prof = re.search(r"/@([^/?#]+)", url or "")
+            prof_handle = (m_prof.group(1).strip().lower() if m_prof else "")
+            is_profile_job = bool(prof_handle) and "/@" in (url or "")
 
-            # Navigate to the profile page
-            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            # Прогрев через главную для залогиненных даёт /for_you — потом профиль
+            # не открывается стабильно. Для URL с /@… сразу идём на профиль.
+            if not is_profile_job:
+                try:
+                    await page.goto("https://www.tiktok.com/", wait_until="domcontentloaded", timeout=20_000)
+                    await asyncio.sleep(1.5)
+                except Exception as _warm_exc:
+                    print(f"[worker] homepage warm-up failed (non-fatal): {_warm_exc}", file=sys.stderr)
+
+            if is_profile_job:
+                from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+
+                await _tiktok_goto_profile_with_redirect_recovery(
+                    page, prof_handle, url.split("#")[0], _wu, rounds=5, dwell_s=11.0,
+                )
+            else:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
             if "login" in page.url or "passport" in page.url:
                 if HEADLESS:
@@ -200,7 +210,14 @@ async def main() -> None:
                 # Local dev: wait up to 2 min for manual login
                 print("[worker] требуется вход — войдите в TikTok в открытом окне", file=sys.stderr)
                 await page.wait_for_url("**/tiktok.com/**/", timeout=120_000)
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                if is_profile_job:
+                    from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+
+                    await _tiktok_goto_profile_with_redirect_recovery(
+                        page, prof_handle, url.split("#")[0], _wu, rounds=5, dwell_s=11.0,
+                    )
+                else:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
             # ── Error-page retry ─────────────────────────────────────────────
             # TikTok's SSR occasionally fails and shows "Something went wrong /

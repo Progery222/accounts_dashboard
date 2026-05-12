@@ -32,7 +32,7 @@ class AccountDeltaSerializerTests(TestCase):
         self.assertEqual(payload["view_delta"], 50)
         self.assertEqual(payload["post_delta"], 2)
 
-    def test_serializer_returns_none_deltas_without_previous_snapshot(self):
+    def test_serializer_treats_missing_baseline_snapshot_as_zero(self):
         account = Account.objects.create(
             username="new_user",
             platform=Platform.TIKTOK,
@@ -43,7 +43,59 @@ class AccountDeltaSerializerTests(TestCase):
         )
 
         payload = AccountSerializer(account).data
-        self.assertIsNone(payload["follower_delta"])
-        self.assertIsNone(payload["like_delta"])
-        self.assertIsNone(payload["view_delta"])
-        self.assertIsNone(payload["post_delta"])
+        self.assertEqual(payload["follower_delta"], 10)
+        self.assertEqual(payload["like_delta"], 5)
+        self.assertEqual(payload["view_delta"], 15)
+        self.assertEqual(payload["post_delta"], 1)
+
+    def test_serializer_baseline_respects_seven_day_context(self):
+        today = timezone.localdate()
+        account = Account.objects.create(
+            username="delta_week",
+            platform=Platform.TIKTOK,
+            follower_count=200,
+            like_count=0,
+            view_count=0,
+            post_count=0,
+        )
+        AccountSnapshot.objects.create(
+            account=account,
+            date=today - timedelta(days=8),
+            follower_count=50,
+            like_count=0,
+            view_count=0,
+            post_count=0,
+        )
+        AccountSnapshot.objects.create(
+            account=account,
+            date=today - timedelta(days=1),
+            follower_count=100,
+            like_count=0,
+            view_count=0,
+            post_count=0,
+        )
+        ctx = {"account_delta_period_days": 7, "hidden_platforms": set()}
+        payload = AccountSerializer(account, context=ctx).data
+        self.assertEqual(payload["follower_delta"], 150)
+
+    def test_instagram_view_delta_never_negative_without_annotation(self):
+        today = timezone.localdate()
+        account = Account.objects.create(
+            username="ig_view_floor",
+            platform=Platform.INSTAGRAM,
+            follower_count=1,
+            like_count=0,
+            view_count=100,
+            post_count=5,
+        )
+        AccountSnapshot.objects.create(
+            account=account,
+            date=today - timedelta(days=1),
+            follower_count=1,
+            like_count=0,
+            view_count=200,
+            post_count=5,
+        )
+        payload = AccountSerializer(account).data
+        self.assertEqual(payload["view_delta"], 0)
+        self.assertEqual(payload["follower_delta"], 0)

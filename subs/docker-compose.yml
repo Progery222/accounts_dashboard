@@ -1,0 +1,17 @@
+# Отдельный Postgres для subs (порт хоста 5435, внутри контейнера 5432).
+# DATABASE_URL для subs/backend/.env:
+# postgresql://subs:subs@127.0.0.1:5435/subs
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: subs
+      POSTGRES_PASSWORD: subs
+      POSTGRES_DB: subs
+    ports:
+      - "5435:5432"
+    volumes:
+      - subs_pgdata:/var/lib/postgresql/data
+
+volumes:
+  subs_pgdata:

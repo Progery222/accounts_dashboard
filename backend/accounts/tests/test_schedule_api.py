@@ -51,3 +51,65 @@ class RefreshScheduleApiTests(APITestCase):
         self.assertIn("run_detail", r.data)
         self.assertIsInstance(r.data["run_detail"], dict)
         self.assertIn("skip_recent_hours_config", r.data)
+
+    def test_account_delta_period_days_get_and_post(self):
+        RefreshScheduleConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "enabled": False,
+                "mode": "interval",
+                "interval_hours": 6,
+                "times": [],
+                "account_delta_period_days": 1,
+            },
+        )
+        r = self.client.get("/api/accounts/schedule/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data.get("account_delta_period_days"), 1)
+
+        r2 = self.client.post("/api/accounts/schedule/", {"account_delta_period_days": 7}, format="json")
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(r2.data.get("account_delta_period_days"), 7)
+
+        r3 = self.client.post("/api/accounts/schedule/", {"account_delta_period_days": 99}, format="json")
+        self.assertEqual(r3.status_code, status.HTTP_200_OK)
+        self.assertEqual(r3.data.get("account_delta_period_days"), 1)
+
+    def test_max_audience_followers_per_account_get_and_clamp(self):
+        RefreshScheduleConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "enabled": False,
+                "mode": "interval",
+                "interval_hours": 6,
+                "times": [],
+                "max_audience_followers_per_account": 100,
+            },
+        )
+        r = self.client.get("/api/accounts/schedule/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data.get("max_audience_followers_per_account"), 100)
+
+        r2 = self.client.post(
+            "/api/accounts/schedule/",
+            {"max_audience_followers_per_account": 40},
+            format="json",
+        )
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(r2.data.get("max_audience_followers_per_account"), 40)
+
+        r3 = self.client.post(
+            "/api/accounts/schedule/",
+            {"max_audience_followers_per_account": 500},
+            format="json",
+        )
+        self.assertEqual(r3.status_code, status.HTTP_200_OK)
+        self.assertEqual(r3.data.get("max_audience_followers_per_account"), 100)
+
+        r4 = self.client.post(
+            "/api/accounts/schedule/",
+            {"max_audience_followers_per_account": 0},
+            format="json",
+        )
+        self.assertEqual(r4.status_code, status.HTTP_200_OK)
+        self.assertEqual(r4.data.get("max_audience_followers_per_account"), 1)

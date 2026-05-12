@@ -10,7 +10,6 @@ Endpoints (фрагмент):
 import asyncio
 import os
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -22,6 +21,8 @@ from pathlib import Path
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status as drf_status
+
+from .chromium_cookie_store import open_cookie_store
 
 # ── Job registry ──────────────────────────────────────────────────────────────
 # {job_id: {"status": "pending"|"done"|"error", "message": str}}
@@ -78,7 +79,7 @@ def _read_tiktok_cookies() -> list[dict]:
     tmp = tempfile.mktemp(suffix=".db")
     try:
         shutil.copy2(str(db_path), tmp)
-        conn = sqlite3.connect(tmp)
+        conn = open_cookie_store(tmp)
         cur = conn.cursor()
         cur.execute("""
             SELECT host_key, name, expires_utc
@@ -122,7 +123,7 @@ def _tiktok_has_session() -> bool:
         tmp = tempfile.mktemp(suffix=".db")
         try:
             shutil.copy2(str(db_path), tmp)
-            conn = sqlite3.connect(tmp)
+            conn = open_cookie_store(tmp)
             cur = conn.cursor()
             cur.execute("""
                 SELECT name FROM cookies
@@ -245,7 +246,7 @@ def _check_any_cookie_in_profile(domain_patterns: list[str]) -> bool:
     tmp = tempfile.mktemp(suffix=".db")
     try:
         shutil.copy2(str(db_path), tmp)
-        conn = sqlite3.connect(tmp)
+        conn = open_cookie_store(tmp)
         cur = conn.cursor()
         domain_sql = " OR ".join(["host_key LIKE ?" for _ in domain_patterns])
         params = [f"%{p}%" for p in domain_patterns]
@@ -334,7 +335,7 @@ def _delete_chrome_cookies_by_host_needles(needles: list[str]) -> None:
     os.close(tmp_fd)
     try:
         shutil.copy2(db_path, tmp_path)
-        conn = sqlite3.connect(tmp_path)
+        conn = open_cookie_store(tmp_path)
         where = " OR ".join(["lower(host_key) LIKE ?" for _ in needles])
         params = [f"%{n.lower()}%" for n in needles]
         conn.execute(f"DELETE FROM cookies WHERE {where}", params)
@@ -680,7 +681,7 @@ def _check_cookie_in_profile(domain_patterns: list[str], cookie_names: list[str]
     tmp = tempfile.mktemp(suffix=".db")
     try:
         shutil.copy2(str(db_path), tmp)
-        conn = sqlite3.connect(tmp)
+        conn = open_cookie_store(tmp)
         cur = conn.cursor()
         domain_sql  = " OR ".join(["host_key LIKE ?" for _ in domain_patterns])
         name_sql    = " OR ".join(["name = ?"         for _ in cookie_names])

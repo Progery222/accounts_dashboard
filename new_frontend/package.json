@@ -1,0 +1,13 @@
+{
+  "name": "dashboard-new-frontend",
+  "private": true,
+  "description": "Atomic UI (new_frontend). npm run dev → :5174. npm run tunnel — HTTPS без домена (trycloudflare). npm run tunnel:login — разово привязать CLI к аккаунту.",
+  "scripts": {
+    "dev": "python run_server.py",
+    "tunnel": "cloudflared tunnel --config cloudflared.new-frontend.yml --url http://127.0.0.1:5174",
+    "tunnel:login": "cloudflared tunnel login",
+    "tunnel:watch": "powershell -NoExit -ExecutionPolicy Bypass -File ./tunnel-keepalive.ps1",
+    "tunnel:lt": "npx --yes localtunnel --port 5174",
+    "tunnel:lt-api": "npx --yes localtunnel --port 8000"
+  }
+}
