@@ -2,6 +2,9 @@
 Standalone subprocess — вызывается из platforms/instagram/scraper.py через worker_pool
 (`python worker.py --daemon`, один Chromium на процесс; запросы по stdin/stdout JSON).
 
+Съём аудитории: `audience_followers_modal.py`, `audience_scrape.py`, HTTP по подписчикам —
+`audience_member_http.py`. Не смешивать с логикой профиля/Reels ниже в этом файле.
+
 Ориентиры по времени на один профиль (Reels): goto до 45 с, антибот до ~120 с при
 челлендже, пауза ~3.2 с, скролл 16×650 мс + финальная пауза; между профилями в батче пауза 3–5 с.
 
@@ -564,6 +567,27 @@ async def scrape_profile_counts_only_on_page(page, _wu, username: str) -> dict:
 
 
 async def execute_payload(page, _wu, arg: dict) -> dict:
+    if bool(arg.get("audience_followers")):
+        from platforms.instagram.audience_scrape import scrape_instagram_audience_followers
+
+        u = (arg.get("username") or "").lstrip("@").strip().lower()
+        lim = int(arg.get("limit") or 100)
+        _mpp = arg.get("max_posts_per_follower")
+        mpp = int(_mpp) if _mpp is not None else 0
+        if not u:
+            raise ValueError("Не указан username для съёма подписчиков.")
+        _raw_aid = arg.get("audience_account_id")
+        audience_account_id = int(_raw_aid) if _raw_aid is not None else None
+        return await scrape_instagram_audience_followers(
+            page,
+            _wu,
+            u,
+            lim,
+            max_posts_per_follower=mpp,
+            skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
+            audience_account_id=audience_account_id,
+        )
+
     usernames_batch = arg.get("usernames")
     reels_views_only = bool(arg.get("reels_views_only"))
     if (

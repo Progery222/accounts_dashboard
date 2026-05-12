@@ -60,7 +60,6 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-
 <script type="text/babel">
 
 // ===== tweaks-panel.jsx =====
@@ -663,6 +662,160 @@ let AUTH_SESSIONS = [];
 let ALL_PLATFORMS = [];
 let TV_AUTO_SCHEDULE_LABEL = '—';
 let TV_AUTO_IS_RUNNING = false;
+/** Период дельт аккаунтов (1 / 7 / 30 дней), из GET /api/accounts/schedule/ */
+let ACCOUNT_DELTA_PERIOD_DAYS = 1;
+/** Снимок списка + TOTAL для периода (префетч через GET …&delta_period_days=) */
+let DELTA_PERIOD_CACHE = { 1: null, 7: null, 30: null };
+const _DELTA_PERIOD_SEQUENCE = [1, 7, 30];
+
+function _nextDeltaPeriodDays(current) {
+  const cur = Number(current) || 1;
+  const i = _DELTA_PERIOD_SEQUENCE.indexOf(cur);
+  const idx = i >= 0 ? i : 0;
+  return _DELTA_PERIOD_SEQUENCE[(idx + 1) % _DELTA_PERIOD_SEQUENCE.length];
+}
+
+function _mapAccountApiRow(a) {
+  return {
+    id: Number(a.id || 0),
+    name: String(a.display_name || a.username || ''),
+    handle: a.platform === 'rumble' ? String(a.username || '') : `@${String(a.username || '')}`,
+    username: String(a.username || ''),
+    avatarUrl: _pickAvatarUrl(a),
+    platform: String(a.platform || ''),
+    profile: a.profile_id != null ? String(a.profile_id) : 'none',
+    audienceMembers: Number(a.audience_members_count ?? 0),
+    followers: Number(a.follower_count || 0),
+    dFollowers: Number(a.follower_delta ?? 0),
+    views: Number(a.view_count || 0),
+    dViews: Number(a.view_delta || 0),
+    likes: Number(a.like_count || 0),
+    dLikes: Number(a.like_delta || 0),
+    posts: Number(a.post_count || 0),
+    dPosts: Number(a.post_delta || 0),
+    unavailable: !!a.profile_unavailable,
+    unavailableReason: String(a.profile_unavailable_reason || a.unavailable_reason || ''),
+    isPlatformHidden: !!a.is_platform_hidden,
+    isProfileHidden: !!a.is_profile_hidden,
+    updated: _ruShortDate(a.updated_at),
+    updatedTs: (() => {
+      const t = Date.parse(String(a.updated_at || ''));
+      return Number.isFinite(t) ? t : 0;
+    })(),
+  };
+}
+
+/** Подпись на TV «TOP MOVERS»: Facebook — человекочитаемое имя и @username/id рядом. */
+function _tvBroadcastAccountTitle(a) {
+  if (!a) return '';
+  const plat = String(a.platform || '').toLowerCase();
+  const u = String(a.username || '').trim();
+  const n = String(a.name || '').trim();
+  const handle = String(a.handle || (u ? `@${u}` : ''));
+  if (plat !== 'facebook') return handle;
+  const hasHumanName = n && !/^\d{6,24}$/.test(n);
+  const nameDiffersFromUser = hasHumanName && n.toLowerCase() !== u.toLowerCase();
+  if (nameDiffersFromUser) return `${n} ${handle}`;
+  return handle;
+}
+
+function _totalFromSummary(summary) {
+  return {
+    followers: {
+      value: Number(summary.follower_count || 0),
+      delta: Number(summary.follower_delta || 0),
+      yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_follower_delta),
+    },
+    views: {
+      value: Number(summary.view_count || 0),
+      delta: Number(summary.view_delta || 0),
+      yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_view_delta),
+    },
+    likes: {
+      value: Number(summary.like_count || 0),
+      delta: Number(summary.like_delta || 0),
+      yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_like_delta),
+    },
+    posts: {
+      value: Number(summary.post_count || 0),
+      delta: Number(summary.post_delta || 0),
+      yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_post_delta),
+    },
+    accounts: Number(summary.account_count || 0),
+  };
+}
+
+function _platformsFromSummary(summary) {
+  const byPlatform = Array.isArray(summary.by_platform) ? summary.by_platform : [];
+  const totalAcc = Math.max(1, Number(summary.account_count || 0));
+  return byPlatform.map((p) => ({
+    id: String(p.platform || ''),
+    label: String(p.platform_label || p.platform || ''),
+    color: PLATFORM_COLORS[String(p.platform || '')] || '#9ca3af',
+    share: Math.max(0, Number(p.account_count || 0) / totalAcc),
+    accounts: Number(p.account_count || 0),
+  }));
+}
+
+function _applyDeltaSnapshotToGlobals(snap) {
+  if (!snap || !Array.isArray(snap.accounts) || !snap.total) return false;
+  ACCOUNTS = snap.accounts.map((x) => ({ ...x }));
+  TOTAL = JSON.parse(JSON.stringify(snap.total));
+  if (Array.isArray(snap.platforms)) PLATFORMS = snap.platforms.map((x) => ({ ...x }));
+  const byProfileFromAccounts = new Map();
+  for (const acc of ACCOUNTS) {
+    const key = String(acc.profile || 'none');
+    byProfileFromAccounts.set(key, (byProfileFromAccounts.get(key) || 0) + 1);
+  }
+  PROFILES = PROFILES.map((p) => ({
+    ...p,
+    accounts: Number(byProfileFromAccounts.get(String(p.id)) || 0),
+  }));
+  TREND_24H = _buildAscendingTrend(TOTAL.views.value, TOTAL.views.delta, 24);
+  TREND_7D = _buildAscendingTrend(TOTAL.views.value, TOTAL.views.delta * 3, 7);
+  return true;
+}
+
+function _buildDeltaSnapshot(summary, accountsRaw) {
+  if (!summary || !Array.isArray(accountsRaw)) return null;
+  return {
+    accounts: accountsRaw.map(_mapAccountApiRow),
+    total: _totalFromSummary(summary),
+    platforms: _platformsFromSummary(summary),
+  };
+}
+
+function _storeDeltaCacheForPeriod(period, snapshot) {
+  if (![1, 7, 30].includes(period) || !snapshot) return;
+  DELTA_PERIOD_CACHE[period] = {
+    accounts: snapshot.accounts.map((x) => ({ ...x })),
+    total: JSON.parse(JSON.stringify(snapshot.total)),
+    platforms: snapshot.platforms.map((x) => ({ ...x })),
+  };
+}
+
+async function _prefetchDeltaPeriodInBackground(period) {
+  if (![1, 7, 30].includes(period) || DELTA_PERIOD_CACHE[period]) return;
+  try {
+    const [sr, ar] = await Promise.all([
+      _fetchJsonSoft(`/api/accounts/summary/?include_hidden=1&delta_period_days=${period}`),
+      _fetchJsonSoft(`/api/accounts/?include_hidden=1&delta_period_days=${period}`),
+    ]);
+    if (!sr.ok || !ar.ok || !Array.isArray(ar.data) || !sr.data) return;
+    const snap = _buildDeltaSnapshot(sr.data, ar.data);
+    if (snap) _storeDeltaCacheForPeriod(period, snap);
+  } catch (_) { /* префетч не критичен */ }
+}
+
+function _scheduleDeltaPrefetchExcept(excludePeriod) {
+  setTimeout(() => {
+    for (const p of _DELTA_PERIOD_SEQUENCE) {
+      if (p === excludePeriod) continue;
+      void _prefetchDeltaPeriodInBackground(p);
+    }
+  }, 100);
+}
+
 let LOAD_STATE = {
   hasError: false,
   errorMessage: '',
@@ -817,6 +970,26 @@ function _mskCalendarDateKey(d = new Date()) {
   }).format(d);
 }
 
+/** Доп. текст к ошибке fetch, если умер ephemeral-туннель Cloudflare. */
+function _apiTunnelDeadHint(err) {
+  const m = String(err instanceof Error ? err.message : err || '');
+  if (/\b501\b/i.test(m) && /5174/i.test(m)) {
+    return (
+      `${m}\n\n` +
+      'Порт 5174 — только статика (run_server.py), POST на /api не поддерживается. ' +
+      'Запустите Django на http://127.0.0.1:8000 — запросы к API пойдут туда автоматически.'
+    );
+  }
+  if (!/trycloudflare\.com/i.test(m)) return m;
+  if (!/\b530\b|\b502\b|\b503\b|\b504\b/i.test(m)) return m;
+  return (
+    `${m}\n\n` +
+    'Туннель trycloudflare больше не смотрит на Django (или бэкенд выключен). ' +
+    'Варианты: снова поднять cloudflared к `http://127.0.0.1:8000`, открыть интерфейс с `http://127.0.0.1:5174` ' +
+    'и очистить в localStorage ключ `new_frontend_api_base`, либо записать туда актуальный URL API.'
+  );
+}
+
 async function _fetchJson(url) {
   const candidates = _apiBaseCandidates();
 
@@ -830,7 +1003,7 @@ async function _fetchJson(url) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to fetch ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to fetch ${url}`)));
 }
 
 /** Успех/ошибка без «тихого» [] / null, чтобы отличить сбой сети от пустого ответа API. */
@@ -859,7 +1032,7 @@ async function _postJson(url, payload) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to post ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to post ${url}`)));
 }
 
 async function _delete(url) {
@@ -874,7 +1047,7 @@ async function _delete(url) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to delete ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to delete ${url}`)));
 }
 
 async function _patchJson(url, payload) {
@@ -893,7 +1066,7 @@ async function _patchJson(url, payload) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to patch ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to patch ${url}`)));
 }
 
 /** GET → Blob: перебирает базы API (как _fetchJson), если same-origin не проксирует /api/. */
@@ -909,7 +1082,7 @@ async function _fetchBlobWithApiBases(url) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to fetch blob ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to fetch blob ${url}`)));
 }
 
 /** POST multipart → JSON: новый FormData на каждую попытку (файл нельзя читать повторно). */
@@ -934,7 +1107,7 @@ async function _postFormDataJsonWithApiBases(url, file, fieldName = 'file') {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to post ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to post ${url}`)));
 }
 
 /** POST → Blob (например refresh_all?download_csv=1). */
@@ -950,12 +1123,24 @@ async function _postBlobWithApiBases(url, init) {
       lastErr = err;
     }
   }
-  throw lastErr || new Error(`Failed to post ${url}`);
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to post ${url}`)));
 }
 
 function _isLocalHostHostName(hostname) {
   const h = String(hostname || '').toLowerCase();
   return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+/** ``run_server.py`` new_frontend — только статика, без /api; POST на этот origin → HTTP 501. */
+function _isLikelyNewFrontendStaticServerOrigin() {
+  try {
+    const u = new URL(window.location.href);
+    if (!_isLocalHostHostName(u.hostname)) return false;
+    const p = u.port || (u.protocol === 'https:' ? '443' : '80');
+    return String(p) === '5174';
+  } catch (_) {
+    return false;
+  }
 }
 
 function _isPrivateLoopbackBase(base) {
@@ -971,28 +1156,52 @@ function _apiBaseCandidates() {
   const storedBase = (window.localStorage.getItem('new_frontend_api_base') || '').trim().replace(/\/$/, '');
   const host = window.location.hostname || '';
   const isLocalPage = _isLocalHostHostName(host);
-
-  // Always try same-origin first: when opened via tunnel/proxy this avoids
-  // browser "local network / device access" permission prompts.
   const sameOrigin = window.location.origin.replace(/\/$/, '');
-  const candidates = [sameOrigin];
+  const storedTunnel = /trycloudflare\.com/i.test(storedBase);
+  /** @type {string[]} */
+  const out = [];
+  const add = (b) => {
+    const v = String(b || '').trim().replace(/\/$/, '');
+    if (!v || out.includes(v)) return;
+    out.push(v);
+  };
+
+  // Страница на localhost / 127.0.0.1: сначала Django :8000 — иначе первым шёл
+  // python http.server (5174) без /api, а в localStorage часто залипает мёртвый trycloudflare → HTTP 530.
+  if (isLocalPage) {
+    add('http://127.0.0.1:8000');
+    add('http://localhost:8000');
+  }
+
+  // Same-origin: при общем туннеле с бэкендом сюда попадёт рабочий API.
+  // Не добавляем http://127.0.0.1:5174 (new_frontend/run_server.py): там только SimpleHTTPRequestHandler,
+  // пути /api/... не проксируются — POST возвращает HTTP 501.
+  if (!_isLikelyNewFrontendStaticServerOrigin()) {
+    add(sameOrigin);
+  }
 
   if (storedBase) {
-    // On public domains, ignore loopback API overrides that trigger prompts.
-    if (isLocalPage || !_isPrivateLoopbackBase(storedBase)) candidates.push(storedBase);
+    if (isLocalPage && storedTunnel) {
+      // Не добавляем старый trycloudflare при локальной разработке — он почти всегда 530.
+    } else if (isLocalPage || !_isPrivateLoopbackBase(storedBase)) {
+      add(storedBase);
+    }
   }
 
-  // Local development fallback only when page itself is local.
-  if (isLocalPage) {
-    candidates.push('http://127.0.0.1:8000', 'http://localhost:8000');
+  // С http-страницы не-local (редко): последний шанс добраться до локального Django.
+  if (!isLocalPage && window.location.protocol !== 'https:') {
+    add('http://127.0.0.1:8000');
+    add('http://localhost:8000');
   }
 
-  return Array.from(new Set(candidates.filter(Boolean)));
+  return out;
 }
 
 function _apiBasePrimary() {
   const candidates = _apiBaseCandidates();
-  return candidates[0] || window.location.origin.replace(/\/$/, '');
+  if (candidates.length) return candidates[0];
+  if (_isLikelyNewFrontendStaticServerOrigin()) return 'http://127.0.0.1:8000';
+  return window.location.origin.replace(/\/$/, '');
 }
 
 async function uiAlert(message, title = 'Уведомление') {
@@ -1068,6 +1277,39 @@ function _normUser(username) {
   return String(username || '').replace(/^@+/, '').trim();
 }
 
+/** Публичный URL профиля/страницы из поля username (как в API): цифры → profile.php, иначе slug; поддержка старых полных URL в БД. */
+function _facebookProfileUrlFromUsernameField(raw) {
+  const s = _normUser(raw);
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const url = new URL(s);
+      const hostOk =
+        /facebook\.com$/i.test(url.hostname) ||
+        url.hostname.endsWith('.facebook.com') ||
+        /^fb\.com$/i.test(url.hostname);
+      if (!hostOk) return null;
+      const id = url.searchParams.get('id');
+      if (url.pathname.toLowerCase().includes('profile.php') && id && /^\d+$/.test(id))
+        return `https://www.facebook.com/profile.php?id=${encodeURIComponent(id)}`;
+      const segs = url.pathname.split('/').filter(Boolean);
+      const first = segs[0];
+      if (first && /^\d+$/.test(first))
+        return `https://www.facebook.com/profile.php?id=${encodeURIComponent(first)}`;
+      if (first && !/\.php$/i.test(first)) return `https://www.facebook.com/${encodeURIComponent(first)}`;
+      return `${url.origin}${url.pathname}`;
+    } catch (_) {
+      return null;
+    }
+  }
+  if (/profile\.php/i.test(s) && /\bid=\d+/i.test(s)) {
+    const m = s.match(/\bid=(\d+)/i);
+    if (m) return `https://www.facebook.com/profile.php?id=${encodeURIComponent(m[1])}`;
+  }
+  if (/^\d+$/.test(s)) return `https://www.facebook.com/profile.php?id=${encodeURIComponent(s)}`;
+  return `https://www.facebook.com/${encodeURIComponent(s)}`;
+}
+
 function _externalProfileUrl(platform, username) {
   const u = _normUser(username);
   if (!u) return null;
@@ -1086,8 +1328,7 @@ function _externalProfileUrl(platform, username) {
     case 'threads':
       return `https://www.threads.net/@${encodeURIComponent(u)}`;
     case 'facebook':
-      if (/^\d+$/.test(u)) return `https://www.facebook.com/profile.php?id=${encodeURIComponent(u)}`;
-      return `https://www.facebook.com/${encodeURIComponent(u)}`;
+      return _facebookProfileUrlFromUsernameField(u);
     case 'rumble':
       return `https://rumble.com/c/${encodeURIComponent(u)}`;
     case 'reddit':
@@ -1251,61 +1492,47 @@ function MobileGlobalStyle() {
 async function loadDashboardData() {
   LOAD_STATE = { hasError: false, errorMessage: '' };
   let hadAnySuccess = false;
-  const [
-    summaryR, accountsR, profilesR, topR, authR, allPlatformsR, scheduleR, autoSeriesR, autoStatusR,
-  ] = await Promise.all([
-    _fetchJsonSoft('/api/accounts/summary/'),
-    _fetchJsonSoft('/api/accounts/?include_hidden=1'),
-    _fetchJsonSoft('/api/accounts/profiles/?include_hidden_profiles=1'),
-    _fetchJsonSoft('/api/accounts/analytics/top-posts/?period=1d&sort_by=view_delta&page_size=8&min_views=0'),
-    _fetchJsonSoft('/api/settings/status/'),
-    _fetchJsonSoft('/api/accounts/platforms/'),
+  DELTA_PERIOD_CACHE = { 1: null, 7: null, 30: null };
+
+  const [scheduleR, autoStatusR] = await Promise.all([
     _fetchJsonSoft('/api/accounts/schedule/'),
-    _fetchJsonSoft('/api/accounts/auto-refresh-series/'),
     _fetchJsonSoft('/api/accounts/auto-refresh-status/'),
   ]);
+  // Раньше hadAnySuccess не учитывал этот батч: при живом API, но сбое summary/accounts,
+  // показывалось «не удалось связаться», хотя /api уже отвечал (вводило в заблуждение).
+  if (scheduleR.ok || autoStatusR.ok) {
+    hadAnySuccess = true;
+  }
 
   const scheduleResp = scheduleR.ok ? scheduleR.data : null;
   const autoStatusResp = autoStatusR.ok ? autoStatusR.data : null;
   TV_AUTO_SCHEDULE_LABEL = _buildTvAutoScheduleLabel(scheduleResp);
   TV_AUTO_IS_RUNNING = !!(autoStatusResp && autoStatusResp.is_running);
+  {
+    const raw = scheduleResp && scheduleResp.account_delta_period_days != null
+      ? Number(scheduleResp.account_delta_period_days)
+      : 1;
+    ACCOUNT_DELTA_PERIOD_DAYS = [1, 7, 30].includes(raw) ? raw : 1;
+  }
+
+  const p = ACCOUNT_DELTA_PERIOD_DAYS;
+  const [
+    summaryR, accountsR, profilesR, topR, authR, allPlatformsR, autoSeriesR,
+  ] = await Promise.all([
+    _fetchJsonSoft(`/api/accounts/summary/?include_hidden=1&delta_period_days=${p}`),
+    _fetchJsonSoft(`/api/accounts/?include_hidden=1&delta_period_days=${p}`),
+    _fetchJsonSoft('/api/accounts/profiles/?include_hidden_profiles=1'),
+    _fetchJsonSoft('/api/accounts/analytics/top-posts/?period=1d&sort_by=view_delta&page_size=8&min_views=0'),
+    _fetchJsonSoft('/api/settings/status/'),
+    _fetchJsonSoft('/api/accounts/platforms/'),
+    _fetchJsonSoft('/api/accounts/auto-refresh-series/'),
+  ]);
 
   const summary = summaryR.ok ? summaryR.data : null;
   if (summary) {
     hadAnySuccess = true;
-    TOTAL = {
-      followers: {
-        value: Number(summary.follower_count || 0),
-        delta: Number(summary.follower_delta || 0),
-        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_follower_delta),
-      },
-      views: {
-        value: Number(summary.view_count || 0),
-        delta: Number(summary.view_delta || 0),
-        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_view_delta),
-      },
-      likes: {
-        value: Number(summary.like_count || 0),
-        delta: Number(summary.like_delta || 0),
-        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_like_delta),
-      },
-      posts: {
-        value: Number(summary.post_count || 0),
-        delta: Number(summary.post_delta || 0),
-        yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_post_delta),
-      },
-      accounts: Number(summary.account_count || 0),
-    };
-    const byPlatform = Array.isArray(summary.by_platform) ? summary.by_platform : [];
-    const totalAcc = Math.max(1, Number(summary.account_count || 0));
-    PLATFORMS = byPlatform.map((p) => ({
-      id: String(p.platform || ''),
-      label: String(p.platform_label || p.platform || ''),
-      color: PLATFORM_COLORS[String(p.platform || '')] || '#9ca3af',
-      share: Math.max(0, Number(p.account_count || 0) / totalAcc),
-      accounts: Number(p.account_count || 0),
-    }));
-
+    TOTAL = _totalFromSummary(summary);
+    PLATFORMS = _platformsFromSummary(summary);
     TREND_24H = _buildAscendingTrend(TOTAL.views.value, TOTAL.views.delta, 24);
     TREND_7D = _buildAscendingTrend(TOTAL.views.value, TOTAL.views.delta * 3, 7);
   }
@@ -1358,32 +1585,7 @@ async function loadDashboardData() {
   const accountsResp = accountsR.ok ? accountsR.data : null;
   if (Array.isArray(accountsResp)) {
     hadAnySuccess = true;
-    ACCOUNTS = accountsResp.map((a) => ({
-      id: Number(a.id || 0),
-      name: String(a.display_name || a.username || ''),
-      handle: a.platform === 'rumble' ? String(a.username || '') : `@${String(a.username || '')}`,
-      username: String(a.username || ''),
-      avatarUrl: _pickAvatarUrl(a),
-      platform: String(a.platform || ''),
-      profile: a.profile_id != null ? String(a.profile_id) : 'none',
-      followers: Number(a.follower_count || 0),
-      dFollowers: Number(a.follower_delta ?? 0),
-      views: Number(a.view_count || 0),
-      dViews: Number(a.view_delta || 0),
-      likes: Number(a.like_count || 0),
-      dLikes: Number(a.like_delta || 0),
-      posts: Number(a.post_count || 0),
-      dPosts: Number(a.post_delta || 0),
-      unavailable: !!a.profile_unavailable,
-      unavailableReason: String(a.profile_unavailable_reason || a.unavailable_reason || ''),
-      isPlatformHidden: !!a.is_platform_hidden,
-      isProfileHidden: !!a.is_profile_hidden,
-      updated: _ruShortDate(a.updated_at),
-      updatedTs: (() => {
-        const t = Date.parse(String(a.updated_at || ''));
-        return Number.isFinite(t) ? t : 0;
-      })(),
-    }));
+    ACCOUNTS = accountsResp.map(_mapAccountApiRow);
 
     const byProfileFromAccounts = new Map();
     for (const acc of ACCOUNTS) {
@@ -1394,6 +1596,12 @@ async function loadDashboardData() {
       ...p,
       accounts: Number(byProfileFromAccounts.get(String(p.id)) || 0),
     }));
+
+    if (summary && Array.isArray(accountsResp)) {
+      const snap = _buildDeltaSnapshot(summary, accountsResp);
+      if (snap) _storeDeltaCacheForPeriod(p, snap);
+    }
+    _scheduleDeltaPrefetchExcept(p);
   }
 
   const topResp = topR.ok ? topR.data : null;
@@ -1447,10 +1655,26 @@ async function loadDashboardData() {
     });
   }
   if (!hadAnySuccess) {
+    const parts = [
+      'Не удалось получить данные с backend API (все запросы завершились ошибкой).',
+      '1) Запустите Django из папки backend: python manage.py runserver (порт 8000).',
+      '2) trycloudflare: из папки new_frontend выполните npm run tunnel — нужен cloudflared.new-frontend.yml (маршруты ^/api → :8000, остальное → :5174). Команда только на 5174 API не отдаёт.',
+      '3) Если API на другом origin: localStorage.setItem("new_frontend_api_base", "https://…").',
+    ];
+    const hintTry = /trycloudflare\.com/i.test(window.location.hostname || '');
+    if (hintTry) {
+      parts.push('Сейчас страница на trycloudflare: откройте DevTools → Network и проверьте запрос к /api/… (не должно быть 404/HTML от статики на 5174).');
+    }
+    const errBits = [scheduleR, autoStatusR, summaryR, accountsR, profilesR, topR, authR, allPlatformsR, autoSeriesR]
+      .filter((r) => r && !r.ok && r.error)
+      .slice(0, 4)
+      .map((r) => (r.error instanceof Error ? r.error.message : String(r.error)));
+    if (errBits.length) {
+      parts.push('Детали: ' + errBits.join(' | '));
+    }
     LOAD_STATE = {
       hasError: true,
-      errorMessage:
-        'Не удалось связаться с backend API (сеть или сервер не отвечает). Запустите Django из папки backend: python manage.py runserver. Если страница открыта не с localhost, задайте базовый URL API в localStorage: new_frontend_api_base (например http://127.0.0.1:8000).',
+      errorMessage: parts.join('\n'),
     };
   }
 
@@ -1476,7 +1700,30 @@ function _parseBulkLine(line) {
   if (l.includes('youtube.com') || l.includes('youtu.be')) return { platform: 'youtube', username: _extractUsernameFromText(s) };
   if (l.includes('threads.net') || l.includes('threads.com')) return { platform: 'threads', username: _extractUsernameFromText(s) };
   if (l.includes('twitter.com') || l.includes('x.com')) return { platform: 'x', username: _extractUsernameFromText(s) };
-  if (l.includes('facebook.com')) return { platform: 'facebook', username: _extractUsernameFromText(s) };
+  if (l.includes('facebook.com') || l.includes('fb.com')) {
+    const qid = s.match(/[?&]id=(\d{6,})/i);
+    if (qid) return { platform: 'facebook', username: qid[1] };
+    try {
+      const href = s.startsWith('http') ? s : 'https://' + s.replace(/^\/+/, '');
+      const url = new URL(href);
+      const hostOk =
+        /facebook\.com$/i.test(url.hostname) ||
+        url.hostname.endsWith('.facebook.com') ||
+        /^fb\.com$/i.test(url.hostname);
+      if (!hostOk) return { platform: 'facebook', username: _extractUsernameFromText(s) };
+      const parts = url.pathname.split('/').filter(Boolean);
+      const seg = parts[0];
+      if (!seg) return { platform: 'facebook', username: _extractUsernameFromText(s) };
+      if (seg.toLowerCase() === 'profile.php') {
+        const id = url.searchParams.get('id');
+        if (id && /^\d+$/.test(id)) return { platform: 'facebook', username: id };
+      }
+      if (/^\d+$/.test(seg)) return { platform: 'facebook', username: seg };
+      return { platform: 'facebook', username: decodeURIComponent(seg) };
+    } catch (_) {
+      return { platform: 'facebook', username: _extractUsernameFromText(s) };
+    }
+  }
   if (l.includes('t.me')) return { platform: 'telegram', username: _extractUsernameFromText(s) };
   if (l.includes('reddit.com')) return { platform: 'reddit', username: _extractUsernameFromText(s) };
   if (l.includes('rumble.com')) return { platform: 'rumble', username: _extractUsernameFromText(s) };
@@ -2035,7 +2282,7 @@ function TVScreen({ tweaks, onExit }) {
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
                           <span className="mono tnum" style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', minWidth: 18 }}>{i + 1}</span>
-                          <span style={{ fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.handle}</span>
+                          <span style={{ fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{_tvBroadcastAccountTitle(a)}</span>
                         </div>
                         <span className="mono tnum" style={{ fontSize: 15, fontWeight: 600, color: '#4ade80' }}>{_hasDelta(a.dViews) ? `+${fmt(a.dViews)}` : '0'}</span>
                       </div>
@@ -2732,7 +2979,7 @@ function SceneTop({ accent }) {
                     fallbackBg={`linear-gradient(135deg, ${meta.color}55, ${prof.color}40)`}
                   />
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 19, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.handle}</div>
+                    <div style={{ fontSize: 19, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{_tvBroadcastAccountTitle(a)}</div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
                       <span className="mono" style={{ fontSize: 11, color: meta.color, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{meta.label}</span>
                       <span style={{ width: 3, height: 3, borderRadius: 999, background: 'rgba(255,255,255,0.3)' }} />
@@ -2812,7 +3059,7 @@ function TVPlayIcon({ size = 10, color = 'currentColor' }) {
 // ── Bottom ticker ──────────────────────────────────────────
 function TVTicker({ accent }) {
   const items = useMemoTV(() => {
-    return ACCOUNTS.filter(a => a.dViews > 0).slice(0, 10).map(a => `${a.handle} +${fmt(a.dViews)} VIEWS`);
+    return ACCOUNTS.filter(a => a.dViews > 0).slice(0, 10).map(a => `${_tvBroadcastAccountTitle(a)} +${fmt(a.dViews)} VIEWS`);
   }, []);
   return (
     <div style={{ position: 'absolute', bottom: 28, left: 0, right: 0, display: 'flex', alignItems: 'center', gap: 20, padding: '0 56px' }}>
@@ -2941,6 +3188,8 @@ Object.assign(window, { TVScreen });
 const { useState: useStateAcc, useMemo: useMemoAcc } = React;
 
 function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOpenGlobalModal }) {
+  const [deltaPeriodSaving, setDeltaPeriodSaving] = React.useState(false);
+  const [deltaUiEpoch, bumpDeltaUi] = React.useReducer((x) => x + 1, 0);
   const accent = tweaks.accent || '#6aa9ff';
   const view = tweaks.accounts_view || 'table'; // table | cards
   const isMobile = useIsMobile(980);
@@ -2998,6 +3247,51 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
     setSortKey('views');
     setSortOrder('desc');
     setSortByDelta(false);
+  };
+
+  const cycleAccountDeltaPeriod = async () => {
+    if (deltaPeriodSaving) return;
+    const next = _nextDeltaPeriodDays(ACCOUNT_DELTA_PERIOD_DAYS);
+    const cached = DELTA_PERIOD_CACHE[next];
+    if (cached) {
+      const snap = {
+        accounts: cached.accounts.map((x) => ({ ...x })),
+        total: JSON.parse(JSON.stringify(cached.total)),
+        platforms: cached.platforms.map((x) => ({ ...x })),
+      };
+      if (_applyDeltaSnapshotToGlobals(snap)) {
+        ACCOUNT_DELTA_PERIOD_DAYS = next;
+        bumpDeltaUi();
+      }
+      void _postJson('/api/accounts/schedule/', { account_delta_period_days: next }).catch(() => {});
+      _scheduleDeltaPrefetchExcept(next);
+      return;
+    }
+    setDeltaPeriodSaving(true);
+    try {
+      const [sr, ar] = await Promise.all([
+        _fetchJsonSoft(`/api/accounts/summary/?include_hidden=1&delta_period_days=${next}`),
+        _fetchJsonSoft(`/api/accounts/?include_hidden=1&delta_period_days=${next}`),
+      ]);
+      if (sr.ok && ar.ok && Array.isArray(ar.data) && sr.data) {
+        const snap = _buildDeltaSnapshot(sr.data, ar.data);
+        if (snap && _applyDeltaSnapshotToGlobals(snap)) {
+          ACCOUNT_DELTA_PERIOD_DAYS = next;
+          _storeDeltaCacheForPeriod(next, snap);
+          bumpDeltaUi();
+        }
+      } else {
+        await _postJson('/api/accounts/schedule/', { account_delta_period_days: next });
+        await onDataChanged?.();
+        return;
+      }
+      void _postJson('/api/accounts/schedule/', { account_delta_period_days: next }).catch(() => {});
+      _scheduleDeltaPrefetchExcept(next);
+    } catch (e) {
+      await uiAlert(`Не удалось переключить период: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    } finally {
+      setDeltaPeriodSaving(false);
+    }
   };
 
   const saveVisibility = async (nextPlatforms, nextProfileIds) => {
@@ -3080,7 +3374,7 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
     }
   };
 
-  const filtered = useMemoAcc(() => {
+  const { filtered, barStats } = useMemoAcc(() => {
     const rows = ACCOUNTS.filter(a =>
       (showHidden || (!a.isPlatformHidden && !a.isProfileHidden)) &&
       (platform === 'all' || a.platform === platform) &&
@@ -3088,6 +3382,7 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
       (status === 'all' || (status === 'avail' ? !a.unavailable : a.unavailable)) &&
       (!search.trim() || a.name.toLowerCase().includes(search.toLowerCase()) || a.handle.toLowerCase().includes(search.toLowerCase()))
     );
+    const barStats = _aggregateBarStatsFromAccountRows(rows);
     const getter = (a) => {
       if (sortByDelta) {
         if (sortKey === 'followers') return _toSortableNumber(a.dFollowers);
@@ -3104,8 +3399,8 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
       const diff = getter(a) - getter(b);
       return sortOrder === 'asc' ? diff : -diff;
     });
-    return rows;
-  }, [platform, profile, status, search, showHidden, sortKey, sortOrder, sortByDelta]);
+    return { filtered: rows, barStats };
+  }, [platform, profile, status, search, showHidden, sortKey, sortOrder, sortByDelta, deltaUiEpoch]);
 
   const platformFilterOptions = useMemoAcc(() => {
     const fromAll = (ALL_PLATFORMS || []).map((p) => ({
@@ -3139,11 +3434,15 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }} data-screen-label="Accounts List">
       <TopBar
         accent={accent}
+        barStats={barStats}
         onRefreshAll={() => onOpenGlobalModal?.('refresh_all')}
         onOpenSchedule={() => onOpenGlobalModal?.('schedule')}
         onOpenAddList={() => onOpenGlobalModal?.('add_list')}
         onOpenAddOne={() => onOpenGlobalModal?.('add_one')}
         busy={busy}
+        deltaPeriodDays={ACCOUNT_DELTA_PERIOD_DAYS}
+        onDeltaPeriodCycle={cycleAccountDeltaPeriod}
+        deltaPeriodBusy={deltaPeriodSaving}
       />
       <div style={{ flex: 1, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '280px 1fr', gap: 0 }}>
         <Sidebar
@@ -3259,13 +3558,83 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
   );
 }
 
-function TopBar({ accent, onRefreshAll, onOpenSchedule, onOpenAddList, onOpenAddOne, busy }) {
+function _topBarStatsFromTotal() {
+  return {
+    followers: { value: TOTAL.followers.value, delta: TOTAL.followers.delta },
+    views: { value: TOTAL.views.value, delta: TOTAL.views.delta },
+    likes: { value: TOTAL.likes.value, delta: TOTAL.likes.delta },
+    posts: { value: TOTAL.posts.value, delta: TOTAL.posts.delta },
+  };
+}
+
+/** Суммы по списку аккаунтов (как на старом фронте) — для шапки при активных фильтрах. */
+function _aggregateBarStatsFromAccountRows(rows) {
+  const z = { value: 0, delta: 0 };
+  const out = { followers: { ...z }, views: { ...z }, likes: { ...z }, posts: { ...z }, count: 0 };
+  if (!Array.isArray(rows) || rows.length === 0) return out;
+  out.count = rows.length;
+  for (const a of rows) {
+    out.followers.value += Number(a.followers || 0);
+    out.views.value += Number(a.views || 0);
+    out.likes.value += Number(a.likes || 0);
+    out.posts.value += Number(a.posts || 0);
+    out.followers.delta += Number(a.dFollowers ?? 0);
+    out.views.delta += Number(a.dViews ?? 0);
+    out.likes.delta += Number(a.dLikes ?? 0);
+    out.posts.delta += Number(a.dPosts ?? 0);
+  }
+  return out;
+}
+
+function DeltaPeriodCycleButton({ value, onCycle, disabled, isMobile, accent = '#6aa9ff' }) {
+  return (
+    <button
+      type="button"
+      disabled={!!disabled}
+      onClick={onCycle}
+      className="mono tnum"
+      title="Период приростов: нажмите, чтобы переключить 1д → 7д → 30д"
+      style={{
+        minWidth: isMobile ? 52 : 48,
+        padding: isMobile ? '8px 12px' : '8px 12px',
+        borderRadius: 10,
+        border: `1px solid ${accent}88`,
+        background: 'rgba(106,169,255,0.12)',
+        color: 'var(--ink)',
+        fontSize: isMobile ? 12 : 12,
+        fontWeight: 700,
+        letterSpacing: '0.04em',
+        cursor: disabled ? 'wait' : 'pointer',
+        fontFamily: 'inherit',
+        flexShrink: 0,
+        opacity: disabled ? 0.65 : 1,
+      }}
+    >
+      {value}д
+    </button>
+  );
+}
+
+function TopBar({
+  accent,
+  barStats,
+  onRefreshAll,
+  onOpenSchedule,
+  onOpenAddList,
+  onOpenAddOne,
+  busy,
+  deltaPeriodDays,
+  onDeltaPeriodCycle,
+  deltaPeriodBusy,
+}) {
   const isMobile = useIsMobile(980);
+  const showDelta = typeof onDeltaPeriodCycle === 'function';
+  const s = barStats || _topBarStatsFromTotal();
   const stats = [
-    { label: isMobile ? 'ПОДП' : 'ПОДПИСЧИКИ', value: TOTAL.followers.value, delta: TOTAL.followers.delta, color: '#4ade80' },
-    { label: isMobile ? 'ПРОСМ' : 'ПРОСМОТРЫ',  value: TOTAL.views.value,     delta: TOTAL.views.delta,     color: '#ec4899' },
-    { label: isMobile ? 'ЛАЙК' : 'ЛАЙКИ',      value: TOTAL.likes.value,     delta: TOTAL.likes.delta,     color: '#f59e0b' },
-    { label: isMobile ? 'ПУБЛ' : 'ПУБЛИКАЦИИ', value: TOTAL.posts.value,     delta: TOTAL.posts.delta,     color: accent },
+    { label: isMobile ? 'ПОДП' : 'ПОДПИСЧИКИ', value: s.followers.value, delta: s.followers.delta, color: '#4ade80' },
+    { label: isMobile ? 'ПРОСМ' : 'ПРОСМОТРЫ',  value: s.views.value,     delta: s.views.delta,     color: '#ec4899' },
+    { label: isMobile ? 'ЛАЙК' : 'ЛАЙКИ',      value: s.likes.value,     delta: s.likes.delta,     color: '#f59e0b' },
+    { label: isMobile ? 'ПУБЛ' : 'ПУБЛИКАЦИИ', value: s.posts.value,     delta: s.posts.delta,     color: accent },
   ];
   return (
     <header style={{
@@ -3305,11 +3674,37 @@ function TopBar({ accent, onRefreshAll, onOpenSchedule, onOpenAddList, onOpenAdd
           </React.Fragment>
         ))}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(4, minmax(0, 1fr))' : 'repeat(4, auto)', gap: 10, width: '100%' }}>
-        <Btn onClick={onRefreshAll} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '↻' : (busy ? 'Обновление...' : '↻ Обновить всё')}</Btn>
-        <Btn accent={accent} onClick={onOpenSchedule} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '⏱' : <><span style={{ width: 8, height: 8, borderRadius: 999, background: '#4ade80', display: 'inline-block', marginRight: 6, boxShadow: '0 0 8px #4ade80' }} />Автообновление</>}</Btn>
-        <Btn onClick={onOpenAddList} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '≡' : '+ Список'}</Btn>
-        <Btn onClick={onOpenAddOne} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '+' : '+ Добавить'}</Btn>
+      <div style={{
+        display: 'flex',
+        flexDirection: isMobile ? 'column' : 'row',
+        alignItems: isMobile ? 'stretch' : 'flex-start',
+        gap: isMobile ? 8 : 10,
+        width: '100%',
+        justifyContent: 'flex-end',
+        minWidth: 0,
+      }}>
+        {showDelta && (
+          <DeltaPeriodCycleButton
+            value={deltaPeriodDays ?? 1}
+            onCycle={onDeltaPeriodCycle}
+            disabled={deltaPeriodBusy}
+            isMobile={isMobile}
+            accent={accent}
+          />
+        )}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: isMobile ? 'repeat(4, minmax(0, 1fr))' : 'repeat(4, auto)',
+          gap: 10,
+          width: isMobile ? '100%' : undefined,
+          flex: isMobile ? undefined : '0 1 auto',
+          minWidth: 0,
+        }}>
+          <Btn onClick={onRefreshAll} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '↻' : (busy ? 'Обновление...' : '↻ Обновить всё')}</Btn>
+          <Btn accent={accent} onClick={onOpenSchedule} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '⏱' : <><span style={{ width: 8, height: 8, borderRadius: 999, background: '#4ade80', display: 'inline-block', marginRight: 6, boxShadow: '0 0 8px #4ade80' }} />Автообновление</>}</Btn>
+          <Btn onClick={onOpenAddList} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '≡' : '+ Список'}</Btn>
+          <Btn onClick={onOpenAddOne} style={isMobile ? { width: '100%', justifyContent: 'center' } : undefined}>{isMobile ? '+' : '+ Добавить'}</Btn>
+        </div>
       </div>
     </header>
   );
@@ -3869,7 +4264,13 @@ function AccountRow({ a, i, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId 
         <ProfileBadge id={a.profile} />
         <AvailabilityBadge unavailable={a.unavailable} reason={a.unavailableReason} />
       </div>
-      <div className="mono tnum" style={{ textAlign: 'right', color: a.followers ? '#fff' : 'var(--ink-mute)' }}>{a.followers ?? '—'}</div>
+      <div
+        className="mono tnum"
+        style={{ textAlign: 'right', color: a.followers ? '#fff' : 'var(--ink-mute)' }}
+        title={(a.platform === 'tiktok' || a.platform === 'instagram')
+          ? `Подписчики на профиле площадки: ${a.followers}. В снятой базе приложения: ${Number(a.audienceMembers ?? 0)}.`
+          : 'Подписчики (число на странице профиля площадки)'}
+      >{Number.isFinite(Number(a.followers)) ? fmt(a.followers) : '—'}</div>
       <div style={{ textAlign: 'right' }}>
         <div className="mono tnum" style={{ fontSize: 15, fontWeight: 500 }}>{fmt(a.views)}</div>
         {_hasDelta(a.dViews) && (
@@ -5251,6 +5652,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const [includeHiddenPlatform, setIncludeHiddenPlatform] = useStateMd(false);
   const [includeHiddenProfile, setIncludeHiddenProfile] = useStateMd(false);
   const [includeUnavailable, setIncludeUnavailable] = useStateMd(false);
+  const [accountDeltaPeriodDays, setAccountDeltaPeriodDays] = useStateMd(1);
   const [reportDownloading, setReportDownloading] = useStateMd(false);
   const [runBusy, setRunBusy] = useStateMd(false);
   const [runDetailOpen, setRunDetailOpen] = useStateMd(false);
@@ -5284,6 +5686,8 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
         setIncludeHiddenPlatform(!!sched.include_hidden_platform_accounts);
         setIncludeHiddenProfile(!!sched.include_hidden_profile_accounts);
         setIncludeUnavailable(!!sched.include_unavailable_accounts);
+        const apd = Number(sched.account_delta_period_days);
+        setAccountDeltaPeriodDays([1, 7, 30].includes(apd) ? apd : 1);
         setStatus(st);
       } catch (e) {
         await uiAlert(`Не удалось загрузить расписание: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
@@ -5323,6 +5727,9 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       include_hidden_platform_accounts: includeHiddenPlatform,
       include_hidden_profile_accounts: includeHiddenProfile,
       include_unavailable_accounts: includeUnavailable,
+      account_delta_period_days: [1, 7, 30].includes(Number(accountDeltaPeriodDays))
+        ? Number(accountDeltaPeriodDays)
+        : 1,
       times: mode === 'times' ? times : [],
     };
   };
@@ -5394,7 +5801,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       } else if (started) {
         await uiAlert('Автообновление запущено.', 'Автообновление');
       } else if (lastErr) {
-        throw lastErr;
+        throw new Error(_apiTunnelDeadHint(lastErr instanceof Error ? lastErr : new Error(String(lastErr))));
       }
     } catch (e) {
       await uiAlert(`Не удалось запустить: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
@@ -5517,6 +5924,16 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
             <input type="checkbox" checked={includeUnavailable} onChange={(e) => setIncludeUnavailable(e.target.checked)} />
             Учитывать недоступные аккаунты
           </label>
+        </div>
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginBottom: 8 }}>Период приростов в списке аккаунтов</div>
+          <DeltaPeriodCycleButton
+            value={accountDeltaPeriodDays}
+            onCycle={() => setAccountDeltaPeriodDays((v) => _nextDeltaPeriodDays(v))}
+            disabled={saving}
+            isMobile={isMobile}
+            accent={accent}
+          />
         </div>
       </div>
 
@@ -5804,6 +6221,7 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   const [busy, setBusy] = useStateMd(false);
   const [downloadCsvAfter, setDownloadCsvAfter] = useStateMd(false);
   const [updatedSortOrder, setUpdatedSortOrder] = useStateMd('desc'); // desc=newest first, asc=oldest first
+  const refreshModeRef = React.useRef(null);
 
   const togglePlatform = (id) => {
     setSelectedPlatforms((prev) => {
@@ -5876,32 +6294,102 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
     setBusy(true);
     try {
       const selectedAll = ids.length === ACCOUNTS.length;
-      if (downloadCsvAfter && selectedAll) {
-        const includeUnavailableParam = includeUnavailable ? '&include_unavailable_accounts=1' : '';
-        const blob = await _postBlobWithApiBases(`/api/accounts/refresh_all/?download_csv=1${includeUnavailableParam}`, {});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `refresh-report-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
+      refreshModeRef.current = selectedAll ? 'refresh_all' : 'bulk';
+      /** @type {null | { last_error?: string | null, has_csv_report?: boolean, failed_accounts?: number, is_running?: boolean }} */
+      let lastSt = null;
+      if (selectedAll) {
+        const params = new URLSearchParams();
+        if (includeUnavailable) params.set('include_unavailable_accounts', '1');
+        if (downloadCsvAfter) params.set('download_csv', '1');
+        const qs = params.toString();
+        await _postJson(`/api/accounts/refresh_all/${qs ? `?${qs}` : ''}`, {});
+        const deadline = Date.now() + 2 * 60 * 60 * 1000;
+        while (Date.now() < deadline) {
+          const st = await _fetchJson('/api/accounts/refresh-all-status/');
+          lastSt = st;
+          if (!st.is_running) break;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        if (lastSt && lastSt.is_running) {
+          throw new Error('Превышено время ожидания фонового сбора (2 ч). Проверьте статус на сервере.');
+        }
+        if (downloadCsvAfter && lastSt?.has_csv_report) {
+          const blob = await _fetchBlobWithApiBases('/api/accounts/refresh-all-report/');
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `refresh-report-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+        const failedN = Number(lastSt?.failed_accounts || 0);
+        const warn = (lastSt && lastSt.last_error) ? String(lastSt.last_error) : '';
+        if (warn || failedN > 0) {
+          await uiAlert(
+            `Сбор завершён.${failedN > 0 ? ` Ошибок по аккаунтам: ${failedN}.` : ''}${warn ? `\n\n${warn}` : ''}\n\nРасширенный CSV-отчёт сохранён на сервере.`,
+            'Обновить аккаунты',
+          );
+        } else {
+          await uiAlert(
+            `Обновлено: ${ids.length}. Расширенный CSV с приростами и временем по аккаунтам сохранён на сервере.`,
+            'Обновить аккаунты',
+          );
+        }
       } else {
-        await _postJson('/api/accounts/bulk-refresh/', { ids });
+        /** @type {{ accounts?: unknown[], errors?: { id: number, detail: string }[], cancelled?: boolean }} */
+        const bulk = await _postJson('/api/accounts/bulk-refresh/', { ids });
+        const ok = Array.isArray(bulk?.accounts) ? bulk.accounts.length : 0;
+        const errs = Array.isArray(bulk?.errors) ? bulk.errors : [];
+        const lastErr = errs.length ? String(errs[errs.length - 1].detail || '') : '';
+        let msg = `Готово: успешно ${ok} из ${ids.length}`;
+        if (bulk?.cancelled) msg += '. Обновление остановлено.';
+        if (errs.length) {
+          msg += `. Ошибок: ${errs.length}.`;
+          if (lastErr) msg += `\n\nПоследняя: ${lastErr}`;
+        }
+        if (errs.length || bulk?.cancelled) {
+          await uiAlert(msg, 'Обновить аккаунты');
+        } else {
+          await uiAlert(`Обновлено: ${ids.length}`, 'Обновить аккаунты');
+        }
       }
       await onDataChanged?.();
-      await uiAlert(`Обновлено: ${ids.length}`, 'Обновить аккаунты');
       onClose?.();
     } catch (e) {
       await uiAlert(`Ошибка обновления: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
+      refreshModeRef.current = null;
       setBusy(false);
+    }
+  };
+
+  const downloadSavedRefreshReport = async () => {
+    try {
+      const blob = await _fetchBlobWithApiBases('/api/accounts/refresh-all-report/');
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `refresh-all-saved-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      await uiAlert(
+        `Нет сохранённого отчёта или ошибка сети: ${e instanceof Error ? e.message : String(e)}`,
+        'CSV отчёт',
+      );
     }
   };
 
   const stopRefresh = async () => {
     try {
-      await _postJson('/api/accounts/auto-refresh-stop/', {});
-      await uiAlert('Остановка запрошена. Текущий аккаунт завершится и процесс остановится.', 'Остановка обновления');
+      const mode = refreshModeRef.current;
+      if (mode === 'refresh_all') {
+        await _postJson('/api/accounts/refresh-all-stop/', {});
+        await uiAlert('Остановка сбора всех запрошена. Текущие аккаунты в воркерах завершатся, затем процесс остановится.', 'Остановка обновления');
+      } else {
+        await _postJson('/api/accounts/auto-refresh-stop/', {});
+        await uiAlert('Остановка запрошена. Текущий аккаунт завершится и процесс остановится.', 'Остановка обновления');
+      }
     } catch (e) {
       await uiAlert(`Не удалось остановить: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     }
@@ -6018,10 +6506,20 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
           </label>
         ))}
       </div>
-      <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--ink-dim)', fontSize: 13, marginBottom: 12 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--ink-dim)', fontSize: 13, marginBottom: 6 }}>
         <input type="checkbox" checked={downloadCsvAfter} onChange={(e) => setDownloadCsvAfter(e.target.checked)} />
-        Скачать CSV после завершения
+        Сразу скачать CSV в браузере после завершения
       </label>
+      <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginBottom: 10, lineHeight: 1.45 }}>
+        Если выбраны все аккаунты, запускается фоновый сбор: расширенный отчёт с приростами и временем всегда сохраняется на сервере до следующего такого сбора.
+      </div>
+      <button
+        type="button"
+        onClick={() => { void downloadSavedRefreshReport(); }}
+        style={{ padding: '8px 14px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', fontSize: 13, cursor: 'pointer', marginBottom: 12 }}
+      >
+        Скачать сохранённый отчёт последнего сбора (CSV)
+      </button>
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <button onClick={onClose} style={{ padding: '10px 16px', borderRadius: 10, border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-dim)', cursor: 'pointer' }}>Закрыть</button>
@@ -6124,9 +6622,18 @@ function NFUiHost() {
   );
 }
 
+function _initialRouteFromUrl() {
+  try {
+    const q = new URLSearchParams(window.location.search);
+    const r = (q.get('route') || q.get('screen') || '').trim().toLowerCase();
+    if (['tv', 'accounts', 'analytics', 'settings', 'modals'].includes(r)) return r;
+  } catch (_) {}
+  return null;
+}
+
 function App() {
   const [tweaks, setTweak] = useTweaks(TWEAK_DEFAULTS);
-  const [route, setRoute] = useStateApp(tweaks.start_screen || 'tv');
+  const [route, setRoute] = useStateApp(_initialRouteFromUrl() || tweaks.start_screen || 'tv');
   const [dataReady, setDataReady] = useStateApp(false);
   const [dataKey, setDataKey] = useStateApp(0);
   const [reloading, setReloading] = useStateApp(false);
