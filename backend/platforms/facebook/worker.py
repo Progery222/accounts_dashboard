@@ -866,24 +866,97 @@ _PROFILE_JS = """(username) => {
     }
 
     // ── Followers (подписчиков) ───────────────────────────────────────────────
-    // Formats: "15 млн — подписчиков", "15M followers", "N people follow this"
+    // Formats: "15 млн — подписчиков", "15M followers", "N people follow this".
+    // Важный кейс: при 0 Facebook может не показывать слово "подписчик*".
+    // Если ссылка followers найдена, но числа нет — это подтверждённый 0.
     let followers = '';
-    const follRe = [
-        /([\\d][\\d\\s,.]*)\\s*(млрд|млн|тыс)[.,]?\\s*(?:—\\s*)?подписчик/i,
-        /([\\d][\\d,.]*\\s*[KkMmBb]?)\\s*followers?[\\s\\n·•,]/i,
-        /([\\d][\\d\\s,.]*)\\s*(?:people\\s+)?follow\\s+this/i,
-    ];
-    for (const re of follRe) {
-        const m = bodyText.match(re);
-        if (m) {
-            followers = m[1].trim();
-            if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
-                followers += ' ' + m[2];
+    let followersConfirmed = false;
+    function parseCompactNum(text) {
+        const t0 = (text || '').toString().replace(/[\\u00a0\\u202f]/g, ' ').trim();
+        if (!t0) return NaN;
+        const ru = t0.match(/^([\\d]+(?:[.,][\\d]+)?)\\s*(млрд|млн|тыс)\\.?/i);
+        if (ru) {
+            const n = parseFloat(ru[1].replace(',', '.'));
+            const m = { млн: 1e6, тыс: 1e3, млрд: 1e9 }[ru[2].toLowerCase()] || 1;
+            return Math.round(n * m);
+        }
+        const la = t0.replace(/\\s+/g, '').replace(',', '.').match(/^([\\d]+(?:\\.[\\d]+)?)([KkMmBb]?)$/);
+        if (la) {
+            const m = { K: 1e3, M: 1e6, B: 1e9 }[la[2].toUpperCase()] || 1;
+            return Math.round(parseFloat(la[1]) * m);
+        }
+        const digits = t0.replace(/[^\\d]/g, '');
+        return digits ? parseInt(digits, 10) : NaN;
+    }
+    function readFollowersFromLink(a) {
+        if (!a) return { ok: false, value: 0 };
+        const href = (a.getAttribute('href') || '').toLowerCase();
+        if (!(href.includes('followers') || href.includes('sk=followers'))) {
+            return { ok: false, value: 0 };
+        }
+        const chunks = [];
+        const aria = (a.getAttribute('aria-label') || '').trim();
+        const title = (a.getAttribute('title') || '').trim();
+        const txt = (a.innerText || a.textContent || '').trim();
+        if (aria) chunks.push(aria);
+        if (title) chunks.push(title);
+        if (txt) chunks.push(txt);
+        const joined = chunks.join(' | ');
+        const hasFollowerWord = /(подписчик|followers?|follow this)/i.test(joined);
+        const labelled = joined.match(/([\\d][\\d\\s\\u00a0.,]*(?:\\s*(?:млрд|млн|тыс|[KkMmBb]))?)\\s*(?:подписчик\\w*|followers?|people\\s+follow\\s+this)/i);
+        if (labelled) {
+            const n = parseCompactNum(labelled[1]);
+            if (Number.isFinite(n) && n >= 0) return { ok: true, value: n };
+        }
+        for (const node of a.querySelectorAll('strong, span')) {
+            const t = (node.innerText || node.textContent || '').trim();
+            if (!t) continue;
+            const n = parseCompactNum(t);
+            if (Number.isFinite(n) && n >= 0) return { ok: true, value: n };
+        }
+        const anyNum = joined.match(/([\\d][\\d\\s\\u00a0.,]*(?:\\s*(?:млрд|млн|тыс|[KkMmBb]))?)/i);
+        if (anyNum) {
+            const n = parseCompactNum(anyNum[1]);
+            if (Number.isFinite(n) && n >= 0) return { ok: true, value: n };
+        }
+        if (hasFollowerWord || href.includes('sk=followers') || href.includes('/followers')) {
+            return { ok: true, value: 0 };
+        }
+        return { ok: false, value: 0 };
+    }
+    const followerAnchors = document.querySelectorAll(
+        '[role="banner"] a[href*="followers"], [role="banner"] a[href*="sk=followers"], ' +
+        '[role="navigation"] a[href*="followers"], [role="navigation"] a[href*="sk=followers"], ' +
+        '[role="main"] a[href*="followers"], [role="main"] a[href*="sk=followers"], ' +
+        'a[href*="profile.php?id="][href*="sk=followers"]'
+    );
+    for (const a of followerAnchors) {
+        const got = readFollowersFromLink(a);
+        if (got.ok) {
+            followers = String(got.value);
+            followersConfirmed = true;
             break;
         }
     }
+    if (!followersConfirmed) {
+        const follRe = [
+            /([\\d][\\d\\s,.]*)\\s*(млрд|млн|тыс)[.,]?\\s*(?:—\\s*)?подписчик/i,
+            /([\\d][\\d,.]*\\s*[KkMmBb]?)\\s*followers?[\\s\\n·•,]/i,
+            /([\\d][\\d\\s,.]*)\\s*(?:people\\s+)?follow\\s+this/i,
+        ];
+        for (const re of follRe) {
+            const m = bodyText.match(re);
+            if (m) {
+                followers = m[1].trim();
+                if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
+                    followers += ' ' + m[2];
+                followersConfirmed = true;
+                break;
+            }
+        }
+    }
     // Шапка / навигация: на вкладке «Фото» в body часто нет «X — подписчиков».
-    if (!followers) {
+    if (!followersConfirmed) {
         const selF = '[role="banner"] a[href*="followers"],[role="banner"] a[href*="sk=followers"],' +
             '[role="navigation"] a[href*="followers"],[role="navigation"] a[href*="sk=followers"]';
         for (const a of document.querySelectorAll(selF)) {
@@ -895,11 +968,12 @@ _PROFILE_JS = """(username) => {
                 followers = m[1].trim();
                 if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
                     followers += ' ' + m[2];
+                followersConfirmed = true;
                 break;
             }
         }
     }
-    if (!followers) {
+    if (!followersConfirmed) {
         const banner = document.querySelector('[role="banner"]');
         if (banner) {
             const bt = (banner.innerText || '').replace(/\\u00a0/g, ' ');
@@ -909,6 +983,7 @@ _PROFILE_JS = """(username) => {
                 followers = m[1].trim().replace(/\\s+/g, ' ');
                 if (m[2] && !/(млн|тыс|млрд)/i.test(followers))
                     followers += ' ' + m[2];
+                followersConfirmed = true;
             }
         }
     }
@@ -942,6 +1017,7 @@ _PROFILE_JS = """(username) => {
         avatar,
         bio,
         followers,
+        followersConfirmed,
         pageLikes,
         dbg: bodyText.slice(0, 300),
         dbgLikes,
@@ -1537,7 +1613,17 @@ def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
 
     fb_t = _parse_count(str(t.get("followers") or ""))
     fb_p = _parse_count(str(p.get("followers") or ""))
-    merged_followers = (p.get("followers") or "").strip() if fb_p > fb_t else (t.get("followers") or "").strip()
+    fc_t = bool(t.get("followersConfirmed"))
+    fc_p = bool(p.get("followersConfirmed"))
+    if fc_t and not fc_p:
+        merged_followers = (t.get("followers") or "").strip()
+        merged_followers_confirmed = True
+    elif fc_p and not fc_t:
+        merged_followers = (p.get("followers") or "").strip()
+        merged_followers_confirmed = True
+    else:
+        merged_followers = (p.get("followers") or "").strip() if fb_p > fb_t else (t.get("followers") or "").strip()
+        merged_followers_confirmed = fc_t or fc_p
 
     pl_t = _parse_count(str(t.get("pageLikes") or ""))
     pl_p = _parse_count(str(p.get("pageLikes") or ""))
@@ -1575,6 +1661,7 @@ def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
         "avatar": merged_avatar,
         "bio": merged_bio,
         "followers": merged_followers,
+        "followersConfirmed": merged_followers_confirmed,
         "pageLikes": merged_likes,
         "dbg": merged_dbg,
         "dbgLikes": (p.get("dbgLikes") or t.get("dbgLikes") or ""),
