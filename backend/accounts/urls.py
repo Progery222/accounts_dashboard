@@ -4,7 +4,9 @@ from .views import (
     AccountViewSet, ProfileViewSet, platforms, summary, refresh_schedule,
     auto_refresh_status, auto_refresh_series, auto_refresh_run_now, auto_refresh_stop,
     auto_refresh_report_download,
+    auto_refresh_last_error_ids,
     refresh_all_status, refresh_all_stop, refresh_all_report_download,
+    audience_scrape_stop,
     global_visibility,
 )
 from .analytics import top_posts, insights
@@ -25,8 +27,10 @@ urlpatterns = [
     path("auto-refresh-run-now/", auto_refresh_run_now),
     path("auto-refresh-stop/", auto_refresh_stop),
     path("auto-refresh-report/", auto_refresh_report_download),
+    path("auto-refresh-last-error-ids/", auto_refresh_last_error_ids),
     path("refresh-all-status/", refresh_all_status),
     path("refresh-all-stop/", refresh_all_stop),
+    path("audience-scrape-stop/", audience_scrape_stop),
     path("refresh-all-report/", refresh_all_report_download),
     path("analytics/top-posts/", top_posts),
     path("analytics/insights/", insights),

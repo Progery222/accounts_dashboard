@@ -80,7 +80,7 @@ class RefreshScheduleConfig(models.Model):
                 "include_unavailable_accounts": False,
                 "account_delta_period_days": 1,
                 "max_audience_followers_per_account": MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT,
-                "times": [],
+                "times": ["06:00", "12:00", "18:00", "00:00"],
             },
         )
         return obj
@@ -119,6 +119,8 @@ class AutoRefreshState(models.Model):
     last_error = models.TextField(blank=True, default="")
     last_report_csv = models.TextField(blank=True, default="")
     last_report_generated_at = models.DateTimeField(null=True, blank=True)
+    # ID аккаунтов со статусом «ошибка» в последнем завершённом автообновлении (по расписанию / «запустить сейчас»).
+    last_auto_refresh_error_account_ids = models.JSONField(blank=True, default=list)
     # Прогресс текущего/последнего автообновления: { "worker_count": int, "items": [...] }
     run_detail = models.JSONField(default=dict, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -144,6 +146,7 @@ class AutoRefreshState(models.Model):
                 "last_error": "",
                 "last_report_csv": "",
                 "last_report_generated_at": None,
+                "last_auto_refresh_error_account_ids": [],
                 "run_detail": {},
             },
         )
@@ -220,6 +223,11 @@ class Account(models.Model):
     like_count = models.BigIntegerField(default=0)
     view_count = models.BigIntegerField(default=0)
     post_count = models.IntegerField(default=0)
+    link_click_count = models.BigIntegerField(
+        default=0,
+        verbose_name="Переходы по ссылке из bio",
+        help_text="Сумма кликов по коротким ссылкам Links с label = URL профиля; обновляется при refresh.",
+    )
     profile_unavailable = models.BooleanField(
         default=False,
         verbose_name="Профиль на площадке недоступен",
@@ -250,6 +258,7 @@ class Account(models.Model):
                 "like_count": self.like_count,
                 "view_count": self.view_count,
                 "post_count": self.post_count,
+                "link_click_count": self.link_click_count,
             },
         )
         return snap, created
@@ -262,6 +271,7 @@ class AccountSnapshot(models.Model):
     like_count = models.BigIntegerField(default=0)
     view_count = models.BigIntegerField(default=0)
     post_count = models.IntegerField(default=0)
+    link_click_count = models.BigIntegerField(default=0)
 
     class Meta:
         unique_together = [("account", "date")]
@@ -283,6 +293,8 @@ class Post(models.Model):
     comment_count = models.BigIntegerField(default=0)
     share_count = models.BigIntegerField(default=0)
     posted_at = models.DateTimeField(null=True, blank=True)
+    # Не попал в последний авторитетный список со скрапа — не удаляем автоматически.
+    missing_from_scrape_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -365,6 +377,11 @@ class AudienceMember(models.Model):
         blank=True,
         default="",
         help_text="Часовой пояс с площадки (если отдаётся), например Europe/Moscow.",
+    )
+    follower_network = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Срез подписчиков этого подписчика (TikTok), до 100 записей с полями username, bio, счётчики.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

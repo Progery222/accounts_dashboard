@@ -304,7 +304,10 @@ async def main() -> None:
                     except Exception as e:
                         print(json.dumps({"error": f"Rumble: {e}"}, ensure_ascii=False), flush=True)
             finally:
-                await wu.close_context(context, browser)
+                if wu.worker_autoclose_browser_on_daemon_exit():
+                    await wu.close_context(context, browser)
+                else:
+                    await wu.daemon_idle_keep_browser_open("rumble_worker")
 
     if len(sys.argv) > 1 and sys.argv[1] == "--daemon":
         await daemon_loop()
@@ -313,22 +316,30 @@ async def main() -> None:
     arg = json.loads(sys.argv[1])
     username = _normalize_username(arg.get("username", ""))
     try:
-        async with async_playwright() as pw:
-            context, browser = await wu.launch_context(
-                pw,
-                platform="rumble",
-                profile_dir=rumble_profile_dir,
-                locale="en-US",
-                force_persistent=True,
-                browser_channel=rumble_channel,
-            )
-            page = await context.new_page()
-            try:
-                data = await fetch_with_page(page, username)
-            finally:
-                await page.close()
-                await wu.close_context(context, browser)
-        print(json.dumps(data, ensure_ascii=False))
+
+        async def _cli_once() -> None:
+            async with async_playwright() as pw:
+                context, browser = await wu.launch_context(
+                    pw,
+                    platform="rumble",
+                    profile_dir=rumble_profile_dir,
+                    locale="en-US",
+                    force_persistent=True,
+                    browser_channel=rumble_channel,
+                )
+                page = await context.new_page()
+                try:
+                    data = await fetch_with_page(page, username)
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as e:
+                    print(json.dumps({"error": f"Rumble: {e}"}, ensure_ascii=False), flush=True)
+                    await wu.finish_cli_session_keep_browser_by_default("rumble_worker", context, browser)
+                    return
+                print(json.dumps(data, ensure_ascii=False), flush=True)
+                await wu.finish_cli_session_keep_browser_by_default("rumble_worker", context, browser)
+
+        asyncio.run(_cli_once())
     except Exception as e:
         print(json.dumps({"error": f"Rumble @{username}: {e}"}, ensure_ascii=False))
         sys.exit(1)

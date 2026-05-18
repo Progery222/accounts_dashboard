@@ -70,8 +70,12 @@ class Command(BaseCommand):
         autofill = bool(options.get("autofill"))
 
         self.stdout.write("Открываю браузер и перехожу на страницу входа TikTok…")
-        if autofill and username:
+        if autofill and username and password:
             self.stdout.write(f"Буду заполнять логин: {username}")
+        elif autofill and username and not password:
+            self.stdout.write(
+                self.style.WARNING("В настройках нет TIKTOK_PASSWORD — автозаполнение отключено."),
+            )
         self.stdout.write(f"Куки будут сохранены в: {state_file}\n")
 
         asyncio.run(
@@ -133,30 +137,22 @@ class Command(BaseCommand):
                 )
                 page = await context.new_page()
 
-                # Open generic login page so user can choose QR / phone / email.
-                await page.goto(
-                    "https://www.tiktok.com/login",
-                    wait_until="domcontentloaded",
-                )
-                await page.wait_for_timeout(2000)
+                from platforms.tiktok.auth_browser import try_fill_tiktok_login_credentials
 
-                if autofill and username:
-                    try:
-                        # Fill username field
-                        user_sel = 'input[name="username"], input[placeholder*="email" i], input[autocomplete="username"]'
-                        await page.wait_for_selector(user_sel, timeout=8000)
-                        await page.fill(user_sel, username)
-                        await page.wait_for_timeout(500)
-                    except Exception:
-                        self.stdout.write(self.style.WARNING("Не удалось найти поле логина — заполни вручную."))
-
-                if autofill and password:
-                    try:
-                        pass_sel = 'input[type="password"]'
-                        await page.wait_for_selector(pass_sel, timeout=5000)
-                        await page.fill(pass_sel, password)
-                    except Exception:
-                        self.stdout.write(self.style.WARNING("Не удалось заполнить пароль — введи вручную."))
+                if autofill and username and password:
+                    ok = await try_fill_tiktok_login_credentials(page, username, password)
+                    if not ok:
+                        self.stdout.write(
+                            self.style.WARNING(
+                                "Не удалось автоматически заполнить форму — выберите вход по email и введите данные вручную.",
+                            ),
+                        )
+                else:
+                    await page.goto(
+                        "https://www.tiktok.com/login",
+                        wait_until="domcontentloaded",
+                    )
+                    await page.wait_for_timeout(2000)
 
                 self.stdout.write(
                     "\nЕсли появилась капча или 2FA — пройди их в браузере.\n"

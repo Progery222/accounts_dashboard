@@ -111,7 +111,7 @@ def _normalize_posts(payload: dict, subreddit: str) -> list[dict]:
     return posts
 
 
-async def run_once(arg: dict) -> dict:
+async def run_once(arg: dict) -> None:
     subreddit = (arg.get("subreddit") or "").strip()
     limit = max(1, min(100, int(arg.get("limit") or 25)))
     async with async_playwright() as pw:
@@ -129,9 +129,13 @@ async def run_once(arg: dict) -> dict:
             if status >= 400 or not body:
                 text = str(listing.get("text") or "")[:300]
                 raise ValueError(f"Reddit hot.json недоступен (status={status}). {text}")
-            return {"posts": _normalize_posts(body, subreddit)}
-        finally:
-            await _wu.close_context(context, browser)
+            data = {"posts": _normalize_posts(body, subreddit)}
+            write_json_line(data)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as e:
+            write_json_line({"error": str(e)})
+        await _wu.finish_cli_session_keep_browser_by_default("reddit_worker", context, browser)
 
 
 async def daemon_main() -> None:
@@ -164,7 +168,10 @@ async def daemon_main() -> None:
                 except Exception as e:
                     write_json_line({"error": str(e)})
         finally:
-            await _wu.close_context(context, browser)
+            if _wu.worker_autoclose_browser_on_daemon_exit():
+                await _wu.close_context(context, browser)
+            else:
+                await _wu.daemon_idle_keep_browser_open("reddit_worker")
 
 
 def main() -> None:
@@ -180,8 +187,7 @@ def main() -> None:
     except Exception:
         payload = {}
     try:
-        data = asyncio.run(run_once(payload))
-        write_json_line(data)
+        asyncio.run(run_once(payload))
     except Exception as e:
         write_json_line({"error": str(e)})
 

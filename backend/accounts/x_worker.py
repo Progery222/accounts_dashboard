@@ -128,13 +128,86 @@ async def main():
         # ── 5. Extract profile stats ──────────────────────────────────────────
         info = await page.evaluate(
             """(username) => {
-                function countFromEl(el) {
+                function normHandle(h) {
+                    return String(h || '').replace(/^@/, '').trim().toLowerCase();
+                }
+                function profileHandleFromLocation() {
+                    try {
+                        const seg = window.location.pathname.split('/').filter(Boolean)[0];
+                        return seg ? normHandle(seg) : '';
+                    } catch (_) {
+                        return '';
+                    }
+                }
+                const wantHandle = normHandle(username) || profileHandleFromLocation();
+
+                function pathnameParts(href) {
+                    try {
+                        const u = new URL(href, window.location.origin);
+                        return u.pathname.split('/').filter(Boolean).map((s) => s.toLowerCase());
+                    } catch (_) {
+                        return [];
+                    }
+                }
+
+                function findFollowersStatLink(root) {
+                    let verified = null;
+                    for (const a of root.querySelectorAll('a[href]')) {
+                        const parts = pathnameParts(a.getAttribute('href') || '');
+                        if (parts.length < 2 || parts[0] !== wantHandle) continue;
+                        if (parts[1] === 'followers') return a;
+                        if (parts[1] === 'verified_followers') verified = verified || a;
+                    }
+                    return verified;
+                }
+
+                function findFollowingStatLink(root) {
+                    for (const a of root.querySelectorAll('a[href]')) {
+                        const parts = pathnameParts(a.getAttribute('href') || '');
+                        if (parts.length < 2 || parts[0] !== wantHandle) continue;
+                        if (parts[1] === 'following') return a;
+                    }
+                    return null;
+                }
+
+                function countFromStatLink(el, kind) {
                     if (!el) return '';
-                    for (const s of el.querySelectorAll('span')) {
-                        const t = (s.textContent || '').trim()
-                                    .replace(/[\\u00a0\\u202f]/g, '');
-                        if (t && /^[\\d,.]+[KkMmBb]?$/.test(t.replace(/\\s/g, '')))
-                            return t;
+                    const aria = (el.getAttribute('aria-label') || '').trim();
+                    if (aria) {
+                        if (kind === 'followers') {
+                            const mf = aria.match(
+                                /([\\d,.]+[KkMmBb]?)\\s*(?:followers?|подписчик|читател)/i,
+                            );
+                            if (mf) return mf[1].replace(/\\s/g, '');
+                        } else {
+                            const mf = aria.match(
+                                /([\\d,.]+[KkMmBb]?)\\s*(?:following|подписок|подписк)/i,
+                            );
+                            if (mf) return mf[1].replace(/\\s/g, '');
+                        }
+                    }
+                    const raw = (el.innerText || '')
+                        .replace(/[\\u00a0\\u202f]/g, ' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim();
+                    if (kind === 'followers') {
+                        const mf = raw.match(
+                            /([\\d,.]+[KkMmBb]?)\\s*(?:followers?|подписчик|читател)/i,
+                        );
+                        if (mf) return mf[1].replace(/\\s/g, '');
+                    } else {
+                        const mf = raw.match(
+                            /([\\d,.]+[KkMmBb]?)\\s*(?:following|подписок|подписк)/i,
+                        );
+                        if (mf) return mf[1].replace(/\\s/g, '');
+                    }
+                    const spans = [...el.querySelectorAll('span')].filter((s) => s.children.length === 0);
+                    for (let i = spans.length - 1; i >= 0; i--) {
+                        const t = (spans[i].textContent || '')
+                            .trim()
+                            .replace(/[\\u00a0\\u202f]/g, '')
+                            .replace(/\\s/g, '');
+                        if (t && /^[\\d,.]+[KkMmBb]?$/.test(t)) return t;
                     }
                     return '';
                 }
@@ -151,13 +224,11 @@ async def main():
                     }
                 }
 
-                // Follower / following — link hrefs are /{username}/followers etc.
                 const col = document.querySelector('[data-testid="primaryColumn"]') || document;
-                const followerLink  = col.querySelector(`a[href="/${username}/followers"]`) ||
-                                      col.querySelector(`a[href="/${username}/verified_followers"]`);
-                const followingLink = col.querySelector(`a[href="/${username}/following"]`);
-                const followers = countFromEl(followerLink);
-                const following = countFromEl(followingLink);
+                const followerLink = findFollowersStatLink(col);
+                const followingLink = findFollowingStatLink(col);
+                const followers = countFromStatLink(followerLink, 'followers');
+                const following = countFromStatLink(followingLink, 'following');
 
                 // Post count ("X Posts" text near profile header)
                 let postCount = '';

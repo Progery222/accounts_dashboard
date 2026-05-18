@@ -77,6 +77,39 @@ class RefreshApiTests(APITestCase):
         self.assertEqual(baseline.follower_count, 100)
         self.assertEqual(baseline.view_count, 10)
 
+    @patch("accounts.views._scrape")
+    def test_failed_refresh_preserves_updated_at(self, mock_scrape):
+        old = timezone.now() - timedelta(days=3)
+        Account.objects.filter(pk=self.account.pk).update(updated_at=old)
+        self.account.refresh_from_db()
+        mock_scrape.return_value = {
+            "follower_count": 0,
+            "like_count": 0,
+            "view_count": 0,
+            "post_count": 0,
+            "_posts": [],
+        }
+
+        response = self.client.post(f"/api/accounts/{self.account.id}/refresh/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.follower_count, 100)
+        self.assertEqual(self.account.updated_at, old)
+
+    @patch("accounts.views._scrape")
+    def test_scrape_error_preserves_updated_at(self, mock_scrape):
+        old = timezone.now() - timedelta(days=2)
+        Account.objects.filter(pk=self.account.pk).update(updated_at=old)
+        self.account.refresh_from_db()
+        mock_scrape.side_effect = ValueError("timeout")
+
+        response = self.client.post(f"/api/accounts/{self.account.id}/refresh/")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.account.refresh_from_db()
+        self.assertEqual(self.account.updated_at, old)
+
     @patch("accounts.views._refresh_with_retry")
     def test_refresh_maps_value_error_to_400(self, mock_refresh):
         mock_refresh.side_effect = ValueError("Профиль не найден")
@@ -86,11 +119,11 @@ class RefreshApiTests(APITestCase):
         self.assertIn("detail", response.data)
 
     @patch("accounts.views._refresh_with_retry")
-    def test_refresh_maps_unexpected_error_to_502(self, mock_refresh):
+    def test_refresh_maps_unexpected_error_to_500(self, mock_refresh):
         mock_refresh.side_effect = RuntimeError("timeout")
 
         response = self.client.post(f"/api/accounts/{self.account.id}/refresh/")
-        self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertIn("detail", response.data)
 
     @patch("accounts.views._refresh_with_retry")

@@ -98,6 +98,9 @@ async def execute_payload(page, _wu, arg: dict) -> dict:
             max_posts_per_follower=mpp,
             skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
             audience_account_id=audience_account_id,
+            list_only=bool(arg.get("list_only")),
+            enrich_only=bool(arg.get("enrich_only")),
+            enrich_usernames=arg.get("enrich_usernames"),
         )
     username = str(arg.get("username", "")).lstrip("@")
     if not username:
@@ -162,13 +165,91 @@ async def _run_with_page(username: str, page, _wu) -> dict:
         # ── 5. Extract profile stats ──────────────────────────────────────────
         info = await page.evaluate(
             """(username) => {
-                function countFromEl(el) {
+                function normHandle(h) {
+                    return String(h || '').replace(/^@/, '').trim().toLowerCase();
+                }
+                function profileHandleFromLocation() {
+                    try {
+                        const seg = window.location.pathname.split('/').filter(Boolean)[0];
+                        return seg ? normHandle(seg) : '';
+                    } catch (_) {
+                        return '';
+                    }
+                }
+                const wantHandle = normHandle(username) || profileHandleFromLocation();
+
+                function pathnameParts(href) {
+                    try {
+                        const u = new URL(href, window.location.origin);
+                        return u.pathname.split('/').filter(Boolean).map((s) => s.toLowerCase());
+                    } catch (_) {
+                        return [];
+                    }
+                }
+
+                /** Ссылка на /{handle}/followers (предпочтительно) или verified_followers. */
+                function findFollowersStatLink(root) {
+                    let verified = null;
+                    for (const a of root.querySelectorAll('a[href]')) {
+                        const parts = pathnameParts(a.getAttribute('href') || '');
+                        if (parts.length < 2 || parts[0] !== wantHandle) continue;
+                        if (parts[1] === 'followers') return a;
+                        if (parts[1] === 'verified_followers') verified = verified || a;
+                    }
+                    return verified;
+                }
+
+                function findFollowingStatLink(root) {
+                    for (const a of root.querySelectorAll('a[href]')) {
+                        const parts = pathnameParts(a.getAttribute('href') || '');
+                        if (parts.length < 2 || parts[0] !== wantHandle) continue;
+                        if (parts[1] === 'following') return a;
+                    }
+                    return null;
+                }
+
+                /**
+                 * Число из ссылки статистики: сначала aria-label / текст с меткой
+                 * (чтобы не перепутать Following и Followers из первого span).
+                 */
+                function countFromStatLink(el, kind) {
                     if (!el) return '';
-                    for (const s of el.querySelectorAll('span')) {
-                        const t = (s.textContent || '').trim()
-                                    .replace(/[\\u00a0\\u202f]/g, '');
-                        if (t && /^[\\d,.]+[KkMmBb]?$/.test(t.replace(/\\s/g, '')))
-                            return t;
+                    const aria = (el.getAttribute('aria-label') || '').trim();
+                    if (aria) {
+                        if (kind === 'followers') {
+                            const mf = aria.match(
+                                /([\\d,.]+[KkMmBb]?)\\s*(?:followers?|подписчик|читател)/i,
+                            );
+                            if (mf) return mf[1].replace(/\\s/g, '');
+                        } else {
+                            const mf = aria.match(
+                                /([\\d,.]+[KkMmBb]?)\\s*(?:following|подписок|подписк)/i,
+                            );
+                            if (mf) return mf[1].replace(/\\s/g, '');
+                        }
+                    }
+                    const raw = (el.innerText || '')
+                        .replace(/[\\u00a0\\u202f]/g, ' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim();
+                    if (kind === 'followers') {
+                        const mf = raw.match(
+                            /([\\d,.]+[KkMmBb]?)\\s*(?:followers?|подписчик|читател)/i,
+                        );
+                        if (mf) return mf[1].replace(/\\s/g, '');
+                    } else {
+                        const mf = raw.match(
+                            /([\\d,.]+[KkMmBb]?)\\s*(?:following|подписок|подписк)/i,
+                        );
+                        if (mf) return mf[1].replace(/\\s/g, '');
+                    }
+                    const spans = [...el.querySelectorAll('span')].filter((s) => s.children.length === 0);
+                    for (let i = spans.length - 1; i >= 0; i--) {
+                        const t = (spans[i].textContent || '')
+                            .trim()
+                            .replace(/[\\u00a0\\u202f]/g, '')
+                            .replace(/\\s/g, '');
+                        if (t && /^[\\d,.]+[KkMmBb]?$/.test(t)) return t;
                     }
                     return '';
                 }
@@ -185,13 +266,11 @@ async def _run_with_page(username: str, page, _wu) -> dict:
                     }
                 }
 
-                // Follower / following — link hrefs are /{username}/followers etc.
                 const col = document.querySelector('[data-testid="primaryColumn"]') || document;
-                const followerLink  = col.querySelector(`a[href="/${username}/followers"]`) ||
-                                      col.querySelector(`a[href="/${username}/verified_followers"]`);
-                const followingLink = col.querySelector(`a[href="/${username}/following"]`);
-                const followers = countFromEl(followerLink);
-                const following = countFromEl(followingLink);
+                const followerLink = findFollowersStatLink(col);
+                const followingLink = findFollowingStatLink(col);
+                const followers = countFromStatLink(followerLink, 'followers');
+                const following = countFromStatLink(followingLink, 'following');
 
                 // Post count ("X Posts" text near profile header)
                 let postCount = '';
@@ -383,7 +462,7 @@ async def _run_with_page(username: str, page, _wu) -> dict:
     }
 
 
-async def run_once(arg: dict) -> dict:
+async def run_once(arg: dict) -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
@@ -391,9 +470,15 @@ async def run_once(arg: dict) -> dict:
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            return await execute_payload(page, _wu, arg)
-        finally:
-            await _wu.close_context(context, _browser)
+            result = await execute_payload(page, _wu, arg)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            _write_response({"error": f"Ошибка worker: {exc}"})
+            await _wu.finish_cli_session_keep_browser_by_default("x_worker", context, _browser)
+            return
+        _write_response(result)
+        await _wu.finish_cli_session_keep_browser_by_default("x_worker", context, _browser)
 
 
 def _write_response(payload: dict) -> None:
@@ -409,6 +494,7 @@ async def daemon_main() -> None:
             pw, platform="x", locale="en-US",
         )
         page = context.pages[0] if context.pages else await context.new_page()
+        await _wu.warm_playwright_page_home(page, "x")
         try:
             for line in sys.stdin:
                 line = line.strip()
@@ -432,7 +518,10 @@ async def daemon_main() -> None:
                     continue
                 _write_response(result)
         finally:
-            await _wu.close_context(context, _browser)
+            if _wu.worker_autoclose_browser_on_daemon_exit():
+                await _wu.close_context(context, _browser)
+            else:
+                await _wu.daemon_idle_keep_browser_open("x_worker", page, platform="x")
 
 
 if __name__ == "__main__":
@@ -447,4 +536,4 @@ if __name__ == "__main__":
         except Exception:
             _write_response({"error": "Невалидный JSON payload"})
             sys.exit(1)
-        _write_response(asyncio.run(run_once(one_payload)))
+        asyncio.run(run_once(one_payload))

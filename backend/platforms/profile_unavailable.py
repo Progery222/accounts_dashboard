@@ -11,6 +11,8 @@ def is_profile_unavailable_error(message: str) -> bool:
         return True
 
     text = msg.lower()
+    if "обновление не применено" in text:
+        return False
     hard_markers = (
         "не найден",
         "не существует",

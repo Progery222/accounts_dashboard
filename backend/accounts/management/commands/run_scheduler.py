@@ -26,7 +26,7 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         os.environ.setdefault("RUN_SCHEDULER", "true")
 
-        from accounts.apps import apply_schedule_config, get_scheduler, schedule_jobs_signature
+        from accounts.apps import get_scheduler, schedule_jobs_signature, sync_schedule_from_db
         from accounts.models import RefreshScheduleConfig
 
         sched = get_scheduler()
@@ -42,6 +42,7 @@ class Command(BaseCommand):
             self.stdout.write(f"  - {job.id}: next={job.next_run_time}")
 
         stop = {"flag": False}
+        sync_schedule_from_db(force=True)
         last_sig = schedule_jobs_signature(RefreshScheduleConfig.get())
 
         def _on_signal(signum, _frame):
@@ -66,13 +67,13 @@ class Command(BaseCommand):
                     sig = schedule_jobs_signature(cfg)
                     if sig != last_sig:
                         last_sig = sig
-                        apply_schedule_config(cfg, sched)
+                        sync_schedule_from_db(force=True)
                         self.stdout.write(
                             f"[run_scheduler] расписание из БД применено: enabled={sig[0]} mode={sig[1]!r}"
                         )
                         for job in sched.get_jobs():
                             jid = str(job.id)
-                            if jid.startswith("auto_refresh_") or jid == "daily_refresh_03":
+                            if jid == "auto_refresh_interval" or jid.startswith("auto_refresh_time_"):
                                 self.stdout.write(f"  - {jid}: next={job.next_run_time}")
                 except Exception as exc:
                     self.stderr.write(f"[run_scheduler] sync schedule from DB failed: {exc}")

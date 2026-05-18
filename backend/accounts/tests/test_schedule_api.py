@@ -1,7 +1,7 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import RefreshScheduleConfig
+from accounts.models import AutoRefreshState, RefreshAllState, RefreshScheduleConfig
 
 
 class RefreshScheduleApiTests(APITestCase):
@@ -51,6 +51,45 @@ class RefreshScheduleApiTests(APITestCase):
         self.assertIn("run_detail", r.data)
         self.assertIsInstance(r.data["run_detail"], dict)
         self.assertIn("skip_recent_hours_config", r.data)
+        self.assertIn("active_pipeline", r.data)
+
+    def test_auto_refresh_status_merges_refresh_all_running(self):
+        """Пока идёт refresh_all, тот же endpoint что и для авто — is_running true и прогресс с RefreshAllState."""
+        rr = RefreshAllState.get()
+        rr.is_running = True
+        rr.cancel_requested = False
+        rr.total_accounts = 40
+        rr.processed_accounts = 12
+        rr.success_accounts = 10
+        rr.failed_accounts = 0
+        rr.run_detail = {"items": [], "worker_count": 2}
+        rr.save(
+            update_fields=[
+                "is_running", "cancel_requested", "total_accounts", "processed_accounts",
+                "success_accounts", "failed_accounts", "run_detail", "updated_at",
+            ],
+        )
+        auto = AutoRefreshState.get()
+        auto.is_running = False
+        auto.save(update_fields=["is_running", "updated_at"])
+
+        r = self.client.get("/api/accounts/auto-refresh-status/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertTrue(r.data["is_running"])
+        self.assertEqual(r.data["active_pipeline"], "refresh_all")
+        self.assertEqual(r.data["processed_accounts"], 12)
+        self.assertEqual(r.data["total_accounts"], 40)
+        self.assertEqual(r.data["source"], "refresh_all")
+
+    def test_auto_refresh_last_error_ids_returns_sorted_unique(self):
+        st = AutoRefreshState.get()
+        st.last_auto_refresh_error_account_ids = [7, 3, 7, "12", "bad", None]
+        st.save(update_fields=["last_auto_refresh_error_account_ids", "updated_at"])
+
+        r = self.client.get("/api/accounts/auto-refresh-last-error-ids/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["ids"], [3, 7, 12])
+        self.assertEqual(r.data["count"], 3)
 
     def test_account_delta_period_days_get_and_post(self):
         RefreshScheduleConfig.objects.update_or_create(

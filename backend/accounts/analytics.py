@@ -43,9 +43,31 @@ def _snap_subq(field: str, period_start) -> Subquery:
     )
 
 
-def _annotated_qs(account_id=None, platform=None, period="1d", min_views=MIN_VIEWS_DEFAULT):
+def _normalize_scrape_filter(raw: str | None) -> str:
+    v = (raw or "active").strip().lower()
+    if v in ("missing", "not_found", "scrape_not_found", "possibly_deleted"):
+        return "missing"
+    if v in ("all", "include_missing"):
+        return "all"
+    return "active"
+
+
+def _annotated_qs(
+    account_id=None,
+    platform=None,
+    period="1d",
+    min_views=MIN_VIEWS_DEFAULT,
+    scrape_filter: str = "active",
+):
     today = timezone.now().date()
-    qs = Post.objects.select_related("account").filter(view_count__gte=min_views)
+    scrape_filter = _normalize_scrape_filter(scrape_filter)
+    qs = Post.objects.select_related("account")
+    if scrape_filter == "missing":
+        qs = qs.filter(missing_from_scrape_at__isnull=False)
+    elif scrape_filter == "active":
+        qs = qs.filter(missing_from_scrape_at__isnull=True)
+    if min_views > 0:
+        qs = qs.filter(view_count__gte=min_views)
 
     if account_id:
         qs = qs.filter(account_id=account_id)
@@ -106,6 +128,8 @@ def _post_dict(p) -> dict:
         "engagement_rate": round(float(p.engagement_rate), 2),
         "view_delta": p.view_delta_period,
         "like_delta": p.like_delta_period,
+        "missing_from_scrape_at": p.missing_from_scrape_at,
+        "scrape_not_found": p.missing_from_scrape_at is not None,
     }
 
 
@@ -138,12 +162,20 @@ def top_posts(request):
     page      = max(1, int(request.query_params.get("page", 1)))
     page_size = min(100, max(1, int(request.query_params.get("page_size", 20))))
 
+    scrape_filter = _normalize_scrape_filter(request.query_params.get("scrape_filter"))
     qs = _annotated_qs(
-        account_id=account_id, platform=platform, period=period, min_views=min_views
+        account_id=account_id,
+        platform=platform,
+        period=period,
+        min_views=min_views,
+        scrape_filter=scrape_filter,
     )
     if hashtag:
         qs = qs.filter(hashtags__contains=[hashtag])
-    qs = qs.order_by(_sort_expr(sort_by))
+    if scrape_filter == "missing":
+        qs = qs.order_by("-missing_from_scrape_at", "-id")
+    else:
+        qs = qs.order_by(_sort_expr(sort_by))
 
     total = qs.count()
     posts = qs[(page - 1) * page_size: page * page_size]
@@ -153,6 +185,7 @@ def top_posts(request):
         "page": page,
         "page_size": page_size,
         "pages": max(1, (total + page_size - 1) // page_size),
+        "scrape_filter": scrape_filter,
         "items": [_post_dict(p) for p in posts],
     })
 
@@ -165,8 +198,13 @@ def insights(request):
     account_id = request.query_params.get("account_id") or None
     min_views  = int(request.query_params.get("min_views", MIN_VIEWS_DEFAULT))
 
+    scrape_filter = _normalize_scrape_filter(request.query_params.get("scrape_filter"))
     qs = _annotated_qs(
-        account_id=account_id, platform=platform, period=period, min_views=min_views
+        account_id=account_id,
+        platform=platform,
+        period=period,
+        min_views=min_views,
+        scrape_filter=scrape_filter,
     )
 
     # Fetch all posts needed for Python-level aggregation

@@ -1,76 +1,51 @@
 # subs — приложение «Подписчики»
 
-Отдельный сервис: **своя PostgreSQL** и свои таблицы. API дашборда — **8000**; ссылки и iframe в subs по умолчанию ведут на **новый фронт дашборда** `http://localhost:5174/` (см. `VITE_DASHBOARD_APP_URL`). Subs — **8010** (API) и **5180** (фронт).
+В монорепозитории **dashboard** основной путь такой:
 
-## Порты (локально)
+- **Один Django** из каталога **`../backend/`** на **`http://127.0.0.1:8000`** — и дашборд аккаунтов (`/api/accounts/`, …), и API «Подписчиков» (`/api/subscribers/…`; код приложения `subscribers` лежит в **`subs/backend/subscribers`** и подключается к тому же проекту).
+- **Фронт Subs** — **`subs/frontend`**, Vite на **5180**, прокси **`/api` → 8000** (см. `vite.config.ts`).
+- Съём аудитории из Subs вызывает тот же **`POST /api/accounts/…/audience/refresh/`**, что и дашборд: **один пул Playwright** и те же cookies, что у AccountsStats (`worker_accounts.env`). Отдельный **`worker_subs.env`** — только для настроек приложения «Подписчики», не для профиля браузера (см. `*.env.example` в `backend/config/` и `CLAUDE.md`).
 
-| Сервис        | Порт |
-|---------------|------|
-| Dashboard API | 8000 |
-| UI дашборда (subs → кнопка «Дашборд», iframe) | **5174** |
-| **subs API**  | **8010** |
-| **subs UI**   | **5180** |
-| **subs Postgres (хост)** | **5435** |
+Отдельный **`subs/backend/manage.py` на отдельном порту** нужен только для **изолированного** деплоя или старых инструкций; локально обычно достаточно общего `backend/manage.py runserver`.
 
-> Django на **8000** — это только дашборд. Subs API запускайте так:  
-> `python manage.py runserver 0.0.0.0:8010`
+## Порты (локально, монорепо)
 
-## База данных
+| Сервис | Порт |
+|--------|------|
+| Dashboard + subs API (Django) | **8000** |
+| UI дашборда (subs → «Дашборд», iframe) | **5174** (Atomic `new_frontend`) |
+| **subs UI** (Vite) | **5180** |
 
-**Вариант A — Postgres (как в проде):** из каталога `subs` выполните `docker compose up -d db`, в `subs/backend/.env` укажите `DATABASE_URL=postgresql://subs:subs@127.0.0.1:5435/subs`, затем установите драйвер: `pip install -r requirements-postgres.txt` (из каталога `subs/backend`).
+## Запуск (монорепо)
 
-**Вариант B — без Docker:** в `.env` оставьте `DATABASE_URL` пустым — поднимется **SQLite** (`subs/backend/subs.sqlite3`).
+1. Из **`backend/`**: `py -3.13 -m poetry run python manage.py runserver` → **8000**.
+2. Из **`subs/frontend/`**: `npm install` (один раз), затем `npm run dev` → **5180**.
 
-Дальше: `python manage.py migrate`.
+Переменные фронта (`subs/frontend/.env` по образцу `.env.example`):
 
-Данные аккаунтов и аудитории в subs появляются после **«Синхронизация с дашборда»** на фронте (или `POST /api/subscribers/sync/dashboard/`), затем **«Собрать»** по аккаунту вызывает съём на дашборде и импорт списка в subs.
-
-## Запуск
-
-### Бэкенд subs
-
-```bash
-cd subs/backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
-python manage.py migrate
-python manage.py runserver 0.0.0.0:8010
-```
-
-### Фронт subs
-
-```bash
-cd subs/frontend
-npm install
-copy .env.example .env
-npm run dev
-```
-
-Переменные фронта (`.env`):
-
-- `VITE_API_URL` — для туннеля и `npm run dev` оставьте **пустым** (HTTPS-страница не может вызывать `http://127.0.0.1:8010` — mixed content, в UI «Failed to fetch»).
-- Явный URL — только если API на **другом публичном HTTPS**-хосте (не loopback по http).
-- `VITE_DASHBOARD_API_URL=http://127.0.0.1:8000`
-- `VITE_DASHBOARD_APP_URL=http://localhost:5174`
+- **`VITE_API_URL`** — для туннеля и `npm run dev` оставьте **пустым** (иначе mixed content с HTTPS trycloudflare).
+- **`VITE_DASHBOARD_API_URL=http://127.0.0.1:8000`**
+- **`VITE_DASHBOARD_APP_URL=http://localhost:5174`**
 
 ## Доступ из интернета (Cloudflare Quick Tunnel)
 
-1. Поднимите **subs API**: `python manage.py runserver 0.0.0.0:8010` (`subs/backend`).
-2. Поднимите **Vite**: `npm run dev` (`subs/frontend`) — слушает `0.0.0.0:5180`, разрешён `Host: *.trycloudflare.com`, `/api` уходит на 8010.
-3. В другом терминале: `npm run tunnel` — откройте выданный `https://….trycloudflare.com`.
+1. Django на **8000**, Vite subs на **5180**.
+2. Из **`subs/frontend`**: `npm run tunnel` — откройте выданный `https://….trycloudflare.com`.
 
-Если в `.env` указан `VITE_API_URL=http://127.0.0.1:8010`, при открытии SPA по **https://…trycloudflare.com** браузер заблокирует запросы (mixed content) — уберите переменную или оставьте пустой; код сам подставит относительный `/api` на том же хосте.
+Кнопка «Дашборд» и iframe «Авторизация» по умолчанию ведут на `localhost` — с другого устройства задайте `VITE_DASHBOARD_APP_URL` / `VITE_DASHBOARD_ATOMIC_URL` на публичные URL (отдельные туннели к **5174** и **8000**).
 
-Кнопка «Дашборд» и iframe «Авторизация» по-прежнему ведут на `localhost` — для доступа с другого устройства задайте `VITE_DASHBOARD_APP_URL` / `VITE_DASHBOARD_ATOMIC_URL` на публичные URL (отдельные туннели к **5174** и **8000**).
+## База данных (только автономный subs/backend)
 
-Если API на отдельном публичном origin, в subs `config/settings.py` уже есть `CORS_ALLOWED_ORIGIN_REGEXES` для `*.trycloudflare.com`. Главный дашборд Django (`backend/config/settings.py`) тоже учитывает trycloudflare для CORS/CSRF.
+**Вариант A — Postgres:** из каталога `subs` — `docker compose up -d db`, в `subs/backend/.env` — `DATABASE_URL=postgresql://subs:subs@127.0.0.1:5435/subs`, драйвер из `requirements-postgres.txt`.
+
+**Вариант B — SQLite:** пустой `DATABASE_URL` → `subs/backend/subs.sqlite3`.
+
+В **монорепо** таблицы `subscribers_*` живут в **той же БД**, что и основной дашборд (`backend/.env`).
 
 ## Авторизация TikTok / Instagram
 
-Вкладка **«Авторизация»** в subs встраивает **`app.html?route=settings`** нового фронта (`VITE_DASHBOARD_APP_URL`, по умолчанию **5174**). Путь `/settings` у SPA нет — при необходимости используйте редирект `new_frontend/settings.html` → `app.html?route=settings`.
+Вкладка **«Авторизация»** в subs встраивает **`app.html?route=settings`** (`VITE_DASHBOARD_APP_URL`, по умолчанию **5174**).
 
-## CORS дашборда
+## CORS
 
-В `dashboard` в `config/settings.py` уже учтены origins **5180** (subs) и **5174** (новый фронт дашборда); при смене портов добавьте свои в те же списки.
+В `backend/config/settings.py` уже учтены origins **5180** и **5174**.

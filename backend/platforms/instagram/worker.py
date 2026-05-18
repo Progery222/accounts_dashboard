@@ -8,7 +8,8 @@ Standalone subprocess — вызывается из platforms/instagram/scraper.
 Ориентиры по времени на один профиль (Reels): goto до 45 с, антибот до ~120 с при
 челлендже, пауза ~3.2 с, скролл 16×650 мс + финальная пауза; между профилями в батче пауза 3–5 с.
 
-CLI для отладки: `python worker.py '{"username":"u","reels_views_only":true}'`.
+CLI для отладки: `python worker.py '{"username":"u","reels_views_only":true}'` — JSON в stdout,
+затем по умолчанию Chromium не закрывается (``WORKER_AUTOCLOSE_BROWSER_ON_EXIT``).
 """
 import asyncio
 import json
@@ -586,6 +587,9 @@ async def execute_payload(page, _wu, arg: dict) -> dict:
             max_posts_per_follower=mpp,
             skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
             audience_account_id=audience_account_id,
+            list_only=bool(arg.get("list_only")),
+            enrich_only=bool(arg.get("enrich_only")),
+            enrich_usernames=arg.get("enrich_usernames"),
         )
 
     usernames_batch = arg.get("usernames")
@@ -618,7 +622,7 @@ def _write_response(payload: dict) -> None:
     write_json_line(payload)
 
 
-async def run_once_cli(arg: dict) -> dict:
+async def run_once_cli(arg: dict) -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
         context, _browser = await _wu.launch_context(
@@ -627,9 +631,15 @@ async def run_once_cli(arg: dict) -> dict:
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            return await execute_payload(page, _wu, arg)
-        finally:
-            await _wu.close_context(context, _browser)
+            result = await execute_payload(page, _wu, arg)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            _write_response({"error": f"Ошибка worker: {exc}"})
+            await _wu.finish_cli_session_keep_browser_by_default("instagram_worker", context, _browser)
+            return
+        _write_response(result)
+        await _wu.finish_cli_session_keep_browser_by_default("instagram_worker", context, _browser)
 
 
 async def daemon_main() -> None:
@@ -640,6 +650,7 @@ async def daemon_main() -> None:
             viewport={"width": 1280, "height": 900},
         )
         page = context.pages[0] if context.pages else await context.new_page()
+        await _wu.warm_playwright_page_home(page, "instagram")
         try:
             for line in sys.stdin:
                 line = line.strip()
@@ -672,7 +683,10 @@ async def daemon_main() -> None:
                     continue
                 _write_response(result)
         finally:
-            await _wu.close_context(context, _browser)
+            if _wu.worker_autoclose_browser_on_daemon_exit():
+                await _wu.close_context(context, _browser)
+            else:
+                await _wu.daemon_idle_keep_browser_open("instagram_worker", page, platform="instagram")
 
 
 def _parse(text: str) -> int:
@@ -697,4 +711,4 @@ if __name__ == "__main__":
         except Exception:
             _write_response({"error": "Невалидный JSON payload"})
             sys.exit(1)
-        _write_response(asyncio.run(run_once_cli(_cli_arg)))
+        asyncio.run(run_once_cli(_cli_arg))

@@ -131,6 +131,7 @@ def build_auto_refresh_report_csv(
 
     w.writerow([])
     w.writerow([
+        "ID аккаунта",
         "Платформа",
         "Username",
         "Статус",
@@ -147,6 +148,7 @@ def build_auto_refresh_report_csv(
 
     for r in rows:
         w.writerow([
+            r.get("account_id", ""),
             r.get("platform", ""),
             r.get("username", ""),
             r.get("status", ""),
@@ -163,24 +165,163 @@ def build_auto_refresh_report_csv(
 
     csv_posts_sum = _sum_post_after_column(rows)
     w.writerow([])
-    w.writerow(["— Справка: суммы post_count (число публикаций на профиле по данным платформы) —"] + [""] * 11)
-    line = [""] * 12
+    w.writerow(["— Справка: суммы post_count (число публикаций на профиле по данным платформы) —"] + [""] * 12)
+    line = [""] * 13
     line[0] = "Сумма колонки «Постов (стало)» по строкам этого файла"
-    line[10] = str(csv_posts_sum)
+    line[11] = str(csv_posts_sum)
     w.writerow(line)
     if batch_post_total is not None:
-        line = [""] * 12
+        line = [""] * 13
         line[0] = "Эталон: сумма post_count по аккаунтам очереди этого прогона (должна совпадать с суммой столбца, если все строки заполнены)"
-        line[10] = str(int(batch_post_total))
+        line[11] = str(int(batch_post_total))
         w.writerow(line)
     if dashboard_post_total is not None and dashboard_account_count is not None:
-        line = [""] * 12
+        line = [""] * 13
         line[0] = (
             "Эталон: сумма post_count по всем аккаунтам сводки дашборда "
             f"({int(dashboard_account_count)} акк., как GET /api/accounts/summary/ без скрытых платформ/профилей; "
             "включает недоступные, если они не скрыты — планировщик может их не обновлять)"
         )
-        line[10] = str(int(dashboard_post_total))
+        line[11] = str(int(dashboard_post_total))
         w.writerow(line)
 
     return buf.getvalue()
+
+
+def collect_auto_refresh_report_rows(
+    report_by_index: list[dict | None],
+    accounts: list,
+    *,
+    not_done_detail: str = "остановка до обработки этого аккаунта",
+) -> list[dict]:
+    """Собирает строки отчёта: обработанные + «не выполнено» для оставшихся в очереди."""
+    rows: list[dict] = []
+    n = min(len(report_by_index), len(accounts))
+    for i in range(n):
+        row = report_by_index[i]
+        if row is not None:
+            rows.append(row)
+            continue
+        acc = accounts[i]
+        try:
+            acc.refresh_from_db()
+        except Exception:
+            pass
+        fb = int(getattr(acc, "follower_count", 0) or 0)
+        lb = int(getattr(acc, "like_count", 0) or 0)
+        vb = int(getattr(acc, "view_count", 0) or 0)
+        pb = int(getattr(acc, "post_count", 0) or 0)
+        prof = "Без профиля"
+        if getattr(acc, "profile_id", None) and getattr(acc, "profile", None):
+            prof = acc.profile.name or "Без профиля"
+        rows.append(
+            {
+                "account_id": acc.id,
+                "platform": acc.platform,
+                "username": acc.username,
+                "profile_name": prof,
+                "status": "не выполнено",
+                "follower_before": fb,
+                "follower_after": fb,
+                "like_before": lb,
+                "like_after": lb,
+                "view_before": vb,
+                "view_after": vb,
+                "post_before": pb,
+                "post_after": pb,
+                "elapsed_sec": "",
+                "detail": not_done_detail,
+            },
+        )
+    return rows
+
+
+def extract_error_account_ids_from_saved_auto_refresh_csv(csv_text: str) -> list[int]:
+    """
+    Из текста CSV, сохранённого в AutoRefreshState.last_report_csv (тот же, что отдаёт
+    GET /api/accounts/auto-refresh-report/), извлекает id аккаунтов со статусом «ошибка».
+
+    Поддерживается формат с колонкой «ID аккаунта» и старый (только платформа/username)
+    — для него выполняется поиск Account по (platform, username).
+    """
+    if not (csv_text or "").strip():
+        return []
+
+    text = csv_text.lstrip("\ufeff").strip("\r\n")
+    buf = io.StringIO(text)
+    reader = csv.reader(buf, delimiter=";")
+    rows: list[list[str]] = []
+    for row in reader:
+        rows.append([str(c or "").strip() for c in row])
+
+    header_idx = -1
+    mode: str | None = None
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        if row[0] == "ID аккаунта" and len(row) >= 4:
+            header_idx = i
+            mode = "id_column"
+            break
+        if row[0] == "Платформа" and len(row) >= 3 and row[2] == "Статус":
+            header_idx = i
+            mode = "legacy"
+            break
+
+    if header_idx < 0 or not mode:
+        return []
+
+    def _is_footer_start(cell: str) -> bool:
+        if not cell:
+            return False
+        c = cell.strip()
+        if c.startswith("—") or c.startswith("Сумма") or c.startswith("Эталон"):
+            return True
+        if c.startswith("-"):
+            return True
+        return False
+
+    ids: list[int] = []
+
+    if mode == "id_column":
+        for row in rows[header_idx + 1 :]:
+            if not row or not any(cell for cell in row):
+                continue
+            if _is_footer_start(row[0]):
+                break
+            if len(row) < 4:
+                continue
+            if "ошибка" not in row[3].lower():
+                continue
+            if not row[0]:
+                continue
+            try:
+                ids.append(int(row[0]))
+            except ValueError:
+                continue
+        return sorted(set(ids))
+
+    from accounts.models import Account
+
+    for row in rows[header_idx + 1 :]:
+        if not row or not any(cell for cell in row):
+            continue
+        if _is_footer_start(row[0]):
+            break
+        if len(row) < 3:
+            continue
+        if "ошибка" not in row[2].lower():
+            continue
+        plat = (row[0] or "").strip().lower()
+        user = (row[1] or "").strip().lstrip("@").lower()
+        if not plat or not user:
+            continue
+        pk = (
+            Account.objects.filter(platform=plat, username__iexact=user)
+            .values_list("pk", flat=True)
+            .first()
+        )
+        if pk is not None:
+            ids.append(int(pk))
+
+    return sorted(set(ids))

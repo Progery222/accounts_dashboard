@@ -1,10 +1,12 @@
 # Держит Quick Tunnel живым: при падении cloudflared перезапускает через 5 с.
 # URL вида https://….trycloudflare.com — без своего домена и без DNS.
 # Запуск: powershell -NoExit -File "...\new_frontend\tunnel-keepalive.ps1"
-# Нужны: run_server.py на 5174 и Django на 8000.
+# Нужны: run_server.py на 5174 и Django (по умолчанию :8000; иначе $env:ATOMIC_TUNNEL_API_PORT=8010).
 $ErrorActionPreference = "Continue"
 $root = $PSScriptRoot
-$config = Join-Path $root "cloudflared.new-frontend.yml"
+$apiPort = ($env:ATOMIC_TUNNEL_API_PORT -as [string]).Trim()
+$configName = if ($apiPort -eq "8010") { "cloudflared.5174.8010.yml" } else { "cloudflared.5174.yml" }
+$config = Join-Path $root $configName
 $cf = "${env:ProgramFiles(x86)}\cloudflared\cloudflared.exe"
 if (-not (Test-Path $cf)) {
   $cf = "cloudflared"

@@ -21,23 +21,31 @@ Runs headless=False with the window placed off-screen.
 
 Детальные лайки Reels: **одно открытие на пост** — либо клик по карточке на сетке (модалка),
 либо (если нет ``sk=reels_tab`` / mbasic) один ``page.goto`` на URL Reel и возврат на сетку;
-**не** цепочка «клик + goto» для одного и того же ролика. По умолчанию **включено**
+**не** цепочка «клик + goto» для одного и того же ролика. Счётчик — у **верхней видимой**
+кнопки «Нравится» в viewport (модалка или ``/reel/…``); **нет цифры = 0** (``like_count_confirmed``).
+На прямом ``/reel/…`` не берём max по aria-label соседних роликов в ленте. По умолчанию **включено**
 (``FACEBOOK_DETAIL_LIKES_ENABLED=0`` — выключить). Перед кликом по карточке при необходимости
 **возврат на URL с sk=reels_tab** — после модалки Facebook часто уводит со вкладки.
-Порог просмотров: ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS`` (по умолчанию **2000**): кандидаты enrich —
-посты с ``view_count >= порог - 1`` (пограница округления); у постов с ``view_count ≤`` порогу
-лайки с сетки не используются (**0**), сумма по аккаунту — из постов.
-До ``FACEBOOK_DETAIL_LIKES_MAX_OPENS`` постов за проход (ветка enrich отключена, если
-``FACEBOOK_DETAIL_LIKES_ENABLED=0``).
+Порог просмотров: ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS`` (по умолчанию **2000**): у постов с
+``view_count ≤`` порогу лайки с сетки сбрасываются (**0**). Detail-enrich по умолчанию только для
+постов со **строго большим** числом просмотров: ``view_count > MIN_VIEWS`` (без лавины modal на
+все низкие Reels). Опционально снова обогащать низкие Reels: ``FACEBOOK_DETAIL_ENRICH_LOW_VIEW_REELS=1``.
+Эвристика «лайки = просмотры» (обнуление): ``FACEBOOK_REEL_LIKE_VIEW_EQUAL_MAX_V`` (по умолчанию 12_000),
+раньше по сути действовало до 500k и могло сбрасывать лайки у роликов с ~16k просмотров при ошибочном совпадении парсера.
+До ``FACEBOOK_DETAIL_LIKES_MAX_OPENS`` постов за проход (по умолчанию 30, не более 50; ветка enrich
+отключена, если ``FACEBOOK_DETAIL_LIKES_ENABLED=0``). Сколько постов собирать с ленты: ``FACEBOOK_MAX_POSTS``
+(по умолчанию 80, верхняя граница 120).
 XPath текста лайков: ``FACEBOOK_POST_LIKES_XPATH`` или встроенный дефолт
 (хрупко при смене вёрстки Facebook).
-Одноразовый запуск ``run_once``: ``FACEBOOK_RUN_ONCE_KEEP_BROWSER=1`` — после парса
-не вызывать закрытие Chromium (процесс ждёт Ctrl+C, окно остаётся).
+Одноразовый запуск ``run_once`` / ``--once``: по умолчанию окно не закрывается после
+ответа в stdout (как у демона); автозакрытие: ``WORKER_AUTOCLOSE_BROWSER_ON_EXIT=1``.
+Устарело: ``FACEBOOK_RUN_ONCE_KEEP_BROWSER`` — поведение совпадает с дефолтом.
 
 После окончания stdin демон **не** вызывает ``close_context``: окно остаётся,
 процесс ждёт бесконечно (закрытие — остановка worker-процесса / Django /
 ``shutdown_all_workers``). Для явного закрытия при выходе процесса:
-``FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT=1``. Чтобы при остановке Django не
+``FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT=1`` или глобально
+``WORKER_AUTOCLOSE_BROWSER_ON_EXIT=1``. Чтобы при остановке Django не
 убивать воркеры через atexit: ``PLAYWRIGHT_POOL_SKIP_ATEXIT=1`` (осторожно: зомби Chromium).
 """
 import asyncio
@@ -57,7 +65,11 @@ from platforms.facebook.profile_url import normalize_facebook_profile_input
 NAV_TIMEOUT         = 35_000
 LOAD_TIMEOUT        = 25_000
 AUTH_DETECT_TIMEOUT = 12_000
-MAX_POSTS           = int(os.getenv("FACEBOOK_MAX_POSTS", "12") or "12")
+try:
+    _fb_max_posts_raw = int(os.getenv("FACEBOOK_MAX_POSTS", "80") or "80")
+except (TypeError, ValueError):
+    _fb_max_posts_raw = 80
+MAX_POSTS = max(1, min(120, _fb_max_posts_raw))
 PAUSE_PRE_NAV_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_NAV_MIN_MS", "700") or "700")
 PAUSE_PRE_NAV_MAX_MS = int(os.getenv("FACEBOOK_PAUSE_PRE_NAV_MAX_MS", "1700") or "1700")
 PAUSE_SCROLL_MIN_MS = int(os.getenv("FACEBOOK_PAUSE_SCROLL_MIN_MS", "900") or "900")
@@ -91,12 +103,76 @@ def _facebook_detail_likes_min_views() -> int:
         return 2000
 
 
-def _facebook_run_once_keep_browser() -> bool:
-    """Для отладки: после run_once не закрывать Chromium (процесс ждёт Ctrl+C)."""
-    return os.getenv("FACEBOOK_RUN_ONCE_KEEP_BROWSER", "").strip().lower() in {
+def _facebook_detail_enrich_low_view_reels() -> bool:
+    """
+    По умолчанию **выкл.**: не открывать в modal каждый Reel с ``view_count ≤`` порога
+    (иначе лавина кликов и лишние ``goto``). Вкл.: ``FACEBOOK_DETAIL_ENRICH_LOW_VIEW_REELS=1``.
+    """
+    return os.getenv("FACEBOOK_DETAIL_ENRICH_LOW_VIEW_REELS", "").strip().lower() in {
         "1", "true", "yes", "on",
     }
 
+
+
+# Reels: лайки у видимой кнопки «Нравится» (верхняя в viewport); нет цифры = 0.
+_FB_VISIBLE_REEL_LIKE_JS = """() => {
+    const clean = (s) => String(s || '').replace(/[\\u00a0\\u202f]/g, ' ').replace(/\\s+/g, ' ').trim();
+    const likeRe = /\\u043d\\u0440\\u0430\\u0432|лайк|\\breaction|\\blike\\b|\\u00ab\\u041d\\u0440\\u0430\\u0432\\u0438\\u0442\\u0441\\u044f\\u00bb|мне нравится/i;
+    const viewRe = /просмотр|\\bviews?\\b|watch|play|воспроизвед/i;
+    function tryDigits(raw) {
+        const t = clean(String(raw || ''));
+        if (!/^\\d{1,7}$/.test(t)) return 0;
+        const n = parseInt(t, 10);
+        return (n >= 0 && n < 9999999) ? n : 0;
+    }
+    function scanTextFrom(el) {
+        if (!el) return 0;
+        let n = tryDigits(el.innerText) || tryDigits(el.textContent);
+        if (n) return n;
+        for (const sp of el.querySelectorAll('span')) {
+            n = tryDigits(sp.innerText);
+            if (n) return n;
+        }
+        let w = el.nextElementSibling;
+        for (let s = 0; s < 6 && w && !n; s++, w = w.nextElementSibling)
+            n = scanTextFrom(w);
+        if (!n && el.parentElement) {
+            const ch = [...el.parentElement.children];
+            const ix = ch.indexOf(el);
+            for (let k = ix + 1; k < Math.min(ix + 6, ch.length) && !n; k++)
+                n = scanTextFrom(ch[k]);
+        }
+        return n || 0;
+    }
+    function readIn(root) {
+        const scope = root || document;
+        let topBtn = null;
+        let topY = 1e9;
+        for (const el of scope.querySelectorAll('[role="button"][aria-label], [aria-pressed][aria-label]')) {
+            const a = clean(el.getAttribute('aria-label') || '');
+            if (!a || a.length > 240 || !likeRe.test(a) || viewRe.test(a)) continue;
+            if (/комментар|комменти|\\bcomment\\b|поделиться|\\bshare\\b|отправить|^send\\b/i.test(a) && !likeRe.test(a))
+                continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            if (rect.top < -40 || rect.top > innerHeight - 80) continue;
+            if (rect.top < topY) { topY = rect.top; topBtn = el; }
+        }
+        if (!topBtn) return null;
+        return scanTextFrom(topBtn);
+    }
+    const dlg = document.querySelector('[role="dialog"],[aria-modal="true"]');
+    if (dlg) {
+        const v = readIn(dlg);
+        if (v !== null) return { found: true, digit: v };
+    }
+    if (/\\/reel\\/\\d+/i.test(location.pathname || '')) {
+        const main = document.querySelector('[role="main"]') || document.body;
+        const v = readIn(main);
+        if (v !== null) return { found: true, digit: v };
+    }
+    return { found: false, digit: 0 };
+}"""
 
 _FB_XPATH_LIKE_TEXT_JS = """(xp) => {
     try {
@@ -151,15 +227,14 @@ _FB_FALLBACK_LIKES_TEXT_JS = """() => {
         }
         return 0;
     }
-    /** Reels: число лайков отдельным span под иконкой (напр. «9»), без цифр в aria-label. */
+    /** Reels: цифра под видимой кнопкой «Нравится» (верхняя в viewport), не max по всей ленте. */
     function digitBelowLikeControl(container) {
-        let local = 0;
         if (!container) return 0;
         function tryDigits(raw) {
             const t = clean(String(raw || ''));
             if (!/^\\d{1,7}$/.test(t)) return 0;
             const n = parseInt(t, 10);
-            return (n > 0 && n < 9999999) ? n : 0;
+            return (n >= 0 && n < 9999999) ? n : 0;
         }
         function scanTextFrom(el) {
             if (!el) return 0;
@@ -169,16 +244,6 @@ _FB_FALLBACK_LIKES_TEXT_JS = """() => {
                 n = tryDigits(sp.innerText);
                 if (n) return n;
             }
-            return 0;
-        }
-        for (const el of container.querySelectorAll('[role="button"][aria-label], [aria-pressed][aria-label]')) {
-            const a = clean(el.getAttribute('aria-label') || '');
-            if (!a || a.length > 240) continue;
-            if (/просмотр|\\bviews?\\b|watch|play|воспроизвед/i.test(a)) continue;
-            if (/комментар|комменти|\\bcomment\\b|поделиться|\\bshare\\b|отправить|^send\\b/i.test(a) && !/нравится|like|лайк/i.test(a)) continue;
-            if (!/нравится|лайк|\\breaction|\\blike\\b|«Нравится»|мне нравится/i.test(a)) continue;
-            if (numFromLikeLabel(a) > 0) continue;
-            let n = 0;
             let w = el.nextElementSibling;
             for (let s = 0; s < 6 && w && !n; s++, w = w.nextElementSibling)
                 n = scanTextFrom(w);
@@ -188,44 +253,56 @@ _FB_FALLBACK_LIKES_TEXT_JS = """() => {
                 for (let k = ix + 1; k < Math.min(ix + 6, ch.length) && !n; k++)
                     n = scanTextFrom(ch[k]);
             }
-            if (!n) {
-                for (const sub of el.querySelectorAll(':scope > span')) {
-                    n = tryDigits(sub.innerText);
-                    if (n) break;
-                }
-            }
-            if (n > local) local = n;
+            return n || 0;
         }
-        return local;
+        let topBtn = null;
+        let topY = 1e9;
+        for (const el of container.querySelectorAll('[role="button"][aria-label], [aria-pressed][aria-label]')) {
+            const a = clean(el.getAttribute('aria-label') || '');
+            if (!a || a.length > 240) continue;
+            if (/просмотр|\\bviews?\\b|watch|play|воспроизвед/i.test(a)) continue;
+            if (/комментар|комменти|\\bcomment\\b|поделиться|\\bshare\\b|отправить|^send\\b/i.test(a) && !/нравится|like|лайк/i.test(a)) continue;
+            if (!/нравится|лайк|\\breaction|\\blike\\b|«Нравится»|мне нравится/i.test(a)) continue;
+            if (numFromLikeLabel(a) > 0) continue;
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) continue;
+            if (rect.top < -40 || rect.top > innerHeight - 80) continue;
+            if (rect.top < topY) { topY = rect.top; topBtn = el; }
+        }
+        return topBtn ? scanTextFrom(topBtn) : 0;
     }
+    const onDirectReel = /\\/reel\\/\\d+/i.test(location.pathname || '');
     const roots = [];
     for (const d of document.querySelectorAll('[role="dialog"],[aria-modal="true"]')) roots.push(d);
     const m0 = document.querySelector('[role="main"]');
     if (m0) roots.push(m0);
     let best = 0;
-    for (const r of roots) {
-        if (!r) continue;
-        for (const el of r.querySelectorAll('[aria-label]')) {
-            const a = clean(el.getAttribute('aria-label'));
-            if (!a) continue;
-            if (!/нравится|лайк|\\breaction|\\blike\\b|«Нравится»/i.test(a)) continue;
-            const n = numFromLikeLabel(a);
-            if (n > best) best = n;
+    // На прямом /reel/… max по aria-label цепляет соседние ролики в ленте — только digitBelowLikeControl.
+    if (!onDirectReel) {
+        for (const r of roots) {
+            if (!r) continue;
+            for (const el of r.querySelectorAll('[aria-label]')) {
+                const a = clean(el.getAttribute('aria-label'));
+                if (!a) continue;
+                if (!/нравится|лайк|\\breaction|\\blike\\b|«Нравится»/i.test(a)) continue;
+                const n = numFromLikeLabel(a);
+                if (n > best) best = n;
+            }
+            for (const el of r.querySelectorAll('[role="button"][aria-label]')) {
+                const a = clean(el.getAttribute('aria-label'));
+                if (!a) continue;
+                if (!/нравится|лайк|\\breaction|\\blike\\b/i.test(a)) continue;
+                const n = numFromLikeLabel(a);
+                if (n > best) best = n;
+            }
         }
-        for (const el of r.querySelectorAll('[role="button"][aria-label]')) {
-            const a = clean(el.getAttribute('aria-label'));
-            if (!a) continue;
-            if (!/нравится|лайк|\\breaction|\\blike\\b/i.test(a)) continue;
-            const n = numFromLikeLabel(a);
-            if (n > best) best = n;
+        for (const el of document.querySelectorAll('[aria-pressed]')) {
+            const a = clean(el.getAttribute('aria-label') || '');
+            if (!a || !/нравится|лайк|\\breaction|\\blike\\b|«Нравится»/i.test(a)) continue;
+            if (/просмотр|\\bviews?\\b/i.test(a)) continue;
+            const v = numFromLikeLabel(a);
+            if (v > best) best = v;
         }
-    }
-    for (const el of document.querySelectorAll('[aria-pressed]')) {
-        const a = clean(el.getAttribute('aria-label') || '');
-        if (!a || !/нравится|лайк|\\breaction|\\blike\\b|«Нравится»/i.test(a)) continue;
-        if (/просмотр|\\bviews?\\b/i.test(a)) continue;
-        const v = numFromLikeLabel(a);
-        if (v > best) best = v;
     }
     const passRoots = roots.length ? roots : [document.body];
     for (const r of passRoots) {
@@ -234,6 +311,7 @@ _FB_FALLBACK_LIKES_TEXT_JS = """() => {
         if (d > best) best = d;
     }
     if (best > 0) return String(best);
+    if (onDirectReel) return '';
     const blob = clean((document.body && document.body.innerText) || '').slice(0, 20000);
     for (const ln of blob.split(/[\\n\\r]+/)) {
         const t = ln.trim();
@@ -254,7 +332,14 @@ def _facebook_mbasic_fallback_enabled() -> bool:
 
 
 def _facebook_daemon_should_close_browser_on_exit() -> bool:
-    """По умолчанию не закрываем Chromium при завершении цикла stdin (см. daemon_main)."""
+    """Закрыть Chromium при завершении stdin только по явному env."""
+    try:
+        from platforms.worker_utils import worker_autoclose_browser_on_daemon_exit
+
+        if worker_autoclose_browser_on_daemon_exit():
+            return True
+    except Exception:
+        pass
     return os.getenv("FACEBOOK_DAEMON_CLOSE_BROWSER_ON_EXIT", "").strip().lower() in {
         "1", "true", "yes", "on",
     }
@@ -279,6 +364,32 @@ def _iter_incoming_json_lines(cli_first_json: str | None) -> Iterator[str]:
 
 
 # ── Python parse helper ───────────────────────────────────────────────────────
+
+
+def _parse_like_count_from_aria_label(lab: str) -> int:
+    """
+    aria-label кнопки лайка на Reels: часто «…у 9 пользователей» / «9 отметок …».
+    Общий ``_parse_count`` режет строку по «нравится» и может потерять число.
+    """
+    if not lab:
+        return 0
+    s = str(lab).strip()
+    patterns = (
+        r'(\d[\d\s.,]*)\s*(?:пользовател\w*|people|persons?)\b',
+        r'(\d[\d\s.,]*)\s*(?:отметок|reactions?|likes?)\b',
+        r'(?:^|[\s,;])(\d{1,7})\s*(?:people|person|пользовател)',
+        r'[:\s]\s*(\d{1,7})\s*$',
+    )
+    for pat in patterns:
+        m = re.search(pat, s, re.I)
+        if m:
+            digits = re.sub(r'[^\d]', '', m.group(1))
+            if digits:
+                n = int(digits)
+                if 0 < n < 50_000_000:
+                    return n
+    return 0
+
 
 def _parse_count(text: str) -> int:
     """
@@ -313,12 +424,22 @@ def _parse_count(text: str) -> int:
 
 
 def _facebook_zero_like_if_equals_views(posts: list[dict]) -> None:
-    """Совпадение лайков и просмотров на малых числах — почти всегда артефакт (в т.ч. первый пост в ленте)."""
-    cap = int(os.getenv("FACEBOOK_REEL_LIKE_VIEW_EQUAL_CAP", "500000") or "500000")
+    """
+    Совпадение like_count и view_count на **небольших** числах — почти всегда артефакт DOM.
+    Раньше верхняя граница была 500k — при ~16k просмотров ложное совпадение парсера
+    обнуляло реальные лайки. Сейчас порог задаётся ``FACEBOOK_REEL_LIKE_VIEW_EQUAL_MAX_V``
+    (по умолчанию 12_000); ``0`` — отключить эвристику.
+    """
+    try:
+        max_v = int(os.getenv("FACEBOOK_REEL_LIKE_VIEW_EQUAL_MAX_V", "12000") or "12000")
+    except (TypeError, ValueError):
+        max_v = 12_000
+    if max_v <= 0:
+        return
     for p in posts:
         v = int(p.get("view_count") or 0)
         l = int(p.get("like_count") or 0)
-        if l > 0 and l == v and v <= cap:
+        if l > 0 and l == v and v <= max_v:
             p["like_count"] = 0
 
 
@@ -398,6 +519,41 @@ def _extract_post_id_from_url(url: str) -> str:
         if m:
             return m.group(1)
     return ""
+
+
+def _facebook_reel_numeric_id_for_enrich(post: dict) -> str:
+    """
+    Числовой id ролика для detail-likes. В ленте часто только ``/posts/{id}`` / ``story_fbid``,
+    без ``/reel/`` в URL — раньше enrich полностью пропускал такие посты.
+    """
+    url = str(post.get("post_url") or "").strip()
+    eid = str(post.get("external_id") or "").strip()
+    m = re.search(r"/reel/(\d+)", url, re.I)
+    if m:
+        return m.group(1)
+    if eid.isdigit() and len(eid) >= 10:
+        return eid
+    for pat in (
+        r"/posts/(\d{10,})",
+        r"/videos/(\d{10,})",
+        r"/permalink/(\d{10,})",
+        r"story_fbid=(\d{10,})",
+        r"fbid=(\d{10,})",
+    ):
+        mx = re.search(pat, url, re.I)
+        if mx:
+            rid = mx.group(1)
+            if not eid or rid == eid:
+                return rid
+    return ""
+
+
+def _facebook_url_for_reel_enrich(post: dict, reel_id: str) -> str:
+    """URL для ``goto`` / same-tab: канонический ``/reel/{id}``, если в ``post_url`` нет ``/reel/``."""
+    url = str(post.get("post_url") or "").strip()
+    if "/reel/" in url.lower() and reel_id in url.replace("\\", "/"):
+        return url
+    return f"https://www.facebook.com/reel/{reel_id}"
 
 
 def _collect_post_metrics_from_json(payload, out: dict[str, dict]) -> None:
@@ -1069,7 +1225,7 @@ _POSTS_JS = """(params) => {
 
 
 _SK_PHOTOS_REELS_JS = """(params) => {
-    const maxPosts = Math.max(1, Number((params && params.maxPosts) || 12));
+    const maxPosts = Math.max(1, Number((params && params.maxPosts) || 80));
     const main = document.querySelector('[role="main"]') || document.body;
     const out = [];
     const seen = new Set();
@@ -1449,46 +1605,125 @@ async def _fb_xpath_like_text(page, xpath: str) -> str:
         return ""
 
 
-async def _fb_dom_like_text_combined(page, xpath: str) -> int:
-    """Сначала эвристика по открытому Reel (aria / текст), затем XPath — дефолтный XPath часто не тот узел."""
+async def _fb_like_count_from_aria_labels(page) -> int:
+    """
+    В модалке Reels счётчик часто только в ``aria-label`` (в т.ч. «у 9 пользователей»),
+    а ``_FB_FALLBACK_LIKES_TEXT_JS`` / XPath дают 0 — тот же обход, что в same-tab.
+    """
+    n = 0
+    try:
+        loc = page.locator(
+            '[role="dialog"] [aria-label*="нравится" i], [role="dialog"] [aria-label*="like" i], '
+            '[role="dialog"] [aria-label*="reaction" i], '
+            '[role="main"] [aria-label*="нравится" i], [role="main"] [aria-label*="like" i], '
+            '[role="main"] [aria-label*="reaction" i]'
+        )
+        cnt = await loc.count()
+        for i in range(min(cnt, 45)):
+            try:
+                lab_s = str(await loc.nth(i).get_attribute("aria-label", timeout=1200) or "")
+                if _fb_aria_label_looks_like_views(lab_s):
+                    continue
+                parsed = max(_parse_count(lab_s), _parse_like_count_from_aria_label(lab_s))
+                if parsed > n:
+                    n = parsed
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return n
+
+
+async def _fb_dom_like_read(page, xpath: str) -> tuple[int, bool]:
+    """
+    Лайки с открытого Reel / модалки.
+
+    ``confirmed=True`` — найдена видимая кнопка «Нравится»; отсутствие цифры = 0 лайков.
+    """
+    try:
+        vis = await page.evaluate(_FB_VISIBLE_REEL_LIKE_JS)
+        if isinstance(vis, dict) and vis.get("found"):
+            return int(vis.get("digit") or 0), True
+    except Exception:
+        pass
     try:
         fb = str(await page.evaluate(_FB_FALLBACK_LIKES_TEXT_JS) or "").strip()
-        n_fb = _parse_count(fb)
-        if n_fb > 0:
-            return n_fb
+        if fb:
+            return _parse_count(fb), False
     except Exception:
         pass
     raw = await _fb_xpath_like_text(page, xpath)
-    return _parse_count(raw)
+    n_x = _parse_count(raw)
+    if n_x > 0:
+        return n_x, False
+    n_a = await _fb_like_count_from_aria_labels(page)
+    if n_a > 0:
+        return n_a, False
+    return 0, False
+
+
+async def _fb_dom_like_text_combined(page, xpath: str) -> int:
+    """Обратная совместимость: только число лайков без флага подтверждения."""
+    likes, _confirmed = await _fb_dom_like_read(page, xpath)
+    return likes
+
+
+def _facebook_detail_likes_should_apply(likes: int, prev: int, vcount: int, *, confirmed: bool) -> bool:
+    if confirmed:
+        return True
+    if likes <= 0:
+        return False
+    if likes > prev:
+        return True
+    if prev > 0 and vcount > 0 and prev >= vcount and likes < prev:
+        return True
+    return False
 
 
 async def _facebook_try_reel_likes_modal(
     page, reel_id: str, xpath: str, reels_sk_url: str | None = None
-) -> int:
-    """Клик по карточке Reel на текущей странице, чтение XPath, закрытие по Escape."""
+) -> tuple[int, bool]:
+    """Клик по карточке ролика на текущей странице (не только ``/reel/`` в href)."""
+    selectors = (
+        f'[role="main"] a[href*="/reel/{reel_id}"]',
+        f'[role="main"] a[href*="/posts/{reel_id}"]',
+        f'[role="main"] a[href*="/videos/{reel_id}"]',
+        f'[role="main"] a[href*="story_fbid={reel_id}"]',
+        f'[role="main"] a[href*="story_fbid%3D{reel_id}"]',
+    )
+    last_exc: Exception | None = None
     try:
-        link = page.locator(f'[role="main"] a[href*="/reel/{reel_id}"]').first
-        await link.scroll_into_view_if_needed(timeout=6000)
         pre_click = int(os.getenv("FACEBOOK_DETAIL_LIKES_PRE_CLICK_MS", "350") or "350")
-        await page.wait_for_timeout(max(0, min(3000, pre_click)))
-        await link.click(timeout=12_000, force=True)
-        try:
-            await page.wait_for_selector(
-                '[role="dialog"],[aria-modal="true"],[role="main"] video',
-                timeout=9000,
-            )
-        except Exception:
-            pass
-        try:
-            await page.locator("[role='main'] video").first.wait_for(state="attached", timeout=5000)
-        except Exception:
-            pass
         wait_ms = int(os.getenv("FACEBOOK_DETAIL_LIKES_MODAL_WAIT_MS", "3800") or "3800")
-        await page.wait_for_timeout(max(1000, min(10_000, wait_ms)))
-        return await _fb_dom_like_text_combined(page, xpath)
-    except Exception as exc:
-        print(f"[facebook_worker] modal likes reel={reel_id}: {exc}", file=sys.stderr)
-        return 0
+        for sel in selectors:
+            try:
+                link = page.locator(sel).first
+                await link.scroll_into_view_if_needed(timeout=6000)
+                await page.wait_for_timeout(max(0, min(3000, pre_click)))
+                await link.click(timeout=12_000, force=True)
+                try:
+                    await page.wait_for_selector(
+                        '[role="dialog"],[aria-modal="true"],[role="main"] video',
+                        timeout=9000,
+                    )
+                except Exception:
+                    pass
+                try:
+                    await page.locator("[role='main'] video").first.wait_for(state="attached", timeout=5000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(max(1000, min(10_000, wait_ms)))
+                likes, confirmed = await _fb_dom_like_read(page, xpath)
+                return likes, confirmed
+            except Exception as exc:
+                last_exc = exc
+                continue
+        if last_exc:
+            print(
+                f"[facebook_worker] modal likes reel={reel_id}: все селекторы не сработали: {last_exc}",
+                file=sys.stderr,
+            )
+        return 0, False
     finally:
         for _ in range(3):
             try:
@@ -1508,7 +1743,7 @@ async def _facebook_try_reel_likes_modal(
 
 async def _facebook_try_reel_likes_same_tab(
     page, reel_url: str, xpath: str, reels_sk_url: str | None
-) -> int:
+) -> tuple[int, bool]:
     """Та же вкладка: открыть Reel по URL, прочитать лайки, вернуться на sk=reels_tab."""
     restore = (reels_sk_url or "").strip()
     if not restore:
@@ -1516,8 +1751,9 @@ async def _facebook_try_reel_likes_same_tab(
             "[facebook_worker] same-tab likes: пропуск — нет URL вкладки Reels для возврата после просмотра",
             file=sys.stderr,
         )
-        return 0
+        return 0, False
     n = 0
+    confirmed = False
     try:
         await page.goto(reel_url, wait_until="domcontentloaded", timeout=28_000)
         try:
@@ -1526,35 +1762,18 @@ async def _facebook_try_reel_likes_same_tab(
             pass
         wait_ms = int(os.getenv("FACEBOOK_DETAIL_LIKES_PAGE_WAIT_MS", "5500") or "5500")
         await page.wait_for_timeout(max(800, min(12_000, wait_ms)))
-        n = await _fb_dom_like_text_combined(page, xpath)
+        n, confirmed = await _fb_dom_like_read(page, xpath)
+        if confirmed:
+            return n, True
         if n > 0:
-            return n
-        try:
-            loc = page.locator(
-                '[aria-label*="нравится" i], [aria-label*="like" i], [aria-label*="reaction" i]'
-            )
-            cnt = await loc.count()
-            for i in range(min(cnt, 30)):
-                try:
-                    lab_s = str(await loc.nth(i).get_attribute("aria-label", timeout=1500) or "")
-                    if _fb_aria_label_looks_like_views(lab_s):
-                        continue
-                    parsed = _parse_count(lab_s)
-                    if parsed > n:
-                        n = parsed
-                except Exception:
-                    continue
-            if n > 0:
-                return n
-        except Exception:
-            pass
+            return n, False
         try:
             lab = await page.locator('[aria-label*="нравится" i], [aria-label*="like" i]').first.get_attribute(
                 "aria-label", timeout=4000
             )
             lab_s = str(lab or "")
             if not _fb_aria_label_looks_like_views(lab_s):
-                n = max(n, _parse_count(lab_s))
+                n = max(n, _parse_count(lab_s), _parse_like_count_from_aria_label(lab_s))
         except Exception:
             pass
         if n <= 0:
@@ -1566,10 +1785,10 @@ async def _facebook_try_reel_likes_same_tab(
                 )
             except Exception:
                 pass
-        return n
+        return n, confirmed
     except Exception as exc:
         print(f"[facebook_worker] same-tab likes {reel_url[:72]}…: {exc}", file=sys.stderr)
-        return 0
+        return 0, False
     finally:
         try:
             await page.goto(restore, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
@@ -1585,76 +1804,101 @@ async def _facebook_enrich_reel_likes_from_detail(
     reels_sk_url: str | None = None,
 ) -> int:
     """
-    Ровно одно открытие на кандидата: на сетке Reels — только клик по карточке (модалка); иначе —
+    Ровно одно открытие на кандидата: на сетке Reels — клик по карточке (модалка); иначе —
     один ``goto`` на URL Reel. Лайки: XPath + эвристики по aria/тексту.
-    Порог ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS``: кандидаты — ``view_count >= порог - 1``; до enrich для
-    ``view_count <=`` порога лайки с сетки обнуляются в ``_run_with_page_core``.
+
+    Кандидаты: по умолчанию только ``view_count > FACEBOOK_DETAIL_LIKES_MIN_VIEWS`` (строго выше
+    порога — без открытия всех роликов с малыми просмотрами). Плюс низкие Reels, если включено
+    ``FACEBOOK_DETAIL_ENRICH_LOW_VIEW_REELS=1``.
+
+    После чтения detail: значение применяется не только при ``likes > prev``, но и когда сетка
+    явно спутала лайки с просмотрами (``prev >= vcount``), иначе корректные малые лайки (напр. 9)
+    не записываются при ``prev`` ≈ 16k.
     """
     if not _facebook_detail_likes_enabled() or not posts:
         return 0
     min_v = _facebook_detail_likes_min_views()
-    max_op = int(os.getenv("FACEBOOK_DETAIL_LIKES_MAX_OPENS", "12") or "12")
-    max_op = max(1, min(30, max_op))
+    max_op = int(os.getenv("FACEBOOK_DETAIL_LIKES_MAX_OPENS", "30") or "30")
+    max_op = max(1, min(50, max_op))
     xpath = (os.getenv("FACEBOOK_POST_LIKES_XPATH") or "").strip() or _DEFAULT_FB_REEL_LIKES_XPATH
 
     try_modal = bool(reels_sk_url) and "mbasic" not in (page.url or "").lower()
 
+    enrich_low = _facebook_detail_enrich_low_view_reels()
     candidates: list[dict] = []
-    thr = 0
-    if min_v > 0:
-        thr = max(0, min_v - 1)
     for p in posts:
         try:
             v = int(p.get("view_count") or 0)
         except (TypeError, ValueError):
             v = 0
+        rid = _facebook_reel_numeric_id_for_enrich(p)
+        is_reel = bool(rid)
         if min_v > 0:
-            if v >= thr:
+            if v > min_v or (enrich_low and is_reel and v <= min_v):
                 candidates.append(p)
-        else:
-            if v > 0:
-                candidates.append(p)
-    candidates.sort(key=lambda x: int(x.get("view_count") or 0), reverse=True)
+        elif v > 0:
+            candidates.append(p)
+    # Сначала те, у кого сетка дала ненулевые сомнительные лайки (чаще фантом), затем по просмотрам.
+    candidates.sort(
+        key=lambda x: (
+            int(x.get("like_count") or 0) == 0,
+            -int(x.get("view_count") or 0),
+        ),
+    )
     candidates = candidates[:max_op]
 
     improved = 0
     for p in candidates:
-        url = str(p.get("post_url") or "").strip()
-        if "/reel/" not in url.lower():
-            continue
-        m = re.search(r"/reel/(\d+)", url, re.I)
-        reel_id = m.group(1) if m else str(p.get("external_id") or "").strip()
+        reel_id = _facebook_reel_numeric_id_for_enrich(p)
         if not reel_id:
             continue
+        open_url = _facebook_url_for_reel_enrich(p, reel_id)
         prev = int(p.get("like_count") or 0)
         vcount = int(p.get("view_count") or 0)
         likes = 0
+        confirmed = False
         await _facebook_ensure_reels_sk_page(page, reels_sk_url)
         if try_modal:
             print(
                 f"[facebook_worker] enrich reel: id={reel_id} views={vcount} (один раз: клик по карточке)",
                 file=sys.stderr,
             )
-            likes = await _facebook_try_reel_likes_modal(page, reel_id, xpath, reels_sk_url)
+            likes, confirmed = await _facebook_try_reel_likes_modal(page, reel_id, xpath, reels_sk_url)
         else:
             print(
                 f"[facebook_worker] enrich reel: id={reel_id} views={vcount} (один раз: открытие по URL)",
                 file=sys.stderr,
             )
-            likes = await _facebook_try_reel_likes_same_tab(page, url, xpath, reels_sk_url)
-        if likes > prev:
-            if vcount > 0 and likes == vcount:
+            likes, confirmed = await _facebook_try_reel_likes_same_tab(page, open_url, xpath, reels_sk_url)
+
+        if not _facebook_detail_likes_should_apply(likes, prev, vcount, confirmed=confirmed):
+            await asyncio.sleep(_ms_jitter(350, 900))
+            continue
+        if not confirmed:
+            if prev == 0 and vcount > 0 and likes >= vcount:
+                print(
+                    f"[facebook_worker] detail likes: пропуск likes>=views при prev=0 ({likes}/{vcount}) "
+                    f"reel={reel_id}",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(_ms_jitter(350, 900))
+                continue
+            if vcount > 0 and likes == vcount and prev > 0 and not (prev >= vcount and likes < prev):
                 print(
                     f"[facebook_worker] detail likes: пропуск like==views ({likes}) reel={reel_id}",
                     file=sys.stderr,
                 )
-            else:
-                p["like_count"] = likes
-                improved += 1
-                print(
-                    f"[facebook_worker] detail likes reel={reel_id}: {likes} (min_views={min_v})",
-                    file=sys.stderr,
-                )
+                await asyncio.sleep(_ms_jitter(350, 900))
+                continue
+        p["like_count"] = likes
+        if confirmed:
+            p["like_count_confirmed"] = True
+        improved += 1
+        tag = "confirmed" if confirmed else "heuristic"
+        print(
+            f"[facebook_worker] detail likes reel={reel_id}: {likes} ({tag}, min_views={min_v}, prev={prev})",
+            file=sys.stderr,
+        )
         await asyncio.sleep(_ms_jitter(350, 900))
 
     return improved
@@ -2106,11 +2350,10 @@ async def _run_with_page_core(
     }
 
 
-async def run_once(arg: dict):
+async def run_once(arg: dict) -> None:
     arg = dict(arg)
     username = arg["username"].lstrip("@")
     _wu = _load_worker_utils()
-    keep = _facebook_run_once_keep_browser()
     try:
         async with async_playwright() as pw:
             context, _browser = await _wu.launch_context(
@@ -2120,23 +2363,17 @@ async def run_once(arg: dict):
             page = context.pages[0] if context.pages else await context.new_page()
             try:
                 result = await _run_with_page(username, page, _wu)
-            except Exception:
-                if not keep:
-                    await _wu.close_context(context, _browser)
+            except (KeyboardInterrupt, SystemExit):
                 raise
-            if keep:
-                print(
-                    "[facebook_worker] FACEBOOK_RUN_ONCE_KEEP_BROWSER=1 — Chromium не закрываем; "
-                    "остановите процесс (Ctrl+C), затем закройте окно вручную.",
-                    file=sys.stderr,
-                )
-                await asyncio.Future()
-            else:
-                await _wu.close_context(context, _browser)
-            return result
-    except Exception as exc:
+            except BaseException as exc:
+                _write_response({"error": f"Ошибка worker: {exc}"})
+                await _wu.finish_cli_session_keep_browser_by_default("facebook_worker", context, _browser)
+                return
+            _write_response(result)
+            await _wu.finish_cli_session_keep_browser_by_default("facebook_worker", context, _browser)
+    except BaseException as exc:
         print(f"[facebook_worker] exception: {exc}", file=sys.stderr)
-        return {"error": f"Ошибка: {exc}"}
+        _write_response({"error": f"Ошибка: {exc}"})
 
 
 def _write_response(payload: dict) -> None:
@@ -2161,6 +2398,15 @@ async def daemon_main(*, cli_first_json: str | None = None) -> None:
                     "[facebook_worker] вкладка закрыта — открываю новую в том же Chromium",
                     file=sys.stderr,
                 )
+                try:
+                    for p in list(context.pages):
+                        try:
+                            if not p.is_closed():
+                                await p.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
                 page = await context.new_page()
 
         if cli_first_json is not None and sys.stdin.isatty():
@@ -2215,11 +2461,7 @@ if __name__ == "__main__":
             _write_response({"error": f"Невалидный JSON в --once: {exc}"})
             sys.exit(1)
 
-        async def _once_main() -> None:
-            r = await run_once(_once_payload)
-            _write_response(r if isinstance(r, dict) else {"error": "Пустой ответ worker"})
-
-        asyncio.run(_once_main())
+        asyncio.run(run_once(_once_payload))
     elif len(sys.argv) >= 2:
         asyncio.run(daemon_main(cli_first_json=sys.argv[1]))
     else:

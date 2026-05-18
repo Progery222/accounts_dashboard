@@ -2,7 +2,9 @@
 Эвристики для колонок «Предполагаемый …» в CSV экспорта подписчиков.
 
 Это не факты и не аналитика по IP: только текст ника, имени и био.
-При слабых сигналах везде возвращается «Нет данных».
+Значения выводятся коротко (без «возможно», «вероятно» и пояснений в скобках);
+при слабом сигнале по-прежнему «Нет данных». По типичным индийским именам
+в латинице — Индия / хинди, если в тексте нет явного Пакистана, Бангладеша и т.п.
 """
 
 from __future__ import annotations
@@ -122,8 +124,8 @@ _COUNTRY_BY_SUBSTRING: tuple[tuple[str, str], ...] = (
     ("мексик", "Мексика"),
 )
 
-# Частые окончания/фрагменты в латинице — только как слабый сигнал к региону (не этнос).
-_INDIAN_NAME_FRAGMENTS: frozenset[str] = frozenset(
+# Токены из латиницы (ник / имя): совпадение целиком — сигнал к Южной Азии / Индии.
+_INDIAN_NAME_TOKENS: frozenset[str] = frozenset(
     {
         "kumar",
         "singh",
@@ -136,6 +138,7 @@ _INDIAN_NAME_FRAGMENTS: frozenset[str] = frozenset(
         "prasad",
         "yadav",
         "iyer",
+        "iyengar",
         "mehta",
         "bose",
         "gandhi",
@@ -148,7 +151,170 @@ _INDIAN_NAME_FRAGMENTS: frozenset[str] = frozenset(
         "rahul",
         "ananya",
         "mahatma",
+        "omprakash",
+        "prakash",
+        "priyanka",
+        "deepak",
+        "vikram",
+        "rajesh",
+        "ramesh",
+        "suresh",
+        "mahesh",
+        "ganesh",
+        "naresh",
+        "yogesh",
+        "bhavesh",
+        "hitesh",
+        "pritesh",
+        "sandesh",
+        "mahendra",
+        "ravindra",
+        "narendra",
+        "surendra",
+        "satendra",
+        "jitendra",
+        "dharmendra",
+        "rajendra",
+        "lakshman",
+        "lakshmanan",
+        "venkatesh",
+        "venkat",
+        "subramanian",
+        "murugan",
+        "karthikeyan",
+        "narayan",
+        "narayana",
+        "chandran",
+        "krishnan",
+        "swaminathan",
+        "meenakshi",
+        "deepika",
+        "aishwarya",
+        "anushka",
+        "kavitha",
+        "kavita",
+        "swathi",
+        "swati",
+        "pooja",
+        "puja",
+        "neha",
+        "kunal",
+        "rohan",
+        "sohan",
+        "varun",
+        "tarun",
+        "arjun",
+        "nikhil",
+        "manish",
+        "ritesh",
+        "jitesh",
+        "dinesh",
+        "harish",
+        "girish",
+        "satish",
+        "lokesh",
+        "pravesh",
+        "nandini",
+        "kiran",
+        "anil",
+        "sunil",
+        "anupam",
+        "amitabh",
+        "amit",
+        "sachin",
+        "vishal",
+        "rohit",
+        "mohit",
+        "sumit",
+        "namit",
+        "udit",
+        "aditya",
+        "abhishek",
+        "shreya",
+        "shruti",
+        "tanvi",
+        "ishita",
+        "divya",
+        "sneha",
+        "aarti",
+        "arti",
+        "sunita",
+        "anita",
+        "geeta",
+        "gita",
+        "seema",
+        "reena",
+        "rina",
+        "veena",
+        "heena",
+        "sheena",
+        "sanjay",
+        "ajay",
+        "vijay",
+        "ranjeet",
+        "ranjit",
+        "surjeet",
+        "baljeet",
+        "gurpreet",
+        "harpreet",
+        "manpreet",
+        "jaspreet",
+        "navpreet",
     }
+)
+
+# Подстроки в нижнем регистре (для «склееных» ников без разделителей). Не короче 4 символов.
+_INDIAN_NAME_SUBSTRINGS: tuple[str, ...] = (
+    "omprakash",
+    "prakash",
+    "lakshman",
+    "krishnan",
+    "venkatesh",
+    "subraman",
+    "swaminath",
+    "narayan",
+    "chandrasekhar",
+    "meenakshi",
+    "priyanka",
+    "aishwarya",
+    "murugan",
+    "karthikeyan",
+    "jitendra",
+    "dharmendra",
+    "rajendra",
+    "surendra",
+    "narendra",
+    "ravindra",
+    "mahendra",
+    "satendra",
+)
+
+# Если это есть в нике/имени/био — не угадываем Индию по имени (явный другой регион).
+_INDIAN_GUESS_BLOCKERS: tuple[str, ...] = (
+    "пакистан",
+    "pakistan",
+    "pakistani",
+    "karachi",
+    "lahore",
+    "islamabad",
+    "rawalpindi",
+    "peshawar",
+    "faisalabad",
+    "quetta",
+    "multan",
+    "sialkot",
+    "gujranwala",
+    "бангладеш",
+    "bangladesh",
+    "bangladeshi",
+    "dhaka",
+    "chittagong",
+    "шри-ланк",
+    "sri lanka",
+    "colombo",
+    "kandy",
+    "nepal",
+    "kathmandu",
 )
 
 _ARABIC_NAME_FRAGMENTS: frozenset[str] = frozenset(
@@ -173,12 +339,38 @@ def _blob(username: str, display_name: str, bio: str) -> str:
     return f"{username or ''}\n{display_name or ''}\n{bio or ''}".strip()
 
 
+def _latin_letter_count(blob: str) -> int:
+    return sum(1 for c in blob if "a" <= c.lower() <= "z")
+
+
+def _latin_alpha_tokens(low: str) -> set[str]:
+    tokens = re.split(r"[^a-zа-яё0-9]+", low)
+    out: set[str] = set()
+    for t in tokens:
+        if len(t) < 3 or t.isdigit():
+            continue
+        if not any(c.isalpha() for c in t):
+            continue
+        out.add(t)
+    return out
+
+
+def _indian_name_hint(low: str) -> bool:
+    """Индия по имени/нику, если нет явного Пакистана и т.д. в тексте."""
+    if any(b in low for b in _INDIAN_GUESS_BLOCKERS):
+        return False
+    if any(s in low for s in _INDIAN_NAME_SUBSTRINGS):
+        return True
+    if _latin_alpha_tokens(low) & _INDIAN_NAME_TOKENS:
+        return True
+    return False
+
+
 def _presumed_language(blob: str) -> str:
     if not blob or not any(c.isalpha() for c in blob):
         return ND
     low = blob.lower()
     # Скрипты Unicode
-    n = len(blob)
     arabic = sum(1 for c in blob if "\u0600" <= c <= "\u06ff" or "\u0750" <= c <= "\u077f")
     cyrillic = sum(1 for c in blob if "\u0400" <= c <= "\u04ff")
     deva = sum(1 for c in blob if "\u0900" <= c <= "\u097f")
@@ -186,27 +378,29 @@ def _presumed_language(blob: str) -> str:
     if letters == 0:
         return ND
     if arabic >= max(5, letters // 4):
-        return "Арабский (по алфавиту био/ника)"
+        return "Арабский"
     if cyrillic >= max(4, letters // 3):
-        return "Русский или родственный кириллический (по алфавиту)"
+        return "Русский"
     if deva >= 3:
-        return "Хинди или другой язык Индии (деванагари, по алфавиту)"
+        return "Хинди"
     hebrew = sum(1 for c in blob if "\u0590" <= c <= "\u05ff")
     if hebrew >= 3:
-        return "Иврит (по алфавиту)"
+        return "Иврит"
     cjk = sum(1 for c in blob if "\u4e00" <= c <= "\u9fff")
     if cjk >= 3:
-        return "Китайский, японский или корейский (по иероглифам, точнее: нет данных)"
+        return "Восточная Азия"
 
     # Преимущественно латиница
-    latin_letters = sum(1 for c in blob if "a" <= c.lower() <= "z")
+    latin_letters = _latin_letter_count(blob)
+    if latin_letters >= 4 and _indian_name_hint(low):
+        return "Хинди"
     if latin_letters < 4:
         return ND
     padded = f" {low} "
     if any(h in padded for h in _EN_HINTS):
-        return "Английский (предположительно, по частым словам)"
+        return "Английский"
     if any(h in padded for h in _RU_HINTS):
-        return "Русский (предположительно, по частым словам)"
+        return "Русский"
     return ND
 
 
@@ -216,24 +410,23 @@ def _presumed_country(blob: str) -> str:
     low = blob.lower()
     for needle, label in _COUNTRY_BY_SUBSTRING:
         if needle in low:
-            return f"{label} (по явному упоминанию в тексте)"
+            return label
 
     # Флаги в виде региональных индикаторов (упрощённо: ищем известные пары)
     if "🇮🇳" in blob:
-        return "Индия (по эмодзи флага)"
+        return "Индия"
     if "🇷🇺" in blob:
-        return "Россия (по эмодзи флага)"
+        return "Россия"
     if "🇺🇸" in blob:
-        return "США (по эмодзи флага)"
+        return "США"
     if "🇦🇪" in blob:
-        return "ОАЭ (по эмодзи флага)"
+        return "ОАЭ"
 
-    tokens = re.split(r"[^a-zа-яё0-9]+", low)
-    tokens = {t for t in tokens if len(t) >= 3}
-    if tokens & _INDIAN_NAME_FRAGMENTS:
-        return "Возможно Индия (по типичным фрагментам имени/ника, неточно)"
+    if _indian_name_hint(low):
+        return "Индия"
+
     if any(f in low for f in _ARABIC_NAME_FRAGMENTS):
-        return "Возможно страна Ближнего Востока или Северной Африки (по имени, неточно)"
+        return "Ближний Восток и Северная Африка"
 
     return ND
 
@@ -250,18 +443,18 @@ def _presumed_age(blob: str) -> str:
     if m:
         a = int(m.group(1))
         if 13 <= a <= 80:
-            return f"около {a} лет (по явной фразе в тексте)"
+            return f"{a} лет"
     m = re.search(r"\b(?:born|рожд\.?|рождения|birth)\s*[:\s]*((?:19|20)\d{2})\b", low, re.I)
     if m:
         y = int(m.group(1))
         cy = date.today().year
         if 1940 <= y <= cy - 10:
-            return f"около {cy - y} лет (по году рождения в тексте)"
+            return f"{cy - y} лет"
     m = re.search(r"\b(?:age|возраст)\s*[:\s]*(\d{1,2})\b", low, re.I)
     if m:
         a = int(m.group(1))
         if 13 <= a <= 80:
-            return f"около {a} лет (по полю «возраст» в тексте)"
+            return f"{a} лет"
     return ND
 
 
@@ -287,6 +480,26 @@ def _presumed_occupation(blob: str) -> str:
     hit("спорт / фитнес", r"\bcoach\b", r"тренер", r"fitness", r"фитнес", r"athlete", r"спорт")
     hit("творчество", r"\bartist\b", r"художник", r"музыкант", r"musician", r"photographer", r"фотограф", r"designer", r"дизайнер")
     hit("IT", r"\bdeveloper\b", r"\bengineer\b", r"программист", r"разработчик", r"\bdev\b", r"кодер")
+    hit(
+        "зодиак / астрология (по био)",
+        r"\baries\b",
+        r"\btaurus\b",
+        r"\bgemini\b",
+        r"\bcancer\b",
+        r"\bleo\b",
+        r"\bvirgo\b",
+        r"\blibra\b",
+        r"\bscorpio\b",
+        r"\bsagittarius\b",
+        r"\bcapricorn\b",
+        r"\baquarius\b",
+        r"\bpisces\b",
+        r"\bastro\b",
+        r"\bhoroscope\b",
+        r"овен|телец|близнецы|рак|лев|дева|весы|скорпион|стрелец|козерог|водолей|рыбы",
+        r"зодиак",
+        r"астролог",
+    )
 
     if not hits:
         return ND

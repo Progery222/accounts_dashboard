@@ -78,6 +78,27 @@ class AccountDeltaSerializerTests(TestCase):
         payload = AccountSerializer(account, context=ctx).data
         self.assertEqual(payload["follower_delta"], 150)
 
+    def test_facebook_like_delta_hidden_when_like_count_zero(self):
+        today = timezone.localdate()
+        account = Account.objects.create(
+            username="61588868450712",
+            platform=Platform.FACEBOOK,
+            follower_count=1,
+            like_count=0,
+            view_count=1000,
+            post_count=5,
+        )
+        AccountSnapshot.objects.create(
+            account=account,
+            date=today - timedelta(days=1),
+            follower_count=1,
+            like_count=9,
+            view_count=900,
+            post_count=5,
+        )
+        payload = AccountSerializer(account).data
+        self.assertIsNone(payload["like_delta"])
+
     def test_instagram_view_delta_never_negative_without_annotation(self):
         today = timezone.localdate()
         account = Account.objects.create(

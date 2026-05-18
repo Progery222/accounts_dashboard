@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from .dashboard_sync import (
     dashboard_delete_audience_member_by_username,
     dashboard_refresh_account,
+    dashboard_stop_audience_scrape,
     import_audience_into_subs,
     sync_profiles_and_accounts,
 )
@@ -307,44 +308,12 @@ def overview(request):
     if not visible_ids:
         unique_total = 0
         private_total = 0
-        top_rows = []
     else:
         mem_base = AudienceMember.objects.filter(
             memberships__account_id__in=visible_ids,
         ).distinct()
         unique_total = mem_base.count()
         private_total = mem_base.filter(is_private=True).count()
-
-        overlap_qs = (
-            AudienceMember.objects.filter(
-                memberships__account_id__in=visible_ids,
-            )
-            .annotate(
-                follows_tracked_accounts=Count(
-                    "memberships",
-                    filter=Q(memberships__account_id__in=visible_ids),
-                    distinct=True,
-                ),
-            )
-            .filter(follows_tracked_accounts__gt=0)
-            .order_by("-follows_tracked_accounts", "platform", "username")
-        )
-        try:
-            top_limit = max(5, min(100, int(request.query_params.get("top_limit") or 50)))
-        except (TypeError, ValueError):
-            top_limit = 50
-        top_rows = []
-        for m in overlap_qs[:top_limit]:
-            top_rows.append({
-                "id": m.id,
-                "platform": m.platform,
-                "username": m.username,
-                "display_name": m.display_name or "",
-                "avatar_url": m.avatar_url or "",
-                "bio": (m.bio or "")[:280],
-                "is_private": bool(m.is_private),
-                "follows_tracked_accounts": int(m.follows_tracked_accounts),
-            })
 
     synced_n = sum(1 for a in accounts_out if a["audience_last_synced_at"])
     with_data_n = sum(1 for a in accounts_out if a["audience_count"] > 0)
@@ -358,7 +327,6 @@ def overview(request):
             "private_subscribers_total": private_total,
         },
         "accounts": accounts_out,
-        "top_subscribers": top_rows,
     })
 
 
@@ -395,6 +363,8 @@ def members_list(request):
             "following_count": int(m.following_count or 0),
             "like_count": int(m.like_count or 0),
             "follows_tracked_accounts": int(m.follows_tracked_accounts or 0),
+            "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+            "created_at": m.created_at.isoformat() if m.created_at else None,
         })
 
     return Response({
@@ -543,6 +513,57 @@ def _dense_rank_sorted_counts(counter: Counter[str]) -> list[dict]:
             prev_count = cnt
         out.append({"label": label, "count": cnt, "rank": rank})
     return out
+
+
+def _presumed_stats_from_members_queryset(mem_qs) -> tuple[list[dict], int]:
+    """
+    Те же эвристики «Предполагаемый …», что в CSV, по полной выборке AudienceMember
+    (без чтения members_export_last.csv).
+    """
+    counters: list[Counter[str]] = [Counter() for _ in CSV_PRESUMED_HEADERS]
+    row_count = 0
+    for m in mem_qs.iterator(chunk_size=500):
+        row_count += 1
+        pres = presumed_csv_fields(
+            username=m.username or "",
+            display_name=m.display_name or "",
+            bio=m.bio or "",
+            platform=m.platform or "",
+        )
+        for ci, title in enumerate(CSV_PRESUMED_HEADERS):
+            val = str(pres.get(title) or "").strip()
+            if not val or val == ND:
+                continue
+            counters[ci][val] += 1
+    columns: list[dict] = []
+    for title, counter in zip(CSV_PRESUMED_HEADERS, counters, strict=True):
+        columns.append(
+            {
+                "header": title,
+                "items": _dense_rank_sorted_counts(counter),
+            },
+        )
+    return columns, row_count
+
+
+@api_view(["GET"])
+def members_presumed_stats(request):
+    """
+    Распределение по колонкам «Предполагаемый …» для всех подписчиков в текущих
+    фильтрах (как у GET members/ и экспорта CSV), данные из БД, не из последнего файла.
+    """
+    mem_qs, err = _members_filtered_queryset(request)
+    if err is not None:
+        return err
+    columns, row_count = _presumed_stats_from_members_queryset(mem_qs)
+    return Response(
+        {
+            "generated_at": timezone.now().isoformat(),
+            "columns": columns,
+            "member_row_count": row_count,
+            "source": "database",
+        },
+    )
 
 
 @api_view(["GET"])
@@ -760,11 +781,30 @@ def sync_dashboard(_request):
 
 
 @api_view(["POST"])
+def sync_audience_stop(_request):
+    """
+    Остановить текущий съём аудитории на дашборде (Playwright).
+    Используется при «Остановить» в массовом или одиночном сборе подписчиков в subs.
+    """
+    try:
+        dashboard_stop_audience_scrape()
+        return Response({"ok": True, "stopped": True})
+    except Exception as exc:
+        return Response(
+            {"detail": str(exc)},
+            status=status.HTTP_502_BAD_GATEWAY,
+        )
+
+
+@api_view(["POST"])
 def sync_account_audience(request, pk: int):
     """
     Съём на дашборде + импорт списка аудитории в subs для аккаунта с id в БД subs.
     После полного импорта удаляются связи с подписчиками, которых больше нет в ответе дашборда (отписки).
-    Тело: { "skip_existing_member_profiles": true } — не открывать профили уже известных подписчиков на дашборде.
+    Тело:
+    - audience_mode: list | enrich | full (по умолчанию list в subs UI);
+    - skip_existing_member_profiles: при full — не открывать профили уже известных подписчиков.
+    - enrich_usernames: при enrich — обновить только указанные ники (массив строк).
     """
     try:
         acc = Account.objects.get(pk=int(pk))
@@ -775,15 +815,49 @@ def sync_account_audience(request, pk: int):
             {"detail": "Нет mirror_dashboard_id — выполните POST /api/subscribers/sync/dashboard/"},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    dash_body: dict = {}
-    if isinstance(getattr(request, "data", None), dict) and bool(
-        request.data.get("skip_existing_member_profiles"),
-    ):
-        dash_body["skip_existing_member_profiles"] = True
+    dash_body: dict = {"audience_mode": "list"}
+    if isinstance(getattr(request, "data", None), dict):
+        raw_mode = request.data.get("audience_mode")
+        if raw_mode is not None:
+            dash_body["audience_mode"] = str(raw_mode).strip().lower()
+        if bool(request.data.get("skip_existing_member_profiles")):
+            dash_body["skip_existing_member_profiles"] = True
+        raw_enrich = request.data.get("enrich_usernames")
+        if raw_enrich is not None:
+            if not isinstance(raw_enrich, list):
+                return Response(
+                    {"detail": "enrich_usernames должен быть массивом ников."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            names = [
+                str(x or "").strip().lstrip("@").lower()
+                for x in raw_enrich
+                if str(x or "").strip()
+            ]
+            if names:
+                dash_body["enrich_usernames"] = names
     try:
-        dashboard_refresh_account(int(acc.mirror_dashboard_id), body=dash_body)
+        dash_result = dashboard_refresh_account(int(acc.mirror_dashboard_id), body=dash_body)
         n, pruned = import_audience_into_subs(acc)
-        return Response({"ok": True, "imported": n, "pruned_memberships": pruned})
+        enriched_members: list = []
+        enriched_ok_count = 0
+        enriched_weak_count = 0
+        if isinstance(dash_result, dict):
+            raw_em = dash_result.get("enriched_members")
+            if isinstance(raw_em, list):
+                enriched_members = raw_em
+            enriched_ok_count = int(dash_result.get("enriched_ok_count") or 0)
+            enriched_weak_count = int(dash_result.get("enriched_weak_count") or 0)
+        return Response({
+            "ok": True,
+            "imported": n,
+            "pruned_memberships": pruned,
+            "audience_mode": dash_body.get("audience_mode"),
+            "enriched_members": enriched_members,
+            "enriched_ok_count": enriched_ok_count,
+            "enriched_weak_count": enriched_weak_count,
+            "dashboard": dash_result,
+        })
     except Exception as exc:
         return Response(
             {"detail": str(exc)},

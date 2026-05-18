@@ -152,6 +152,134 @@ def _extract_tiktok_stats_from_html(html: str) -> dict:
     }
 
 
+def _tiktok_stat_to_int(raw) -> int:
+    if raw is None:
+        return 0
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    return _parse_short_count(str(raw).strip())
+
+
+def _parse_tiktok_universal_user_stats(html: str) -> tuple[dict, dict]:
+    """Из HTML профиля: user и stats из webapp.user-detail (если есть)."""
+    m = _UNIVERSAL_RE.search(html or "")
+    if not m:
+        return {}, {}
+    try:
+        scope = json.loads(m.group(1)).get("__DEFAULT_SCOPE__", {})
+        ui = scope.get("webapp.user-detail", {}).get("userInfo", {})
+        if not isinstance(ui, dict):
+            return {}, {}
+        user = ui.get("user") if isinstance(ui.get("user"), dict) else {}
+        stats = ui.get("stats") if isinstance(ui.get("stats"), dict) else {}
+        return user, stats
+    except Exception:
+        return {}, {}
+
+
+def _user_stats_to_audience_meta(user: dict, stats: dict) -> dict:
+    """Поля для строки audience (как в audience_scrape._tiktok_user_row_from_api_dict)."""
+    out: dict = {}
+    user = user if isinstance(user, dict) else {}
+    stats = stats if isinstance(stats, dict) else {}
+    sig = str(user.get("signature") or "").strip()
+    if sig:
+        out["bio"] = sig[:2000]
+    nick = str(user.get("nickname") or "").strip()
+    if nick:
+        out["display_name"] = nick[:255]
+    ext = str(user.get("secUid") or user.get("sec_uid") or user.get("id") or "").strip()
+    if ext and "http" not in ext.lower():
+        out["external_id"] = ext[:160]
+    if user.get("privateAccount") or user.get("secret"):
+        out["is_private"] = True
+    fc = _tiktok_stat_to_int(stats.get("followerCount") or stats.get("follower_count"))
+    fg = _tiktok_stat_to_int(stats.get("followingCount") or stats.get("following_count"))
+    lk = _tiktok_stat_to_int(stats.get("heartCount") or stats.get("heart") or stats.get("diggCount"))
+    out["follower_count"] = fc
+    out["following_count"] = fg
+    out["like_count"] = lk
+    return out
+
+
+def fetch_tiktok_oembed_profile_snippet(username: str) -> dict:
+    """
+    Лёгкий JSON без полного HTML (часто проходит, когда профиль отдаёт WAF-оболочку).
+    Даёт в основном display_name (author_name).
+    """
+    username = (username or "").strip().lstrip("@").lower()
+    if not username:
+        return {}
+    profile_url = f"https://www.tiktok.com/@{username}"
+    try:
+        r = httpx.get(
+            "https://www.tiktok.com/oembed",
+            params={"url": profile_url},
+            headers={"User-Agent": _HEADERS["User-Agent"]},
+            follow_redirects=True,
+            timeout=15.0,
+        )
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        if not isinstance(data, dict):
+            return {}
+        out: dict = {}
+        an = str(data.get("author_name") or "").strip()
+        if an:
+            out["display_name"] = an[:255]
+        return out
+    except Exception:
+        return {}
+
+
+def fetch_tiktok_audience_member_meta_http(username: str) -> dict:
+    """
+    Метаданные профиля подписчика без Playwright: публичный HTML + oEmbed.
+    Пустой dict — нет данных (WAF, 404). Не вызывает worker_pool.
+    """
+    username = (username or "").strip().lstrip("@").lower()
+    if not username:
+        return {}
+    url = f"https://www.tiktok.com/@{username}"
+    html = ""
+    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=25.0) as client:
+        for attempt in range(3):
+            response = client.get(url)
+            if response.status_code == 404:
+                return {}
+            if response.status_code != 200:
+                if attempt < 2:
+                    time.sleep(1.2)
+                    continue
+            html = response.text
+            if _UNIVERSAL_RE.search(html):
+                break
+            if attempt < 2:
+                time.sleep(1.2)
+
+    out: dict = {}
+    user, stats = _parse_tiktok_universal_user_stats(html)
+    if user or stats:
+        out.update(_user_stats_to_audience_meta(user, stats))
+    html_stats = _extract_tiktok_stats_from_html(html)
+    if int(out.get("follower_count") or 0) == 0:
+        out["follower_count"] = int(html_stats.get("follower_count") or 0)
+    if int(out.get("following_count") or 0) == 0:
+        out["following_count"] = int(html_stats.get("following_count") or 0)
+    if int(out.get("like_count") or 0) == 0:
+        out["like_count"] = int(html_stats.get("like_count") or 0)
+    av = _extract_avatar_from_html(html)
+    if av and not out.get("avatar_url"):
+        out["avatar_url"] = av[:2048]
+
+    if not str(out.get("display_name") or "").strip():
+        out.update(fetch_tiktok_oembed_profile_snippet(username))
+    return out
+
+
 def _extract_avatar_from_html(html: str) -> str:
     raw_html = html or ""
     m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', raw_html, flags=re.I)

@@ -32,6 +32,7 @@ class AccountSerializer(serializers.ModelSerializer):
     like_delta = serializers.SerializerMethodField()
     view_delta = serializers.SerializerMethodField()
     post_delta = serializers.SerializerMethodField()
+    link_click_delta = serializers.SerializerMethodField()
     is_platform_hidden = serializers.SerializerMethodField()
     is_profile_hidden = serializers.SerializerMethodField()
     audience_members_count = serializers.SerializerMethodField()
@@ -43,10 +44,11 @@ class AccountSerializer(serializers.ModelSerializer):
             "profile_id", "profile_name", "profile_color",
             "display_name", "avatar_url", "bio",
             "follower_count", "like_count", "view_count", "post_count",
+            "link_click_count",
             "profile_unavailable",
             "audience_last_synced_at",
             "audience_members_count",
-            "follower_delta", "like_delta", "view_delta", "post_delta",
+            "follower_delta", "like_delta", "view_delta", "post_delta", "link_click_delta",
             "is_platform_hidden", "is_profile_hidden",
             "created_at", "updated_at",
         ]
@@ -120,6 +122,10 @@ class AccountSerializer(serializers.ModelSerializer):
         return obj.follower_count
 
     def get_like_delta(self, obj):
+        # Facebook: сумма лайков по постам часто 0 при нестабильном парсе; отрицательная дельта
+        # против вчерашнего снимка вводит в заблуждение — не отдаём дельту, пока лайков нет.
+        if obj.platform == Platform.FACEBOOK and int(obj.like_count or 0) == 0:
+            return None
         annotated = getattr(obj, "_like_delta", None)
         if annotated is not None:
             return annotated
@@ -152,6 +158,15 @@ class AccountSerializer(serializers.ModelSerializer):
             return obj.post_count - snap.post_count
         return obj.post_count
 
+    def get_link_click_delta(self, obj):
+        annotated = getattr(obj, "_link_click_delta", None)
+        if annotated is not None:
+            return annotated
+        snap = self._baseline_snap(obj)
+        if snap:
+            return int(obj.link_click_count or 0) - int(snap.link_click_count or 0)
+        return int(obj.link_click_count or 0)
+
     def get_is_platform_hidden(self, obj):
         hidden = self.context.get("hidden_platforms") or set()
         return obj.platform in hidden
@@ -172,6 +187,7 @@ class PostSerializer(serializers.ModelSerializer):
     view_delta = serializers.SerializerMethodField()
     like_delta = serializers.SerializerMethodField()
     comment_delta = serializers.SerializerMethodField()
+    scrape_not_found = serializers.SerializerMethodField()
 
     class Meta:
         model = Post
@@ -179,9 +195,12 @@ class PostSerializer(serializers.ModelSerializer):
             "id", "external_id", "description", "hashtags", "thumbnail_url", "post_url",
             "view_count", "like_count", "comment_count", "share_count",
             "view_delta", "like_delta", "comment_delta",
-            "posted_at", "updated_at",
+            "posted_at", "updated_at", "missing_from_scrape_at", "scrape_not_found",
         ]
-        read_only_fields = ["id", "updated_at"]
+        read_only_fields = ["id", "updated_at", "missing_from_scrape_at", "scrape_not_found"]
+
+    def get_scrape_not_found(self, obj) -> bool:
+        return obj.missing_from_scrape_at is not None
 
     def _baseline_snap(self, obj):
         snaps = getattr(obj, "_yesterday_snaps", None)
@@ -267,6 +286,7 @@ class AudienceMemberListSerializer(serializers.ModelSerializer):
             "like_count",
             "profile_language",
             "timezone_name",
+            "follower_network",
             "follows_tracked_accounts_count",
         ]
         read_only_fields = fields

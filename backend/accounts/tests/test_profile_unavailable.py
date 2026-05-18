@@ -19,6 +19,16 @@ class ProfileUnavailableDetectionTests(SimpleTestCase):
     def test_ignores_non_unavailable_errors(self):
         self.assertFalse(is_profile_unavailable_error("Timeout while waiting for selector"))
 
+    def test_trustworthy_rejection_message_not_profile_gone(self):
+        from accounts.views import _is_refresh_stats_rejection
+
+        msg = (
+            "Данные выглядят как ошибка или недоступность: нулевые метрики при ненулевых в базе "
+            "или профиль помечен недоступным. Обновление не применено."
+        )
+        self.assertTrue(_is_refresh_stats_rejection(ValueError(msg)))
+        self.assertFalse(is_profile_unavailable_error(msg))
+
     def test_user_visible_message_strips_prefix_only(self):
         raw = f"{PROFILE_UNAVAILABLE_MARK}Threads @abc: профиль недоступен"
         self.assertEqual(

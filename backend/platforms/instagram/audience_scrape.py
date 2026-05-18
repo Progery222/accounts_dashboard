@@ -1,8 +1,9 @@
 """
 Список подписчиков Instagram: Playwright только для модалки со списком логинов.
 
-Дальше по каждому подписчику — HTTP (см. `audience_member_http.py`): куки и User-Agent
-из того же Chromium, таймаут на каждый запрос. Посты подписчиков не собираются (`posts` всегда []).
+В режиме ``full`` по каждому подписчику — HTTP (см. `audience_member_http.py`).
+В режиме ``enrich`` — переход на профиль в Chromium (видимый в окне worker).
+Посты подписчиков не собираются (`posts` всегда []).
 
 Политика URL модалки — без программного перехода на /followers/; см. `audience_followers_modal.py`.
 
@@ -29,6 +30,87 @@ from platforms.instagram.audience_member_http import (
 
 # Случайная пауза между открытием профилей подписчиков (сек, снижает триггер антибота).
 _IG_MEMBER_PROFILE_GAP_SEC = (3.0, 5.0)
+_IG_ENRICH_PROFILE_DWELL_SEC = (2.5, 4.5)
+
+
+async def _instagram_enrich_follower_profile_playwright(page, _wu, row: dict) -> None:
+    """Открыть профиль подписчика в Chromium (видимый переход), обновить поля строки."""
+    from platforms.instagram.audience_member_http import (
+        ig_extract_profile_counts_from_page,
+        ig_merge_profile_snap_from_http,
+        ig_wait_profile_stats,
+        parse_instagram_profile_html,
+    )
+
+    member_username = _norm_user(str(row.get("username") or ""))
+    if not member_username:
+        return
+    profile_url = f"https://www.instagram.com/{member_username}/"
+    print(f"[audience] ig enrich: открываем @{member_username}", file=sys.stderr)
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+    await page.goto(profile_url, wait_until="load", timeout=90_000)
+    if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
+        await _wu.wait_for_anti_bot_clear(page, platform="instagram")
+    await ig_wait_profile_stats(page)
+    lo, hi = _IG_ENRICH_PROFILE_DWELL_SEC
+    await asyncio.sleep(lo + random.random() * (hi - lo))
+    url_l = (page.url or "").lower()
+    if "accounts/login" in url_l or "challenge" in url_l:
+        print(f"[audience] ig enrich @{member_username}: требуется вход", file=sys.stderr)
+        row["_enrich_ok"] = False
+        row["_enrich_note"] = "Требуется вход в Instagram"
+        return
+    try:
+        html = await page.content()
+    except Exception as exc:
+        print(f"[audience] ig enrich @{member_username}: {exc}", file=sys.stderr)
+        row["_enrich_ok"] = False
+        row["_enrich_note"] = str(exc)[:200]
+        return
+    snap = parse_instagram_profile_html(html)
+    for _ in range(3):
+        dom_counts = await ig_extract_profile_counts_from_page(page)
+        if int(snap.get("follower_count") or 0) <= 0 and dom_counts.get("followers", 0) > 0:
+            snap["follower_count"] = dom_counts["followers"]
+        if int(snap.get("following_count") or 0) <= 0 and dom_counts.get("following", 0) > 0:
+            snap["following_count"] = dom_counts["following"]
+        if int(snap.get("follower_count") or 0) > 0 and int(snap.get("following_count") or 0) > 0:
+            break
+        await page.wait_for_timeout(900)
+    if int(snap.get("follower_count") or 0) <= 0 or int(snap.get("following_count") or 0) <= 0:
+        snap = await ig_merge_profile_snap_from_http(page, member_username, snap)
+    print(
+        f"[audience] ig enrich @{member_username}: followers={snap.get('follower_count')} "
+        f"following={snap.get('following_count')} url={page.url!r}",
+        file=sys.stderr,
+    )
+    if snap.get("_auth_required"):
+        row["_enrich_ok"] = False
+        row["_enrich_note"] = "Требуется вход в Instagram"
+        return
+    if not snap.get("_ok"):
+        print(
+            f"[audience] ig enrich @{member_username}: слабый разбор "
+            f"(status={snap.get('_http_status')!r} err={snap.get('_error')!r})",
+            file=sys.stderr,
+        )
+        row["_enrich_ok"] = False
+        row["_enrich_note"] = str(snap.get("_error") or "Слабый разбор страницы")[:200]
+    else:
+        has_counts = int(snap.get("follower_count") or 0) > 0 or int(snap.get("following_count") or 0) > 0
+        row["_enrich_ok"] = bool(has_counts or snap.get("display_name") or snap.get("bio"))
+        row["_enrich_note"] = "" if row["_enrich_ok"] else "Имя есть, счётчики не распознаны"
+    row["display_name"] = str(snap.get("display_name") or row.get("display_name") or "")[:255]
+    row["avatar_url"] = str(snap.get("avatar_url") or row.get("avatar_url") or "")[:2048]
+    row["bio"] = str(snap.get("bio") or row.get("bio") or "")[:4000]
+    row["follower_count"] = int(snap.get("follower_count") or row.get("follower_count") or 0)
+    row["following_count"] = int(snap.get("following_count") or row.get("following_count") or 0)
+    row["like_count"] = int(snap.get("like_count") or row.get("like_count") or 0)
+    snap_priv = bool(snap.get("is_private"))
+    row["is_private"] = snap_priv or bool(row.get("is_private"))
 
 
 async def _ig_profile_followers_count(page) -> int:
@@ -121,14 +203,59 @@ async def scrape_instagram_audience_followers(
     max_posts_per_follower: int = 0,
     skip_existing_member_profiles: bool = False,
     audience_account_id: int | None = None,
+    list_only: bool = False,
+    enrich_only: bool = False,
+    enrich_usernames: list[str] | None = None,
 ) -> dict:
     _ = max_posts_per_follower  # совместимость worker API; посты подписчиков не собираем
     owner_username = _norm_user(owner_username)
     if not owner_username:
         return {"error": "Пустой username"}
+    if enrich_only and not audience_account_id:
+        return {"error": "Режим enrich требует audience_account_id."}
 
     limit = max(1, min(int(limit or 100), 500))
     seen: dict[str, dict] = {}
+
+    if enrich_only:
+        from platforms.audience_skip import (
+            existing_audience_member_rows_for_dashboard_account,
+            filter_audience_followers_by_usernames,
+        )
+
+        followers = await asyncio.to_thread(
+            existing_audience_member_rows_for_dashboard_account,
+            int(audience_account_id),
+            limit=limit,
+        )
+        followers = filter_audience_followers_by_usernames(followers, enrich_usernames)
+        if not followers:
+            return {"error": "Нет подписчиков в БД для обогащения."}
+        if list_only:
+            return {
+                "followers": followers,
+                "owner_username": owner_username,
+                "audience_mode": "list",
+            }
+        profile_visits = 0
+        for row in followers:
+            if profile_visits > 0:
+                lo, hi = _IG_MEMBER_PROFILE_GAP_SEC
+                await asyncio.sleep(lo + random.random() * (hi - lo))
+            profile_visits += 1
+            row["posts"] = []
+            try:
+                await _instagram_enrich_follower_profile_playwright(page, _wu, row)
+            except Exception as exc:
+                print(
+                    f"[audience] ig enrich (внешний) @{row.get('username')}: {exc}",
+                    file=sys.stderr,
+                )
+        return {
+            "followers": followers,
+            "owner_username": owner_username,
+            "audience_mode": "enrich",
+        }
 
     profile_url = f"https://www.instagram.com/{owner_username}/"
     await page.goto(profile_url, wait_until="domcontentloaded", timeout=60_000)
@@ -297,6 +424,15 @@ async def scrape_instagram_audience_followers(
 
     followers = list(seen.values())[:effective_cap]
 
+    if list_only:
+        for row in followers:
+            row["posts"] = []
+        return {
+            "followers": followers,
+            "owner_username": owner_username,
+            "audience_mode": "list",
+        }
+
     skip_usernames: set[str] = set()
     if skip_existing_member_profiles and audience_account_id:
         try:
@@ -356,4 +492,4 @@ async def scrape_instagram_audience_followers(
         if http_client is not None:
             await http_client.aclose()
 
-    return {"followers": followers, "owner_username": owner_username}
+    return {"followers": followers, "owner_username": owner_username, "audience_mode": "full"}

@@ -1,0 +1,16 @@
+# Quick Tunnel (npm run tunnel / tunnel:5174): https://….trycloudflare.com при каждом запуске.
+# Статика new_frontend на 127.0.0.1:5174; Django — пути ниже на :8000.
+# path — regexp в Go. Якорь ^/api, иначе /app.html уйдёт на Django → 404.
+# Нужны: npm run dev (5174) и Django 127.0.0.1:8000. Вариант API :8010 — cloudflared.5174.8010.yml, npm run tunnel:5174:8010.
+ingress:
+  - path: ^/api
+    service: http://127.0.0.1:8000
+  - path: ^/admin
+    service: http://127.0.0.1:8000
+  - path: ^/static
+    service: http://127.0.0.1:8000
+  - path: ^/media
+    service: http://127.0.0.1:8000
+  - path: ^/healthz
+    service: http://127.0.0.1:8000
+  - service: http://127.0.0.1:5174

@@ -17,10 +17,16 @@ Solution:
       (with auto-cleanup of CHROME_DELETE artefacts).
     • channel="chrome" removed everywhere — only Playwright's bundled Chromium is
       used, eliminating version-mismatch / CHROME_DELETE issues.
+
+    • Демоны и одноразовый CLI Playwright по умолчанию не закрывают окно после
+      ответа / EOF stdin (см. ``finish_cli_session_keep_browser_by_default``,
+      ``WORKER_AUTOCLOSE_BROWSER_ON_EXIT``).
 """
+import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,6 +67,80 @@ def _storage_state_has_instagram_session(path: Path) -> bool:
 
 
 # ── Chrome artefact cleanup ────────────────────────────────────────────────────
+
+def accounts_profile_roots() -> list[Path]:
+    """Каталоги user-data-dir Playwright (общий профиль и *_persistent по платформам)."""
+    try:
+        from django.conf import settings as dj_settings
+
+        raw = getattr(dj_settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
+        base = Path(raw) if raw else default_profile_dir()
+    except Exception:
+        base = default_profile_dir()
+    base = base.expanduser().resolve()
+    roots = [base]
+    if base.is_dir():
+        for child in base.iterdir():
+            if child.is_dir() and child.name.endswith("_persistent"):
+                roots.append(child)
+    return roots
+
+
+def kill_chrome_processes_for_profile(profile_dir: Path | str) -> None:
+    """
+    Завершить Chromium/Chrome, привязанные к user-data-dir (после terminate() воркера
+    дочерний браузер на macOS/Windows часто остаётся в доке).
+    """
+    path = str(Path(profile_dir).expanduser().resolve())
+    if not path:
+        return
+
+    if os.name == "nt":
+        needle = path.replace("'", "''")
+        for exe in ("chrome.exe", "chromium.exe"):
+            ps = (
+                f"$needle = '{needle}'; "
+                f"Get-CimInstance Win32_Process -Filter \"name='{exe}'\" -ErrorAction SilentlyContinue | "
+                "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | "
+                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            try:
+                subprocess.run(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=25,
+                )
+            except Exception:
+                pass
+        return
+
+    for pat in (f"--user-data-dir={path}", path):
+        try:
+            subprocess.run(
+                ["pkill", "-f", pat],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
+
+def kill_all_accounts_profile_chrome(*, cleanup_artifacts: bool = True) -> None:
+    """Снять все Chromium, связанные с профилем дашборда (перед/после пула воркеров)."""
+    seen: set[str] = set()
+    for root in accounts_profile_roots():
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        kill_chrome_processes_for_profile(root)
+        if cleanup_artifacts:
+            cleanup_chrome_artifacts(root)
+
 
 def cleanup_chrome_artifacts(profile_dir: Path) -> None:
     """
@@ -268,11 +348,11 @@ async def launch_context(
             file=sys.stderr,
         )
     base.mkdir(parents=True, exist_ok=True)
-    launch_dirs = [base]
-    if force_persistent:
-        # Daemon workers for different platforms can run concurrently; Chromium
-        # persistent contexts cannot share the same user-data-dir at once.
-        launch_dirs.append(base / f"{platform}_persistent")
+    isolated = base / f"{platform}_persistent"
+    # Два кандидата user-data-dir: общий профиль и изолированный каталог платформы.
+    # Раньше второй был только при force_persistent — Threads и др. без state при занятом
+    # `base` (Facebook/Telegram) не имели fallback и плодились лишние Chromium при ретраях пула.
+    launch_dirs = [base, isolated]
 
     for launch_dir in launch_dirs:
         launch_dir.mkdir(parents=True, exist_ok=True)
@@ -303,6 +383,7 @@ async def launch_context(
                             f"retrying with isolated profile: {launch_dir.name}",
                             file=sys.stderr,
                         )
+                        await asyncio.sleep(1.2)
                         break
                     raise
 
@@ -318,6 +399,98 @@ async def close_context(context, browser) -> None:
             await browser.close()
         except Exception:
             pass
+
+
+def worker_autoclose_browser_on_daemon_exit() -> bool:
+    """
+    Если True — при завершении цикла stdin **демона** или после **одноразового CLI**
+    вызывается ``close_context`` и процесс может завершиться.
+    По умолчанию False: одно окно/вкладка на платформу остаётся открытым; завершите
+    процесс вручную (Ctrl+C, остановка Django, ``shutdown_all_workers``) или задайте
+    эту переменную для CI/автотестов.
+    """
+    return os.getenv("WORKER_AUTOCLOSE_BROWSER_ON_EXIT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
+
+
+_DAEMON_HOME_URL: dict[str, str] = {
+    "tiktok": "https://www.tiktok.com/",
+    "instagram": "https://www.instagram.com/",
+    "threads": "https://www.threads.com/",
+    "x": "https://x.com/home",
+    "facebook": "https://www.facebook.com/",
+}
+
+
+async def warm_playwright_page_home(page, platform: str) -> None:
+    """Открыть домашнюю страницу площадки вместо about:blank (белый экран в окне worker)."""
+    plat = str(platform or "").strip().lower()
+    url = _DAEMON_HOME_URL.get(plat)
+    if not url:
+        return
+    try:
+        if page is None or page.is_closed():
+            return
+        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        await page.wait_for_timeout(500)
+    except Exception as exc:
+        print(f"[audience] warm {plat} home: {exc}", file=sys.stderr)
+
+
+async def daemon_idle_keep_browser_open(
+    worker_label: str,
+    page=None,
+    *,
+    platform: str | None = None,
+) -> None:
+    """
+    После EOF stdin не закрываем Chromium: блокируемся, пока процесс не убьют.
+    Нужен, чтобы не выйти из ``async with async_playwright()`` — иначе Playwright
+    сам завершит браузер при выходе из контекстного менеджера.
+    """
+    if worker_autoclose_browser_on_daemon_exit():
+        return
+    plat = (platform or worker_label.replace("_worker", "")).strip().lower()
+    if page is not None and plat:
+        await warm_playwright_page_home(page, plat)
+    print(
+        f"[{worker_label}] Ввод stdin завершён — Chromium не закрываем. "
+        "Остановите worker вручную или задайте WORKER_AUTOCLOSE_BROWSER_ON_EXIT=1 "
+        "для автозакрытия при выходе.",
+        file=sys.stderr,
+        flush=True,
+    )
+    await asyncio.Future()
+
+
+async def cli_idle_keep_browser_open(worker_label: str) -> None:
+    """После одноразового CLI: ответ уже в stdout, окно оставляем (см. ``worker_autoclose_browser_on_daemon_exit``)."""
+    if worker_autoclose_browser_on_daemon_exit():
+        return
+    print(
+        f"[{worker_label}] Ответ уже отправлен в stdout — Chromium не закрываем. "
+        "Завершите процесс (Ctrl+C) или задайте WORKER_AUTOCLOSE_BROWSER_ON_EXIT=1.",
+        file=sys.stderr,
+        flush=True,
+    )
+    await asyncio.Future()
+
+
+async def finish_cli_session_keep_browser_by_default(
+    worker_label: str,
+    context,
+    browser,
+) -> None:
+    """Закрыть сессию только при ``WORKER_AUTOCLOSE_BROWSER_ON_EXIT=1``, иначе ждать с открытым окном."""
+    if worker_autoclose_browser_on_daemon_exit():
+        await close_context(context, browser)
+    else:
+        await cli_idle_keep_browser_open(worker_label)
 
 
 async def wait_for_anti_bot_clear(

@@ -1,4 +1,9 @@
 .env
+# Локальные overrides Playwright-воркеров (см. *.example в том же каталоге)
+backend/config/worker_accounts.env
+backend/config/worker_subs.env
+# Профили Chromium для subs-воркеров (по умолчанию под backend/var/)
+backend/var/
 # MCP с секретами (скопируйте из .cursor/mcp.json.example)
 .cursor/mcp.json
 __pycache__/

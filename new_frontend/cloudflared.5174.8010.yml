@@ -1,0 +1,13 @@
+# Как cloudflared.5174.yml, но Django на 127.0.0.1:8010. Запуск: npm run tunnel:5174:8010
+ingress:
+  - path: ^/api
+    service: http://127.0.0.1:8010
+  - path: ^/admin
+    service: http://127.0.0.1:8010
+  - path: ^/static
+    service: http://127.0.0.1:8010
+  - path: ^/media
+    service: http://127.0.0.1:8010
+  - path: ^/healthz
+    service: http://127.0.0.1:8010
+  - service: http://127.0.0.1:5174

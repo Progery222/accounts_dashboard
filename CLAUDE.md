@@ -59,6 +59,13 @@ Playwright browser install (once per machine):
 python -m playwright install chromium
 ```
 
+### Долгие процессы в Cursor (агенты)
+
+- `runserver`, `npm run dev`, `cloudflared` и аналоги поднимайте **в фоне во встроенном терминале Cursor** (инструмент Shell: `block_until_ms: 0`), при необходимости — **отдельный фоновый запуск на каждый процесс**, чтобы логи не смешивались.
+- На **Windows** оболочка по умолчанию часто PowerShell: в одной строке используйте `Set-Location '…'; команда`, а не `cd … && …` (иначе синтаксическая ошибка).
+- **Не** открывайте отдельные окна Windows (`Start-Process cmd /k` и т.п.), пока пользователь явно не попросит вынести процесс из IDE.
+- Локально: один **`backend/`** Django на **`http://127.0.0.1:8000`** — и **`/api/accounts/`** (дашборд / Atomic), и **`/api/subscribers/`** (Подписчики; код приложения в `subs/backend/subscribers`). Фронт **«Подписчики»**: `subs/frontend`** (`npm run dev` → **:5180**, прокси `/api` → **:8000**; из `new_frontend/`: `npm run dev:5180`). **Не** поднимайте Atomic на 5180. **`DASHBOARD_API_URL`** в `.env` нужен только если HTTP-синхронизация subs должна бить **не** в `http://127.0.0.1:8000`. Туннель к Subs: `subs/frontend/npm run tunnel` или `new_frontend/npm run tunnel:subs` (алиас `tunnel:8010`).
+
 ## Architecture
 
 ### Data model (`accounts/models.py`)
@@ -123,6 +130,7 @@ API triggers:
 - For "not found / parse failed" cases in scrapers, raise `ValueError` (mapped to 4xx by views).
 - Let unexpected scraper errors bubble to be reported as server-side failures (5xx path in views).
 - Keep "snapshot before update" behavior intact; serializers compute deltas from latest snapshot with `date < today`.
+- **Playwright / Subs:** съём аудитории из «Подписчиков» вызывает тот же API `POST /api/accounts/{id}/audience/refresh/`, что и дашборд — **один пул** демонов и **те же сохранённые сессии**, что у AccountsStats (`ACCOUNTS_BROWSER_PROFILE_DIR` / `ACCOUNTS_BROWSER_HEADLESS` в `worker_accounts.env`, иначе `BROWSER_PROFILE_DIR` / дефолт из `worker_utils`). Файл **`worker_subs.env`** подключается отдельно только для настроек, не связанных с браузером (см. `worker_subs.env.example`).
 
 ## Known risks to keep in mind
 

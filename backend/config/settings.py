@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Раздел «Подписчики»: код приложения `subscribers` в `subs/backend/subscribers` (тот же репозиторий).
+# Добавляем путь после `BASE_DIR`, чтобы пакет `config` брался из backend/config, а не из subs/backend/config.
+_subs_backend = BASE_DIR.parent / "subs" / "backend"
+if _subs_backend.is_dir():
+    _subs_root = str(_subs_backend)
+    if _subs_root not in sys.path:
+        sys.path.append(_subs_root)
 # .env используется как локальный fallback и не должен перетирать реальные
 # переменные окружения (Railway/K8s/CI), иначе можно случайно подключиться к
 # localhost вместо DATABASE_URL провайдера.
@@ -16,6 +23,10 @@ _raw_db_url = os.getenv("DATABASE_URL", "").strip().lower()
 if _raw_db_url and not _raw_db_url.startswith(("postgres://", "postgresql://", "postgis://")):
     os.environ.pop("DATABASE_URL", None)
     load_dotenv(BASE_DIR / ".env", override=False)
+
+# Отдельные файлы настроек Playwright-воркеров (аккаунты vs Subs) — не обязаны совпадать с backend/.env
+load_dotenv(BASE_DIR / "config" / "worker_accounts.env", override=False)
+load_dotenv(BASE_DIR / "config" / "worker_subs.env", override=False)
 
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-s)66ib*p(f+^813d+^2do6@*w4b^f57g787=hv)@lu7t=g^7!k")
 DEBUG = os.getenv("DEBUG", "True") == "True"
@@ -51,6 +62,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "accounts",
+    "subscribers",
     "tiktok_app",
 ]
 
@@ -179,6 +191,43 @@ if not DEBUG:
     STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# База URL основного API дашборда: HTTP из subscribers.dashboard_sync к /api/accounts/…
+# По умолчанию http://127.0.0.1:8000. Меняйте только если дашборд на другом хосте/порту.
+DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://127.0.0.1:8000").rstrip("/")
+
+# Links (короткие ссылки / клики из bio) — см. docs/API.md в репозитории links
+LINKS_API_URL = os.getenv("LINKS_API_URL", "").strip().rstrip("/")
+LINKS_API_TOKEN = os.getenv("LINKS_API_TOKEN", "").strip()
+LINKS_API_TIMEOUT = float(os.getenv("LINKS_API_TIMEOUT", "25") or "25")
+
+
+def _optional_env_bool(name: str) -> bool | None:
+    raw = (os.getenv(name) or "").strip().lower()
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return None
+
+
+def _optional_env_abs_path(name: str) -> Path | None:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser().resolve()
+
+
+# Playwright: один пул демонов для дашборда (refresh, AccountsStats) и съёма аудитории (в т.ч. из Subs).
+# Профиль и headless — ACCOUNTS_BROWSER_* (файл backend/config/worker_accounts.env).
+# Отдельный worker_subs.env — только для настроек, не связанных с профилем браузера (см. *.example).
+ACCOUNTS_BROWSER_PROFILE_DIR = _optional_env_abs_path("ACCOUNTS_BROWSER_PROFILE_DIR")
+ACCOUNTS_BROWSER_HEADLESS = _optional_env_bool("ACCOUNTS_BROWSER_HEADLESS")
+
+# Автообновление по расписанию: не поднимать все Playwright-демоны заранее (по одному окну на платформу
+# при первом реальном запросе). True — прежнее поведение: сразу открыть Chromium по каждой платформе в батче.
+_ar_prewarm = _optional_env_bool("ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT")
+ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT = False if _ar_prewarm is None else _ar_prewarm
+
 # CORS / CSRF
 _extra_origins = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]
 CORS_ALLOWED_ORIGINS = [
@@ -268,6 +317,8 @@ BROWSER_STATE_FILE = os.getenv("BROWSER_STATE_FILE", "")
 BROWSER_PROFILE_DIR = os.getenv("BROWSER_PROFILE_DIR", "")
 TIKTOK_USERNAME = os.getenv("TIKTOK_USERNAME", "")
 TIKTOK_PASSWORD = os.getenv("TIKTOK_PASSWORD", "")
+# Автозаполнение формы входа TikTok в UI настроек: false / true / не задано (=вкл., если заданы и логин, и пароль).
+TIKTOK_AUTH_AUTOFILL = os.getenv("TIKTOK_AUTH_AUTOFILL", "")
 
 # ── Instagram (instaloader — no browser needed) ───────────────────────────────
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")

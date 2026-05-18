@@ -101,6 +101,24 @@ class AudienceSyncTests(TestCase):
             AudienceMember.objects.filter(platform=Platform.TIKTOK, username="fan_one").exists(),
         )
 
+    def test_sync_rejects_owner_username_mismatch(self):
+        acc = Account.objects.create(
+            username="wanted",
+            platform=Platform.TIKTOK,
+            follower_count=0,
+            like_count=0,
+            view_count=0,
+            post_count=0,
+        )
+        payload = {
+            "owner_username": "other_guy",
+            "followers": [{"username": "fan_x", "external_id": "x", "posts": []}],
+        }
+        with self.assertRaises(ValueError) as ctx:
+            sync_audience_from_payload(acc, payload)
+        self.assertIn("другого профиля", str(ctx.exception))
+        self.assertEqual(AccountAudienceMembership.objects.filter(account=acc).count(), 0)
+
     def test_reuse_existing_keeps_member_fields_and_membership(self):
         acc = Account.objects.create(
             username="owner_ig",
@@ -125,6 +143,40 @@ class AudienceSyncTests(TestCase):
         self.assertEqual(m.display_name, "Старое имя")
         self.assertEqual(m.bio, "старое био")
         self.assertTrue(AccountAudienceMembership.objects.filter(account=acc, member=m).exists())
+
+    def test_reuse_existing_updates_bio_when_payload_includes_fields(self):
+        acc = Account.objects.create(
+            username="owner_ig2",
+            platform=Platform.INSTAGRAM,
+            follower_count=0,
+            like_count=0,
+            view_count=0,
+            post_count=0,
+        )
+        m = AudienceMember.objects.create(
+            platform=Platform.INSTAGRAM,
+            username="keep_bio",
+            display_name="Старое имя",
+            bio="старое био",
+        )
+        AccountAudienceMembership.objects.create(account=acc, member=m)
+        sync_audience_from_payload(
+            acc,
+            {
+                "followers": [
+                    {
+                        "username": "keep_bio",
+                        "_reuse_existing": True,
+                        "display_name": "Новое имя",
+                        "bio": "🍒 Aries era • soft focus",
+                        "posts": [],
+                    },
+                ],
+            },
+        )
+        m.refresh_from_db()
+        self.assertEqual(m.display_name, "Новое имя")
+        self.assertEqual(m.bio, "🍒 Aries era • soft focus")
 
 
 class AudienceMemberDeleteApiTests(APITestCase):

@@ -7,6 +7,9 @@ export type PresumedStatColumn = { header: string; items: PresumedStatItem[] };
 export type PresumedStatsResponse = {
   generated_at: string | null;
   columns: PresumedStatColumn[];
+  /** Сколько строк подписчиков учтено (ответ из БД). */
+  member_row_count?: number;
+  source?: string;
 };
 
 /** Базовые цвета сегментов (к градиенту добавляется более светлый «блик»). */

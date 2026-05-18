@@ -430,9 +430,15 @@ async def run_once(arg: dict):
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            return await _run_with_page(username, page, _wu)
-        finally:
-            await _wu.close_context(context, _browser)
+            result = await _run_with_page(username, page, _wu)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            _write_response({"error": f"Ошибка worker: {exc}"})
+            await _wu.finish_cli_session_keep_browser_by_default("telegram_worker", context, _browser)
+            return
+        _write_response(result)
+        await _wu.finish_cli_session_keep_browser_by_default("telegram_worker", context, _browser)
 
 
 def _write_response(payload: dict) -> None:
@@ -467,7 +473,10 @@ async def daemon_main() -> None:
                     continue
                 _write_response(result)
         finally:
-            await _wu.close_context(context, _browser)
+            if _wu.worker_autoclose_browser_on_daemon_exit():
+                await _wu.close_context(context, _browser)
+            else:
+                await _wu.daemon_idle_keep_browser_open("telegram_worker")
 
 
 if __name__ == "__main__":
@@ -482,4 +491,4 @@ if __name__ == "__main__":
         except Exception:
             _write_response({"error": "Невалидный JSON payload"})
             sys.exit(1)
-        _write_response(asyncio.run(run_once(one_payload)))
+        asyncio.run(run_once(one_payload))

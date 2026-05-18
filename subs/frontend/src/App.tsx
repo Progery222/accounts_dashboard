@@ -1,8 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PresumedChartsPanel, type PresumedStatsResponse } from "./csvPresumedCharts";
+import {
+  SubsBulkRunDetailOverlay,
+  type SubsBulkRunDetail,
+  type SubsBulkRunItem,
+} from "./subsBulkRunDetail";
+import {
+  SubsMembersPreviewModal,
+  type SubsMembersPreviewAccount,
+} from "./subsMembersPreviewModal";
+import {
+  SUBS_AUDIENCE_PLATFORM_LIMITS,
+  interleaveAccountsByPlatform,
+  runSubsBulkParallelPool,
+  subsBulkEffectiveWorkerCount,
+} from "./subsBulkParallel";
 
-const MEM_PAGE = 40;
+/** Размер страницы для списка подписчиков (API) и таблицы аккаунтов (клиент). */
+const SUBS_LIST_PAGE_SIZE = 10;
 
 /** HTTP только на localhost / 127.0.0.1 — с HTTPS-страницы браузер заблокирует как mixed content («Failed to fetch»). */
 function isHttpLoopbackApiBase(base: string): boolean {
@@ -16,7 +32,7 @@ function isHttpLoopbackApiBase(base: string): boolean {
   }
 }
 
-/** База URL subs API. Через trycloudflare страница HTTPS — запросы только на тот же origin (/api…), Vite проксирует на :8010. */
+/** База URL subs API. Через trycloudflare страница HTTPS — запросы только на тот же origin (/api…), Vite проксирует на :8000. */
 const subsApi = (): string => {
   const raw = import.meta.env.VITE_API_URL;
   let base: string;
@@ -27,25 +43,13 @@ const subsApi = (): string => {
   } else if (typeof window !== "undefined" && window.location.protocol === "https:") {
     base = "";
   } else {
-    base = "http://127.0.0.1:8010";
+    base = "http://127.0.0.1:8000";
   }
   if (typeof window !== "undefined" && window.location.protocol === "https:" && isHttpLoopbackApiBase(base)) {
     return "";
   }
   return base;
 };
-
-/** Основной React-дашборд (Vite): маршруты `/`, `/accounts/:id`, … */
-const dashSpa = () =>
-  (import.meta.env.VITE_DASHBOARD_SPA_URL || "http://localhost:5173").replace(/\/$/, "");
-
-/** Atomic `app.html` (второй фронт): iframe «Авторизация» (`?route=settings`). */
-const dashAtomic = () =>
-  (
-    import.meta.env.VITE_DASHBOARD_ATOMIC_URL ||
-    import.meta.env.VITE_DASHBOARD_APP_URL ||
-    "http://localhost:5174"
-  ).replace(/\/$/, "");
 
 const PLATFORMS = [
   { id: "tiktok" as const, label: "TikTok", color: "#ff2d55" },
@@ -70,15 +74,77 @@ function fmtNum(n: number): string {
   return String(n);
 }
 
-/** Пауза между аккаунтами; прерывается при signal.aborted. */
-async function sleepRandomMsUnlessCancelled(minMs: number, maxMs: number, signal: AbortSignal): Promise<void> {
-  const total = Math.round(minMs + Math.random() * (maxMs - minMs));
-  const deadline = Date.now() + total;
-  while (Date.now() < deadline && !signal.aborted) {
-    await new Promise<void>((r) => {
-      window.setTimeout(r, Math.min(400, Math.max(0, deadline - Date.now())));
-    });
+type PagerChunk = number | "gap";
+
+/** Номера страниц с пропусками (как в поисковике при большом числе страниц). */
+function buildPaginationChunks(current: number, totalPages: number): PagerChunk[] {
+  if (totalPages <= 1) return [1];
+  if (totalPages <= 12) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
   }
+  const windowSide = 2;
+  const left = Math.max(2, current - windowSide);
+  const right = Math.min(totalPages - 1, current + windowSide);
+  const chunks: PagerChunk[] = [1];
+  if (left > 2) chunks.push("gap");
+  for (let p = left; p <= right; p += 1) chunks.push(p);
+  if (right < totalPages - 1) chunks.push("gap");
+  chunks.push(totalPages);
+  return chunks;
+}
+
+function SubsPagerBar(props: {
+  page: number;
+  totalPages: number;
+  disabled?: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  const { page, totalPages, disabled = false, onPageChange } = props;
+  if (totalPages <= 1) return null;
+  const chunks = buildPaginationChunks(page, totalPages);
+  return (
+    <div className="subs-pager" role="navigation" aria-label="Нумерация страниц">
+      <button
+        type="button"
+        className="subs-btn subs-btn--sm subs-btn--muted subs-pager-arrow"
+        disabled={page <= 1 || disabled}
+        aria-label="Предыдущая страница"
+        onClick={() => onPageChange(page - 1)}
+      >
+        ←
+      </button>
+      <div className="subs-pager-nums">
+        {chunks.map((c, i) =>
+          c === "gap" ? (
+            <span key={`gap-${i}-${page}`} className="subs-pager-gap" aria-hidden>
+              …
+            </span>
+          ) : (
+            <button
+              key={c}
+              type="button"
+              className={`subs-pager-page${c === page ? " subs-pager-page--active" : ""}`}
+              disabled={disabled || c === page}
+              aria-current={c === page ? "page" : undefined}
+              aria-label={`Страница ${c}`}
+              onClick={() => onPageChange(c)}
+            >
+              {c}
+            </button>
+          ),
+        )}
+      </div>
+      <button
+        type="button"
+        className="subs-btn subs-btn--sm subs-btn--muted subs-pager-arrow"
+        disabled={page >= totalPages || disabled}
+        aria-label="Следующая страница"
+        onClick={() => onPageChange(page + 1)}
+      >
+        →
+      </button>
+    </div>
+  );
 }
 
 function fmtDate(iso: string | null | undefined): string {
@@ -106,6 +172,21 @@ function profileUrl(platform: string, username: string): string | null {
 function subsPlatformLabel(platform: string): string {
   const m = PLATFORMS.find((p) => p.id === platform);
   return m?.label ?? platform;
+}
+
+/** Сообщение для сетевых сбоев fetch (прокси Vite :5180 → 127.0.0.1:8000). */
+function formatLoadNetworkErr(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  const net =
+    msg === "Failed to fetch" ||
+    msg === "Load failed" ||
+    msg === "NetworkError when attempting to fetch resource.";
+  if (!net) return msg;
+  return (
+    "Не удалось связаться с API. В режиме разработки запросы /api проксируются на http://127.0.0.1:8000 — " +
+    "убедитесь, что Django запущен (manage.py runserver 127.0.0.1:8000). " +
+    "Если API на другом хосте/порту, задайте VITE_API_URL или target прокси в vite.config.ts."
+  );
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
@@ -143,14 +224,6 @@ type Overview = {
     profile_id: number | null;
     profile_name: string | null;
   }>;
-  top_subscribers: Array<{
-    id: number;
-    platform: string;
-    username: string;
-    display_name: string;
-    is_private: boolean;
-    follows_tracked_accounts: number;
-  }>;
 };
 
 type MembersResp = {
@@ -173,7 +246,7 @@ type MembersResp = {
 };
 
 /** Клик по карточке метрик: фильтр/сортировка списков */
-type InsightMetricKey = "accounts" | "unique" | "private" | "with_data" | "synced";
+type InsightMetricKey = "accounts" | "unique" | "private" | "with_data";
 
 type MemberCardDetail = {
   id: number;
@@ -224,14 +297,38 @@ type BulkAudienceProgress = {
 
 const SUBS_BULK_LS_KEY = "subs_bulk_collection_v1";
 const SUBS_BULK_BC_NAME = "subs-bulk-abort-v1";
-/** Если метка давности не обновлялась — считаем, что вкладка сорвала сбор (закрыли). */
-const SUBS_BULK_STALE_MS = 4 * 60 * 1000;
+/** Синхронизация «Остановить» между вкладками, если BroadcastChannel недоступен. */
+const SUBS_BULK_ABORT_STORAGE_KEY = "subs_bulk_abort_broadcast_v1";
+/** Как в AccountStats / расписание автообновления: не запускать съём, если аудитория уже снималась недавно. */
+const SUBS_BULK_SKIP_RECENT_HOURS = [0, 1, 3, 6, 12, 24] as const;
+
+type BulkModalAudienceSort = "default" | "sync_desc" | "sync_asc";
+
+/** Модалка выбора отслеживаемых аккаунтов: сбор списка или обновление профилей подписчиков. */
+type AudiencePickKind = "collect" | "enrich";
+
+function audienceSyncTsMs(iso: string | null): number | null {
+  if (!iso) return null;
+  const n = Date.parse(iso);
+  return Number.isNaN(n) ? null : n;
+}
+
+/** true — пропустить аккаунт (не дергать дашборд), если последний съём аудитории был менее `hours` ч назад. */
+function isSubsAudienceSyncedWithinHours(lastSyncedIso: string | null, hours: number): boolean {
+  if (hours <= 0 || !lastSyncedIso) return false;
+  const t = Date.parse(lastSyncedIso);
+  if (Number.isNaN(t)) return false;
+  return Date.now() - t < hours * 3600 * 1000;
+}
+/** Если метка давности не обновлялась — считаем, что вкладка сорвала сбор (закрыли). Должно быть заметно больше максимального одного POST (съём аудитории); иначе «зеркальная» вкладка сбросит прогресс во время долгого аккаунта. */
+const SUBS_BULK_STALE_MS = 50 * 60 * 1000;
 
 type SubsBulkStored = {
   v: 1;
   running: boolean;
   progress: BulkAudienceProgress | null;
   updatedAt: number;
+  runDetail?: SubsBulkRunDetail | null;
 };
 
 function isBulkProgressValue(p: unknown): p is BulkAudienceProgress {
@@ -245,9 +342,69 @@ function isBulkProgressValue(p: unknown): p is BulkAudienceProgress {
   );
 }
 
-function persistSubsBulkState(progress: BulkAudienceProgress | null): void {
+function isSubsBulkRunDetail(v: unknown): v is SubsBulkRunDetail {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  if (!Array.isArray(o.items) || typeof o.worker_count !== "number") return false;
+  return o.items.every((it) => {
+    if (!it || typeof it !== "object") return false;
+    const row = it as Record<string, unknown>;
+    return (
+      typeof row.account_id === "number" &&
+      typeof row.platform === "string" &&
+      typeof row.username === "string" &&
+      typeof row.status === "string"
+    );
+  });
+}
+
+function patchSubsBulkRunDetail(
+  detail: SubsBulkRunDetail,
+  accountId: number,
+  patch: Partial<SubsBulkRunItem>,
+): SubsBulkRunDetail {
+  return {
+    ...detail,
+    items: detail.items.map((it) => (it.account_id === accountId ? { ...it, ...patch } : it)),
+  };
+}
+
+function finalizeCancelledBulkDetail(detail: SubsBulkRunDetail): SubsBulkRunDetail {
+  return {
+    ...detail,
+    items: detail.items.map((it) => {
+      if (it.status !== "queued" && it.status !== "running") return it;
+      return {
+        ...it,
+        status: "cancelled",
+        detail: it.status === "running" ? "Остановлено" : it.detail ?? "Не запускался",
+        worker: null,
+      };
+    }),
+  };
+}
+
+function persistSubsBulkState(progress: BulkAudienceProgress | null, runDetail?: SubsBulkRunDetail | null): void {
   try {
-    const payload: SubsBulkStored = { v: 1, running: true, progress, updatedAt: Date.now() };
+    let mergedDetail: SubsBulkRunDetail | null | undefined = runDetail;
+    if (mergedDetail === undefined) {
+      try {
+        const raw = localStorage.getItem(SUBS_BULK_LS_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as Partial<SubsBulkStored>;
+          if (isSubsBulkRunDetail(parsed.runDetail)) mergedDetail = parsed.runDetail;
+        }
+      } catch {
+        /* */
+      }
+    }
+    const payload: SubsBulkStored = {
+      v: 1,
+      running: true,
+      progress,
+      updatedAt: Date.now(),
+      ...(mergedDetail != null ? { runDetail: mergedDetail } : {}),
+    };
     localStorage.setItem(SUBS_BULK_LS_KEY, JSON.stringify(payload));
   } catch {
     /* private / quota */
@@ -262,9 +419,22 @@ function clearSubsBulkState(): void {
   }
 }
 
+/** Продлевает «свежесть» метки в localStorage во время долгого HTTP (один аккаунт может занимать 10+ мин). */
+function bumpSubsBulkLsTimestamp(): void {
+  try {
+    const raw = localStorage.getItem(SUBS_BULK_LS_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw) as Partial<SubsBulkStored>;
+    if (parsed.v !== 1 || !parsed.running) return;
+    parsed.updatedAt = Date.now();
+    localStorage.setItem(SUBS_BULK_LS_KEY, JSON.stringify(parsed));
+  } catch {
+    /* */
+  }
+}
+
 export default function App() {
   const [narrow, setNarrow] = useState(false);
-  const [mainTab, setMainTab] = useState<"subscribers" | "auth">("subscribers");
   const [filterPlatform, setFilterPlatform] = useState<SubsPlatformFilter>("all");
   const [profileFilter, setProfileFilter] = useState<SubsProfileFilter>({ kind: "all" });
 
@@ -278,6 +448,7 @@ export default function App() {
   /** id аккаунта в subs: показать справа только подписчиков этого аккаунта */
   const [membersFilterAccountId, setMembersFilterAccountId] = useState<number | null>(null);
   const [memberPage, setMemberPage] = useState(1);
+  const [accountTablePage, setAccountTablePage] = useState(1);
   const [insightMetric, setInsightMetric] = useState<InsightMetricKey | null>(null);
   const [membersData, setMembersData] = useState<MembersResp | null>(null);
   const [membersLoading, setMembersLoading] = useState(false);
@@ -295,18 +466,35 @@ export default function App() {
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkAudienceProgress, setBulkAudienceProgress] = useState<BulkAudienceProgress | null>(null);
   const [singleAudienceUsername, setSingleAudienceUsername] = useState<string | null>(null);
-  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [audiencePickOpen, setAudiencePickOpen] = useState(false);
+  const [audiencePickKind, setAudiencePickKind] = useState<AudiencePickKind>("collect");
+  const [enrichAccountSearch, setEnrichAccountSearch] = useState("");
+  const [membersPreviewAccount, setMembersPreviewAccount] = useState<SubsMembersPreviewAccount | null>(null);
   const [bulkSelectedIds, setBulkSelectedIds] = useState<Set<number>>(() => new Set());
   /** Пустой массив = все площадки; иначе аккаунт попадает в список, если platform в наборе. */
   const [bulkModalPlatforms, setBulkModalPlatforms] = useState<string[]>([]);
   /** Пустой массив = все профили; иначе OR по ключам: "none" (без профиля) или "id:123". */
   const [bulkModalProfileKeys, setBulkModalProfileKeys] = useState<string[]>([]);
-  const [bulkSkipExistingMemberProfiles, setBulkSkipExistingMemberProfiles] = useState(false);
+  const [bulkOperationKind, setBulkOperationKind] = useState<AudiencePickKind>("collect");
+  /** Пропуск недавно снятых (по `audience_last_synced_at` в subs), часы — как в автообновлении дашборда. */
+  const [bulkSkipRecentHours, setBulkSkipRecentHours] = useState<number>(0);
+  /** Порядок строк в модалке массового сбора. */
+  const [bulkModalAudienceSort, setBulkModalAudienceSort] = useState<BulkModalAudienceSort>("default");
+  /** Не открывать дашборд для аккаунтов без строк подписчиков в БД subs (ускоряет массовый съём). */
+  const [bulkSkipZeroSubscribersInDb, setBulkSkipZeroSubscribersInDb] = useState(false);
   /** Прерывание массового сбора (пауза между аккаунтами и активные fetch). */
   const bulkAbortRef = useRef<AbortController | null>(null);
+  /** Прерывание одиночного сбора по кнопке в строке аккаунта. */
+  const singleAbortRef = useRef<AbortController | null>(null);
+  /** Увеличивается при «Остановить» — выходим из цикла даже если fetch не отпускает прокси сразу. */
+  const bulkStopGenerationRef = useRef(0);
   /** true только в той вкладке, где выполняется runBulk (не зеркалировать своё же localStorage). */
   const bulkRunActiveInThisTabRef = useRef(false);
+  /** Один активный POST съёма аудитории (двойной клик до re-render не шлёт два запроса). */
+  const singleAudienceRequestRef = useRef(false);
   const [bulkRemoteView, setBulkRemoteView] = useState(false);
+  const [bulkRunDetail, setBulkRunDetail] = useState<SubsBulkRunDetail | null>(null);
+  const [bulkRunDetailOpen, setBulkRunDetailOpen] = useState(false);
   const [subsProfiles, setSubsProfiles] = useState<Array<{ id: number; name: string }>>([]);
   const [syncBusy, setSyncBusy] = useState(false);
   const [exportCsvBusy, setExportCsvBusy] = useState(false);
@@ -314,7 +502,8 @@ export default function App() {
   const [csvPreviewLoading, setCsvPreviewLoading] = useState(false);
   const [csvPreviewErr, setCsvPreviewErr] = useState<string | null>(null);
   const [csvPreview, setCsvPreview] = useState<CsvLastPreview | null>(null);
-  const [csvPreviewSubview, setCsvPreviewSubview] = useState<"table" | "charts">("table");
+  /** Основной экран: таблицы аккаунтов/подписчиков или графики «Предполагаемый …». */
+  const [subsMainView, setSubsMainView] = useState<"accounts" | "charts">("accounts");
   const [presumedStats, setPresumedStats] = useState<PresumedStatsResponse | null>(null);
   const [presumedStatsLoading, setPresumedStatsLoading] = useState(false);
   const [presumedStatsErr, setPresumedStatsErr] = useState<string | null>(null);
@@ -325,8 +514,23 @@ export default function App() {
     window.setTimeout(() => setToast(null), 4200);
   };
 
-  const requestBulkStop = useCallback(() => {
+  const requestAudienceStop = useCallback(() => {
+    bulkStopGenerationRef.current += 1;
     bulkAbortRef.current?.abort();
+    singleAbortRef.current?.abort();
+    void fetch(`${subsApi()}/api/subscribers/sync/audience/stop/`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+      cache: "no-store",
+    }).catch(() => {
+      /* дашборд может быть недоступен — клиентская отмена очереди всё равно сработает */
+    });
+    try {
+      localStorage.setItem(SUBS_BULK_ABORT_STORAGE_KEY, String(Date.now()));
+    } catch {
+      /* private / quota */
+    }
     try {
       const bc = new BroadcastChannel(SUBS_BULK_BC_NAME);
       bc.postMessage({ type: "bulk-abort" });
@@ -334,12 +538,37 @@ export default function App() {
     } catch {
       /* */
     }
+    clearSubsBulkState();
+    bulkRunActiveInThisTabRef.current = false;
+    bulkAbortRef.current = null;
+    singleAbortRef.current = null;
+    setBulkRemoteView(false);
+    setBulkAudienceProgress(null);
+    setBulkBusy(false);
+    setRefreshingId(null);
+    setSingleAudienceUsername(null);
+    singleAudienceRequestRef.current = false;
+    showToast("Сбор остановлен.", false);
+  }, []);
+
+  useEffect(() => {
+    const onStorageAbort = (e: StorageEvent) => {
+      if (e.key !== SUBS_BULK_ABORT_STORAGE_KEY || e.newValue == null) return;
+      bulkStopGenerationRef.current += 1;
+      bulkAbortRef.current?.abort();
+      singleAbortRef.current?.abort();
+    };
+    window.addEventListener("storage", onStorageAbort);
+    return () => window.removeEventListener("storage", onStorageAbort);
   }, []);
 
   useEffect(() => {
     const bc = new BroadcastChannel(SUBS_BULK_BC_NAME);
     bc.onmessage = (ev: MessageEvent<{ type?: string }>) => {
-      if (ev.data?.type === "bulk-abort") bulkAbortRef.current?.abort();
+      if (ev.data?.type !== "bulk-abort") return;
+      bulkStopGenerationRef.current += 1;
+      bulkAbortRef.current?.abort();
+      singleAbortRef.current?.abort();
     };
     return () => bc.close();
   }, []);
@@ -351,6 +580,7 @@ export default function App() {
         setBulkBusy(false);
         setBulkAudienceProgress(null);
         setBulkRemoteView(false);
+        setBulkRunDetail(null);
         return;
       }
       let parsed: unknown;
@@ -368,6 +598,7 @@ export default function App() {
         setBulkBusy(false);
         setBulkAudienceProgress(null);
         setBulkRemoteView(false);
+        setBulkRunDetail(null);
         return;
       }
       const s = parsed as Partial<SubsBulkStored>;
@@ -375,6 +606,7 @@ export default function App() {
         setBulkBusy(false);
         setBulkAudienceProgress(null);
         setBulkRemoteView(false);
+        setBulkRunDetail(isSubsBulkRunDetail(s.runDetail) ? s.runDetail : null);
         return;
       }
       const updatedAt = typeof s.updatedAt === "number" ? s.updatedAt : 0;
@@ -383,10 +615,12 @@ export default function App() {
         setBulkBusy(false);
         setBulkAudienceProgress(null);
         setBulkRemoteView(false);
+        setBulkRunDetail(null);
         return;
       }
       setBulkBusy(true);
       setBulkAudienceProgress(s.progress != null && isBulkProgressValue(s.progress) ? s.progress : null);
+      setBulkRunDetail(isSubsBulkRunDetail(s.runDetail) ? s.runDetail : null);
       setBulkRemoteView(true);
     };
 
@@ -410,6 +644,7 @@ export default function App() {
           setBulkBusy(false);
           setBulkAudienceProgress(null);
           setBulkRemoteView(false);
+          setBulkRunDetail(null);
           return;
         }
         const parsed = JSON.parse(raw) as Partial<SubsBulkStored>;
@@ -417,6 +652,7 @@ export default function App() {
           setBulkBusy(false);
           setBulkAudienceProgress(null);
           setBulkRemoteView(false);
+          setBulkRunDetail(isSubsBulkRunDetail(parsed.runDetail) ? parsed.runDetail : null);
           return;
         }
         if (Date.now() - parsed.updatedAt > SUBS_BULK_STALE_MS) {
@@ -424,10 +660,14 @@ export default function App() {
           setBulkBusy(false);
           setBulkAudienceProgress(null);
           setBulkRemoteView(false);
+          setBulkRunDetail(null);
           return;
         }
         if (parsed.progress != null && isBulkProgressValue(parsed.progress)) {
           setBulkAudienceProgress(parsed.progress);
+        }
+        if (isSubsBulkRunDetail(parsed.runDetail)) {
+          setBulkRunDetail(parsed.runDetail);
         }
       } catch {
         /* */
@@ -458,7 +698,6 @@ export default function App() {
     setLoadErr(null);
     try {
       const p = buildSubscriberContextQuery();
-      p.set("top_limit", "60");
       const data = (await fetchJson(`${subsApi()}/api/subscribers/?${p}`)) as Overview;
       setOverview(data);
       try {
@@ -471,7 +710,7 @@ export default function App() {
       }
     } catch (e) {
       setOverview(null);
-      setLoadErr(e instanceof Error ? e.message : String(e));
+      setLoadErr(formatLoadNetworkErr(e));
     } finally {
       setLoading(false);
     }
@@ -499,7 +738,7 @@ export default function App() {
   const buildMembersListQuery = useCallback(() => {
     const qs = buildSubscriberContextQuery();
     qs.set("page", String(memberPage));
-    qs.set("page_size", String(MEM_PAGE));
+    qs.set("page_size", String(SUBS_LIST_PAGE_SIZE));
     if (memberSearch) qs.set("search", memberSearch);
     if (membersFilterAccountId != null) qs.set("for_account", String(membersFilterAccountId));
     if (insightMetric === "private") qs.set("only_private", "1");
@@ -507,14 +746,19 @@ export default function App() {
     return qs;
   }, [buildSubscriberContextQuery, memberPage, memberSearch, membersFilterAccountId, insightMetric]);
 
-  const buildMembersExportQuery = useCallback(() => {
+  const buildMembersGlobalExportQuery = useCallback(() => {
     const qs = buildSubscriberContextQuery();
     if (memberSearch) qs.set("search", memberSearch);
-    if (membersFilterAccountId != null) qs.set("for_account", String(membersFilterAccountId));
     if (insightMetric === "private") qs.set("only_private", "1");
     if (insightMetric === "unique") qs.set("member_sort", "follows_desc");
     return qs;
-  }, [buildSubscriberContextQuery, memberSearch, membersFilterAccountId, insightMetric]);
+  }, [buildSubscriberContextQuery, memberSearch, insightMetric]);
+
+  /** Те же параметры, что у `presumed-stats` / глобального CSV — явный ключ для перезагрузки графиков при смене фильтров. */
+  const presumedStatsQueryKey = useMemo(
+    () => buildMembersGlobalExportQuery().toString(),
+    [buildMembersGlobalExportQuery],
+  );
 
   const toggleInsightMetric = useCallback((key: InsightMetricKey) => {
     setInsightMetric((cur) => (cur === key ? null : key));
@@ -597,7 +841,7 @@ export default function App() {
   }, [memberCardId]);
 
   const exportMembersCsv = async () => {
-    const qs = buildMembersExportQuery();
+    const qs = buildMembersGlobalExportQuery();
     setExportCsvBusy(true);
     try {
       const res = await fetch(`${subsApi()}/api/subscribers/members/export.csv?${qs}`, { cache: "no-store" });
@@ -650,30 +894,16 @@ export default function App() {
 
   const openLastCsvPreview = async () => {
     setCsvPreviewOpen(true);
-    setCsvPreviewSubview("table");
-    setPresumedStats(null);
-    setPresumedStatsErr(null);
-    setPresumedStatsLoading(false);
     await fetchLastExportPreview();
   };
 
-  const openLastCsvPresumedCharts = () => {
-    setCsvPreviewOpen(true);
-    setCsvPreviewSubview("charts");
-    setPresumedStats(null);
-    setPresumedStatsErr(null);
-    setCsvPreview(null);
-    setCsvPreviewErr(null);
-    void fetchLastExportPreview();
-    void loadPresumedStats();
-  };
-
-  const loadPresumedStats = async () => {
+  const loadPresumedStats = useCallback(async () => {
     setPresumedStatsLoading(true);
     setPresumedStatsErr(null);
     try {
+      const qs = buildMembersGlobalExportQuery().toString();
       const d = (await fetchJson(
-        `${subsApi()}/api/subscribers/members/export/last/presumed-stats/`,
+        `${subsApi()}/api/subscribers/members/presumed-stats/?${qs}`,
       )) as PresumedStatsResponse;
       setPresumedStats(d);
     } catch (e) {
@@ -683,7 +913,12 @@ export default function App() {
     } finally {
       setPresumedStatsLoading(false);
     }
-  };
+  }, [buildMembersGlobalExportQuery]);
+
+  useEffect(() => {
+    if (subsMainView !== "charts" || overview == null) return;
+    void loadPresumedStats();
+  }, [subsMainView, overview, presumedStatsQueryKey, loadPresumedStats]);
 
   const reloadMembersAndOverview = async () => {
     const qs = buildMembersListQuery();
@@ -702,28 +937,46 @@ export default function App() {
   };
 
   const runOne = async (subsAccountId: number) => {
+    if (singleAudienceRequestRef.current || bulkBusy) {
+      return;
+    }
+    singleAbortRef.current?.abort();
+    const ac = new AbortController();
+    singleAbortRef.current = ac;
+    const signal = ac.signal;
+    const stopGenerationSnapshot = bulkStopGenerationRef.current;
+    singleAudienceRequestRef.current = true;
     const uname = overview?.accounts?.find((x) => x.id === subsAccountId)?.username ?? null;
     setSingleAudienceUsername(uname);
     setRefreshingId(subsAccountId);
     try {
       await fetchJson(`${subsApi()}/api/subscribers/sync/account/${subsAccountId}/audience/`, {
         method: "POST",
+        signal,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          skip_existing_member_profiles: bulkSkipExistingMemberProfiles,
-        }),
+        body: JSON.stringify({ audience_mode: "list" }),
       });
-      showToast("Съём и импорт подписчиков выполнены", false);
+      if (signal.aborted || bulkStopGenerationRef.current !== stopGenerationSnapshot) return;
+      showToast("Список подписчиков собран и импортирован", false);
       await load();
     } catch (e) {
-      showToast(e instanceof Error ? e.message : String(e), true);
+      const aborted =
+        signal.aborted ||
+        bulkStopGenerationRef.current !== stopGenerationSnapshot ||
+        (e instanceof DOMException && e.name === "AbortError") ||
+        (e instanceof Error && e.name === "AbortError");
+      if (!aborted) {
+        showToast(e instanceof Error ? e.message : String(e), true);
+      }
     } finally {
+      singleAudienceRequestRef.current = false;
+      singleAbortRef.current = null;
       setRefreshingId(null);
       setSingleAudienceUsername(null);
     }
   };
 
-  const runBulk = async (selectedIds: number[]) => {
+  const runBulk = async (selectedIds: number[], kind: AudiencePickKind) => {
     const rows = overview?.accounts ?? [];
     if (!rows.length) return;
     const idSet = new Set(selectedIds);
@@ -732,73 +985,199 @@ export default function App() {
       showToast("Нет выбранных аккаунтов с привязкой к дашборду.", true);
       return;
     }
+    try {
+      await fetchJson(`${subsApi()}/api/accounts/schedule/`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ skip_recent_hours: bulkSkipRecentHours }),
+      });
+    } catch {
+      /* дашборд недоступен — пропуск по часам только на клиенте */
+    }
     bulkAbortRef.current?.abort();
     const ac = new AbortController();
     bulkAbortRef.current = ac;
     const signal = ac.signal;
     bulkRunActiveInThisTabRef.current = true;
+    const stopGenerationSnapshot = bulkStopGenerationRef.current;
     setBulkRemoteView(false);
 
-    setBulkModalOpen(false);
+    setAudiencePickOpen(false);
+    setBulkOperationKind(kind);
     setBulkBusy(true);
     setBulkAudienceProgress(null);
-    persistSubsBulkState(null);
+    let runDetail: SubsBulkRunDetail = {
+      worker_count: 1,
+      items: syncable.map((a) => ({
+        account_id: a.id,
+        platform: a.platform,
+        username: a.username,
+        status: "queued",
+      })),
+    };
+    setBulkRunDetail(runDetail);
+    setBulkRunDetailOpen(false);
+    persistSubsBulkState(null, runDetail);
+    const commitRunDetail = (next: SubsBulkRunDetail, prog: BulkAudienceProgress | null) => {
+      runDetail = next;
+      setBulkRunDetail(next);
+      persistSubsBulkState(prog, next);
+    };
     let ok = 0;
     let fail = 0;
+    let skippedRecent = 0;
+    let skippedZeroDb = 0;
     const total = syncable.length;
+    let lastProg: BulkAudienceProgress | null = null;
+    let finishedCount = 0;
+    const runningUsernames = new Set<string>();
+
+    const bumpParallelProgress = (phase: BulkAudienceProgress["phase"], hintUsername?: string) => {
+      const running = runDetail.items.filter((it) => it.status === "running");
+      const doneN = runDetail.items.filter(
+        (it) => it.status === "done" || it.status === "skipped" || it.status === "error" || it.status === "cancelled",
+      ).length;
+      const current = Math.min(total, Math.max(doneN, finishedCount) + (running.length > 0 ? 1 : 0));
+      const username =
+        hintUsername ??
+        (running.length === 1
+          ? running[0].username
+          : running.length > 1
+            ? `${running.length} аккаунта`
+            : "");
+      const prog: BulkAudienceProgress = { total, current, username, phase };
+      lastProg = prog;
+      setBulkAudienceProgress(prog);
+      persistSubsBulkState(prog, runDetail);
+    };
+
+    const toProcess: typeof syncable = [];
     try {
-      for (let i = 0; i < syncable.length; i += 1) {
-        if (signal.aborted) break;
-        const a = syncable[i];
-        const progAccount: BulkAudienceProgress = {
-          total,
-          current: i + 1,
-          username: a.username,
-          phase: "account",
-        };
-        setBulkAudienceProgress(progAccount);
-        persistSubsBulkState(progAccount);
-        try {
-          await fetchJson(`${subsApi()}/api/subscribers/sync/account/${a.id}/audience/`, {
-            method: "POST",
-            signal,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              skip_existing_member_profiles: bulkSkipExistingMemberProfiles,
+      for (const a of syncable) {
+        if (signal.aborted || bulkStopGenerationRef.current !== stopGenerationSnapshot) break;
+        if (kind === "collect" && bulkSkipZeroSubscribersInDb && (a.audience_count ?? 0) === 0) {
+          skippedZeroDb += 1;
+          commitRunDetail(
+            patchSubsBulkRunDetail(runDetail, a.id, {
+              status: "skipped",
+              detail: "0 подписчиков в БД subs",
+              worker: null,
             }),
-          });
-          ok += 1;
-        } catch (e) {
-          if (signal.aborted || (e instanceof DOMException && e.name === "AbortError")) break;
-          fail += 1;
+            lastProg,
+          );
+          continue;
         }
-        if (signal.aborted) break;
-        if (i < syncable.length - 1) {
-          const next = syncable[i + 1];
-          const progPause: BulkAudienceProgress = {
-            total,
-            current: i + 2,
-            username: next.username,
-            phase: "pause",
-          };
-          setBulkAudienceProgress(progPause);
-          persistSubsBulkState(progPause);
-          await sleepRandomMsUnlessCancelled(5000, 9000, signal);
-          if (signal.aborted) break;
+        if (isSubsAudienceSyncedWithinHours(a.audience_last_synced_at, bulkSkipRecentHours)) {
+          skippedRecent += 1;
+          commitRunDetail(
+            patchSubsBulkRunDetail(runDetail, a.id, {
+              status: "skipped",
+              detail:
+                bulkSkipRecentHours > 0
+                  ? `Съём был менее ${bulkSkipRecentHours} ч назад`
+                  : "Пропущен",
+              worker: null,
+            }),
+            lastProg,
+          );
+          continue;
         }
+        toProcess.push(a);
       }
 
-      if (!signal.aborted) {
+      const queue = interleaveAccountsByPlatform(toProcess, (a) => a.platform);
+      const parallelWorkerCount = subsBulkEffectiveWorkerCount(queue, (a) => a.platform);
+      runDetail = { ...runDetail, worker_count: parallelWorkerCount };
+      commitRunDetail(runDetail, lastProg);
+      bumpParallelProgress("account");
+
+      const hb = window.setInterval(() => bumpSubsBulkLsTimestamp(), 30_000);
+      try {
+        await runSubsBulkParallelPool({
+          accounts: queue,
+          workerCount: parallelWorkerCount,
+          platformLimits: SUBS_AUDIENCE_PLATFORM_LIMITS,
+          getPlatform: (a) => a.platform,
+          shouldStop: () =>
+            signal.aborted || bulkStopGenerationRef.current !== stopGenerationSnapshot,
+          onClaim: (a, workerSlot) => {
+            runningUsernames.add(a.username);
+            commitRunDetail(
+              patchSubsBulkRunDetail(runDetail, a.id, {
+                status: "running",
+                worker: workerSlot,
+                detail: undefined,
+              }),
+              lastProg,
+            );
+            bumpParallelProgress("account", a.username);
+          },
+          processAccount: async (a) => {
+            try {
+              await fetchJson(`${subsApi()}/api/subscribers/sync/account/${a.id}/audience/`, {
+                method: "POST",
+                signal,
+                headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ audience_mode: kind === "collect" ? "list" : "enrich" }),
+          });
+              ok += 1;
+              finishedCount += 1;
+              commitRunDetail(
+                patchSubsBulkRunDetail(runDetail, a.id, { status: "done", detail: undefined, worker: null }),
+                lastProg,
+              );
+            } catch (e) {
+              const aborted =
+                signal.aborted ||
+                bulkStopGenerationRef.current !== stopGenerationSnapshot ||
+                (e instanceof DOMException && e.name === "AbortError") ||
+                (e instanceof Error && e.name === "AbortError");
+              if (aborted) throw e;
+              fail += 1;
+              finishedCount += 1;
+              const msg = e instanceof Error ? e.message : String(e);
+              commitRunDetail(
+                patchSubsBulkRunDetail(runDetail, a.id, {
+                  status: "error",
+                  detail: msg.slice(0, 200),
+                  worker: null,
+                }),
+                lastProg,
+              );
+            } finally {
+              runningUsernames.delete(a.username);
+              bumpParallelProgress("account");
+            }
+          },
+        });
+      } finally {
+        window.clearInterval(hb);
+      }
+
+      const stoppedEarly = signal.aborted || bulkStopGenerationRef.current !== stopGenerationSnapshot;
+      if (stoppedEarly) {
+        const finalized = finalizeCancelledBulkDetail(runDetail);
+        commitRunDetail(finalized, lastProg);
+      }
+
+      if (
+        !signal.aborted &&
+        bulkStopGenerationRef.current === stopGenerationSnapshot &&
+        kind === "collect"
+      ) {
         const progCsv: BulkAudienceProgress = {
           total,
           current: total,
           username: "",
           phase: "csv",
         };
+        lastProg = progCsv;
         setBulkAudienceProgress(progCsv);
-        persistSubsBulkState(progCsv);
+        persistSubsBulkState(progCsv, runDetail);
         const omitted = rows.filter((a) => a.dashboard_account_id && !idSet.has(a.id)).length;
         const parts = [`успешно ${ok}`, `ошибок ${fail}`];
+        if (skippedRecent > 0) parts.push(`пропущено (недавний съём): ${skippedRecent}`);
+        if (skippedZeroDb > 0) parts.push(`пропущено (0 в БД): ${skippedZeroDb}`);
         if (omitted > 0) parts.push(`не запускались (есть дашборд, не выбраны): ${omitted}`);
         let serverCsvNote = "";
         try {
@@ -809,21 +1188,15 @@ export default function App() {
             body: "{}",
           });
         } catch (e) {
-          if (!signal.aborted && !(e instanceof DOMException && e.name === "AbortError")) {
+          const csvAborted =
+            signal.aborted ||
+            (e instanceof DOMException && e.name === "AbortError") ||
+            (e instanceof Error && e.name === "AbortError");
+          if (!csvAborted) {
             serverCsvNote = ` Отчёт на сервере не обновлён: ${e instanceof Error ? e.message : String(e)}`;
           }
         }
-        if (!signal.aborted) {
-          showToast(`Готово: ${parts.join(", ")}${serverCsvNote}`, fail > 0 || Boolean(serverCsvNote));
-        }
-      }
-      if (signal.aborted) {
-        showToast(
-          ok > 0 || fail > 0
-            ? `Сбор остановлен. Успешно: ${ok}, ошибок: ${fail}. Отчёт CSV на сервере не обновляли.`
-            : "Сбор отменён до обработки аккаунтов.",
-          false,
-        );
+        showToast(`Готово: ${parts.join(", ")}${serverCsvNote}`, fail > 0 || Boolean(serverCsvNote));
       }
       await load();
     } catch (e) {
@@ -869,8 +1242,6 @@ export default function App() {
 
   const s = overview?.summary;
   const accounts = overview?.accounts ?? [];
-  const top = overview?.top_subscribers ?? [];
-
   const syncableAccounts = useMemo(
     () => accounts.filter((a) => a.dashboard_account_id),
     [accounts],
@@ -913,24 +1284,111 @@ export default function App() {
     [bulkModalAccounts],
   );
 
+  const enrichPickAccounts = useMemo(() => {
+    let rows = bulkModalAccounts.filter((a) => (a.audience_count ?? 0) > 0);
+    const q = enrichAccountSearch.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter((a) => {
+        const u = a.username.toLowerCase();
+        const d = (a.display_name || "").toLowerCase();
+        const p = (a.profile_name || "").toLowerCase();
+        return u.includes(q) || d.includes(q) || p.includes(q);
+      });
+    }
+    return rows;
+  }, [bulkModalAccounts, enrichAccountSearch]);
+
+  const enrichPickSyncableAccounts = useMemo(
+    () => enrichPickAccounts.filter((a) => a.dashboard_account_id),
+    [enrichPickAccounts],
+  );
+
+  const audiencePickListAccounts = audiencePickKind === "enrich" ? enrichPickAccounts : bulkModalAccounts;
+  const audiencePickSyncableAccounts =
+    audiencePickKind === "enrich" ? enrichPickSyncableAccounts : bulkModalSyncableAccounts;
+
+  const bulkModalAccountsOrdered = useMemo(() => {
+    const rows = [...audiencePickListAccounts];
+    if (bulkModalAudienceSort === "default") return rows;
+    rows.sort((a, b) => {
+      const ka = audienceSyncTsMs(a.audience_last_synced_at);
+      const kb = audienceSyncTsMs(b.audience_last_synced_at);
+      if (bulkModalAudienceSort === "sync_desc") {
+        const va = ka ?? Number.NEGATIVE_INFINITY;
+        const vb = kb ?? Number.NEGATIVE_INFINITY;
+        if (vb !== va) return vb - va;
+      } else {
+        const va = ka ?? Number.POSITIVE_INFINITY;
+        const vb = kb ?? Number.POSITIVE_INFINITY;
+        if (va !== vb) return va - vb;
+      }
+      return a.username.localeCompare(b.username, "ru");
+    });
+    return rows;
+  }, [audiencePickListAccounts, bulkModalAudienceSort]);
+
   const bulkPickCount = useMemo(
-    () => bulkModalSyncableAccounts.filter((a) => bulkSelectedIds.has(a.id)).length,
-    [bulkModalSyncableAccounts, bulkSelectedIds],
+    () => audiencePickSyncableAccounts.filter((a) => bulkSelectedIds.has(a.id)).length,
+    [audiencePickSyncableAccounts, bulkSelectedIds],
+  );
+
+  /** Сколько из выбранных реально пойдут в POST (без пропуска «недавно сняты» и опционально без 0 в БД). */
+  const bulkPickWillRunCount = useMemo(() => {
+    return audiencePickSyncableAccounts.filter((a) => {
+      if (!bulkSelectedIds.has(a.id)) return false;
+      if (audiencePickKind === "collect" && bulkSkipZeroSubscribersInDb && (a.audience_count ?? 0) === 0) {
+        return false;
+      }
+      if (audiencePickKind === "enrich" && (a.audience_count ?? 0) === 0) return false;
+      return !isSubsAudienceSyncedWithinHours(a.audience_last_synced_at, bulkSkipRecentHours);
+    }).length;
+  }, [
+    audiencePickKind,
+    audiencePickSyncableAccounts,
+    bulkSelectedIds,
+    bulkSkipRecentHours,
+    bulkSkipZeroSubscribersInDb,
+  ]);
+
+  const syncableAccountsWithSubs = useMemo(
+    () => syncableAccounts.filter((a) => (a.audience_count ?? 0) > 0),
+    [syncableAccounts],
   );
 
   useEffect(() => {
-    if (!bulkModalOpen) return;
-    setBulkSelectedIds((prev) => new Set([...prev].filter((id) => bulkModalAccounts.some((a) => a.id === id))));
-  }, [bulkModalOpen, bulkModalAccounts]);
+    if (!audiencePickOpen) return;
+    setBulkSelectedIds((prev) => new Set([...prev].filter((id) => audiencePickListAccounts.some((a) => a.id === id))));
+  }, [audiencePickOpen, audiencePickListAccounts]);
 
   useEffect(() => {
-    if (!bulkModalOpen || bulkBusy) return;
+    if (!audiencePickOpen) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const sched = (await fetchJson(`${subsApi()}/api/accounts/schedule/`)) as {
+          skip_recent_hours?: number;
+        } | null;
+        if (cancelled || sched == null) return;
+        if (typeof sched.skip_recent_hours === "number" && Number.isFinite(sched.skip_recent_hours)) {
+          setBulkSkipRecentHours(sched.skip_recent_hours);
+        }
+      } catch {
+        /* дашборд недоступен */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [audiencePickOpen]);
+
+  useEffect(() => {
+    if (!audiencePickOpen || bulkBusy) return;
     const fn = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setBulkModalOpen(false);
+      if (e.key === "Escape") setAudiencePickOpen(false);
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [bulkModalOpen, bulkBusy]);
+  }, [audiencePickOpen, bulkBusy]);
 
   useEffect(() => {
     if (!csvPreviewOpen) return;
@@ -939,15 +1397,6 @@ export default function App() {
     };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
-  }, [csvPreviewOpen]);
-
-  useEffect(() => {
-    if (!csvPreviewOpen) {
-      setCsvPreviewSubview("table");
-      setPresumedStats(null);
-      setPresumedStatsErr(null);
-      setPresumedStatsLoading(false);
-    }
   }, [csvPreviewOpen]);
 
   const filteredAccounts = useMemo(() => {
@@ -967,17 +1416,36 @@ export default function App() {
     let rows = filteredAccounts;
     if (insightMetric === "with_data") {
       rows = rows.filter((a) => a.audience_count > 0);
-    } else if (insightMetric === "synced") {
-      rows = rows.filter((a) => !!a.audience_last_synced_at);
     }
     rows = [...rows];
     if (insightMetric === "accounts") {
       rows.sort((a, b) => a.username.localeCompare(b.username, "ru"));
-    } else if (insightMetric === "unique" || insightMetric === "with_data" || insightMetric === "synced") {
+    } else if (insightMetric === "unique" || insightMetric === "with_data") {
       rows.sort((a, b) => (b.audience_count || 0) - (a.audience_count || 0));
     }
     return rows;
   }, [filteredAccounts, insightMetric]);
+
+  const accountTablePages = useMemo(
+    () => Math.max(1, Math.ceil(displayAccountsForTable.length / SUBS_LIST_PAGE_SIZE)),
+    [displayAccountsForTable],
+  );
+
+  const pagedAccountsForTable = useMemo(() => {
+    const start = (accountTablePage - 1) * SUBS_LIST_PAGE_SIZE;
+    return displayAccountsForTable.slice(start, start + SUBS_LIST_PAGE_SIZE);
+  }, [displayAccountsForTable, accountTablePage]);
+
+  useEffect(() => {
+    setAccountTablePage(1);
+  }, [accountSearch, insightMetric, profileFilterKey, filterPlatform]);
+
+  useEffect(() => {
+    setAccountTablePage((p) => {
+      const next = Math.min(Math.max(1, p), accountTablePages);
+      return next === p ? p : next;
+    });
+  }, [accountTablePages]);
 
   const membersFilterAccountLabel = useMemo(() => {
     if (membersFilterAccountId == null) return null;
@@ -993,92 +1461,145 @@ export default function App() {
   }, [overview, membersFilterAccountId]);
 
   const memberTotal = membersData?.count ?? 0;
-  const memberPages = Math.max(1, Math.ceil(memberTotal / MEM_PAGE));
+  const memberPages = Math.max(1, Math.ceil(memberTotal / SUBS_LIST_PAGE_SIZE));
   const memberRows = membersData?.results ?? [];
 
   return (
     <div className="subs-shell">
       <header className="subs-header">
         <div className="subs-header-row">
-          <div>
-            <div className="mono subs-brand-kicker">SUBS</div>
-            <div className="subs-brand-title">Подписчики</div>
-          </div>
-          <div
-            className={`subs-header-actions${mainTab === "subscribers" ? " subs-header-actions--subscribers" : ""}`}
-          >
-            <div className="subs-segment-group">
-              {(
-                [
-                  ["subscribers", "Подписчики"],
-                  ["auth", "Авторизация"],
-                ] as const
-              ).map(([id, label]) => {
-                const active = mainTab === id;
-                return (
-                  <button
-                    key={id}
-                    type="button"
-                    onClick={() => setMainTab(id)}
-                    className={`subs-segment${active ? " subs-segment--active" : ""}`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
+          <div className="subs-header-left">
+            <div className="subs-header-brand-metrics">
+              <div className="subs-header-brand">
+                <div className="mono subs-brand-kicker">SUBS</div>
+                <div className="subs-brand-title">Подписчики</div>
+              </div>
+              {overview && s ? (
+                <div className="subs-metrics subs-metrics--header">
+                  {(
+                    [
+                      ["Аккаунтов", fmtNum(s.tracked_accounts_count), "accounts" as const, "Сортировка по нику"],
+                      [
+                        "Уникальных подписчиков",
+                        fmtNum(s.unique_subscribers_total),
+                        "unique" as const,
+                        "Подписчики: по числу наших аккаунтов",
+                      ],
+                      ["Приватных подписчиков", fmtNum(s.private_subscribers_total), "private" as const, "Только закрытые профили"],
+                      [
+                        "Подписчиков с данными",
+                        fmtNum(s.accounts_with_audience_rows),
+                        "with_data" as const,
+                        "Аккаунты с подписчиками в базе",
+                      ],
+                    ] as const
+                  ).map(([label, value, key, hint]) => {
+                    const active = insightMetric === key;
+                    const accent = key === "unique";
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        title={hint}
+                        aria-pressed={active}
+                        aria-label={`${label}: ${value}. Нажмите, чтобы применить или снять фильтр.`}
+                        onClick={() => toggleInsightMetric(key)}
+                        className={`subs-metric subs-metric--btn subs-metric--stat${accent ? " subs-metric--accent" : ""}${active ? " subs-metric--active" : ""}`}
+                      >
+                        <div className="mono subs-metric-label subs-metric-label--stat">{label}</div>
+                        <div className="subs-metric-value tnum">{value}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
-            {mainTab === "subscribers" ? (
-              <>
+          </div>
+          <div className="subs-header-right">
+            {overview ? (
+              <div className="subs-header-collect">
                 <button
                   type="button"
-                  onClick={() => void syncFromDashboard()}
-                  disabled={syncBusy}
-                  className="subs-btn subs-btn--sync"
+                  disabled={bulkBusy || loading || !syncableAccounts.length}
+                  title={
+                    syncableAccounts.length
+                      ? `Открыть выбор аккаунтов (${syncableAccounts.length} с привязкой к дашборду)`
+                      : "Нет аккаунтов с привязкой к дашборду"
+                  }
+                  onClick={() => {
+                    if (!syncableAccounts.length) {
+                      showToast("Нет аккаунтов с привязкой к дашборду — сначала «Синхр. с дашборда»", true);
+                      return;
+                    }
+                    setAudiencePickKind("collect");
+                    setBulkModalPlatforms([]);
+                    setBulkModalProfileKeys([]);
+                    setEnrichAccountSearch("");
+                    setBulkSelectedIds(new Set(syncableAccounts.map((a) => a.id)));
+                    setAudiencePickOpen(true);
+                  }}
+                  className="subs-btn-emphasis"
                 >
-                  {syncBusy ? "…" : "Синхр. с дашборда"}
+                  {bulkBusy && bulkOperationKind === "collect" ? "Сбор…" : "Собрать подписчиков"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => void load()}
-                  disabled={loading}
-                  className="subs-btn subs-btn--muted subs-btn--refresh"
+                  disabled={bulkBusy || loading || !syncableAccountsWithSubs.length}
+                  title={
+                    syncableAccountsWithSubs.length
+                      ? `Обновить профили (${syncableAccountsWithSubs.length} аккаунтов с подписчиками в БД)`
+                      : "Сначала соберите список подписчиков"
+                  }
+                  onClick={() => {
+                    if (!syncableAccountsWithSubs.length) {
+                      showToast("Нет аккаунтов с подписчиками в БД — сначала «Собрать подписчиков»", true);
+                      return;
+                    }
+                    setAudiencePickKind("enrich");
+                    setBulkModalPlatforms([]);
+                    setBulkModalProfileKeys([]);
+                    setEnrichAccountSearch("");
+                    setBulkSelectedIds(new Set(syncableAccountsWithSubs.map((a) => a.id)));
+                    setAudiencePickOpen(true);
+                  }}
+                  className="subs-btn subs-btn--muted"
+                  style={{
+                    padding: "10px 16px",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    border: "1px solid var(--line-strong)",
+                    background: "rgba(255,255,255,0.04)",
+                  }}
                 >
-                  {loading ? "…" : "↻ Обновить"}
+                  {bulkBusy && bulkOperationKind === "enrich" ? "Обновление…" : "Обновить профили"}
                 </button>
-                <button
-                  type="button"
-                  className="subs-btn subs-btn--muted subs-btn--charts"
-                  disabled={presumedStatsLoading}
-                  title="Диаграммы по колонкам «Предполагаемый …» из полного последнего CSV (после «Скачать CSV»)"
-                  onClick={() => openLastCsvPresumedCharts()}
-                >
-                  {presumedStatsLoading ? "…" : "Графики"}
-                </button>
-              </>
+              </div>
             ) : null}
-            <a href={`${dashSpa()}/`} className="subs-btn subs-btn--dash">
-              Дашборд
-            </a>
+            <div className="subs-view-tabs subs-view-tabs--header" role="tablist" aria-label="Вид экрана">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subsMainView === "accounts"}
+              className={`subs-view-tab${subsMainView === "accounts" ? " subs-view-tab--active" : ""}`}
+              onClick={() => setSubsMainView("accounts")}
+            >
+              Аккаунты
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={subsMainView === "charts"}
+              className={`subs-view-tab${subsMainView === "charts" ? " subs-view-tab--active" : ""}`}
+              onClick={() => setSubsMainView("charts")}
+            >
+              Графики
+            </button>
+          </div>
           </div>
         </div>
       </header>
 
-      <main className="subs-main" data-layout={mainTab === "auth" ? "auth" : "subscribers"}>
-        {mainTab === "auth" ? (
-          <div className="subs-auth-wrap">
-            <p className="subs-auth-note">
-              Страница настроек дашборда (соцсети). Нужен atomic-фронт{" "}
-              <span className="mono">{dashAtomic()}</span>
-              <span className="mono">/app.html</span> (см. <span className="mono">VITE_DASHBOARD_ATOMIC_URL</span>).
-            </p>
-            <iframe
-              title="Авторизация дашборда"
-              src={`${dashAtomic()}/app.html?route=settings`}
-              className="subs-iframe"
-            />
-          </div>
-        ) : null}
-
+      <main className="subs-main" data-layout="subscribers">
         {toast && (
           <div className={`subs-banner ${toast.isErr ? "subs-banner--err" : "subs-banner--ok"}`}>{toast.msg}</div>
         )}
@@ -1088,7 +1609,9 @@ export default function App() {
             {bulkAudienceProgress ? (
               <div className="subs-collect-dock-inner">
                 <div className="subs-collect-dock-row" style={{ alignItems: "center" }}>
-                  <span className="subs-collect-dock-title">Сбор подписчиков</span>
+                  <span className="subs-collect-dock-title">
+                    {bulkOperationKind === "enrich" ? "Обновление профилей" : "Сбор подписчиков"}
+                  </span>
                   <div
                     style={{
                       display: "flex",
@@ -1107,8 +1630,19 @@ export default function App() {
                     </span>
                     <button
                       type="button"
+                      className="subs-btn subs-btn--sm subs-btn--muted"
+                      onClick={() => setBulkRunDetailOpen(true)}
+                    >
+                      Подробнее
+                    </button>
+                    <button
+                      type="button"
                       className="subs-btn subs-btn--sm subs-btn--danger-text"
-                      onClick={requestBulkStop}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        requestAudienceStop();
+                      }}
                     >
                       Остановить
                     </button>
@@ -1133,15 +1667,29 @@ export default function App() {
             ) : (
               <div className="subs-collect-dock-inner">
                 <div className="subs-collect-dock-row" style={{ alignItems: "center" }}>
-                  <span className="subs-collect-dock-title">Сбор подписчиков</span>
-                  <button
-                    type="button"
-                    className="subs-btn subs-btn--sm subs-btn--danger-text"
-                    style={{ marginLeft: "auto", flexShrink: 0 }}
-                    onClick={requestBulkStop}
-                  >
-                    Остановить
-                  </button>
+                  <span className="subs-collect-dock-title">
+                    {bulkOperationKind === "enrich" ? "Обновление профилей" : "Сбор подписчиков"}
+                  </span>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      className="subs-btn subs-btn--sm subs-btn--muted"
+                      onClick={() => setBulkRunDetailOpen(true)}
+                    >
+                      Подробнее
+                    </button>
+                    <button
+                      type="button"
+                      className="subs-btn subs-btn--sm subs-btn--danger-text"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        requestAudienceStop();
+                      }}
+                    >
+                      Остановить
+                    </button>
+                  </div>
                 </div>
                 <div className="subs-collect-dock-sub">
                   {bulkRemoteView ? (
@@ -1160,9 +1708,30 @@ export default function App() {
         ) : refreshingId != null ? (
           <div className="subs-collect-dock" role="status" aria-live="polite">
             <div className="subs-collect-dock-inner">
-              <div className="subs-collect-dock-row">
+              <div className="subs-collect-dock-row" style={{ alignItems: "center" }}>
                 <span className="subs-collect-dock-title">Сбор подписчиков</span>
-                <span className="subs-collect-dock-counter mono">1 / 1</span>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    marginLeft: "auto",
+                    flexShrink: 0,
+                  }}
+                >
+                  <span className="subs-collect-dock-counter mono tnum">1 / 1</span>
+                  <button
+                    type="button"
+                    className="subs-btn subs-btn--sm subs-btn--danger-text"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      requestAudienceStop();
+                    }}
+                  >
+                    Остановить
+                  </button>
+                </div>
               </div>
               <div className="subs-collect-dock-sub mono">
                 @{singleAudienceUsername ?? "…"} — запрос к дашборду, подождите…
@@ -1209,7 +1778,7 @@ export default function App() {
                 boxShadow: "0 24px 56px rgba(0,0,0,0.65)",
               }}
             >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+              <div className="subs-modal-title-row">
                 <h3 id="subs-member-card-title" style={{ margin: 0, fontSize: 16, color: "var(--ink)" }}>
                   {memberCardLoading
                     ? "Загрузка…"
@@ -1381,7 +1950,7 @@ export default function App() {
           </div>
         )}
 
-        {bulkModalOpen && !bulkBusy && (
+        {audiencePickOpen && !bulkBusy && (
           <div
             className="subs-modal-overlay"
             style={{
@@ -1395,17 +1964,17 @@ export default function App() {
               justifyContent: "center",
             }}
             onClick={(e) => {
-              if (e.target === e.currentTarget) setBulkModalOpen(false);
+              if (e.target === e.currentTarget) setAudiencePickOpen(false);
             }}
           >
             <div
               role="dialog"
               aria-modal
-              aria-labelledby="subs-bulk-modal-title"
+              aria-labelledby="subs-audience-pick-modal-title"
               className="subs-modal-panel"
               onClick={(e) => e.stopPropagation()}
               style={{
-                maxWidth: 520,
+                maxWidth: 560,
                 width: "100%",
                 maxHeight: "min(92vh, 720px)",
                 display: "flex",
@@ -1417,19 +1986,41 @@ export default function App() {
                 boxShadow: "0 24px 56px rgba(0,0,0,0.65)",
               }}
             >
-              <h3 id="subs-bulk-modal-title" style={{ margin: "0 0 8px", fontSize: 17, color: "var(--ink)" }}>
-                Сбор подписчиков
+              <h3 id="subs-audience-pick-modal-title" style={{ margin: "0 0 8px", fontSize: 17, color: "var(--ink)" }}>
+                {audiencePickKind === "enrich" ? "Обновление профилей подписчиков" : "Сбор подписчиков"}
               </h3>
-              <p style={{ margin: "0 0 14px", fontSize: 13, color: "var(--ink-dim)", lineHeight: 1.45 }}>
-                Отметьте аккаунты для съёма через дашборд. Между запусками сохраняется пауза 5–9 с. Аккаунты без связи с
-                дашбордом недоступны — сначала «Синхр. с дашборда». Фильтры ниже сужают только список в этом окне. Можно
-                выбрать несколько площадок и несколько профилей; если в блоке ничего не выбрано — подразумевается «все».
+              <p style={{ margin: "0 0 14px", fontSize: 12, color: "var(--ink-mute)", lineHeight: 1.45 }}>
+                {audiencePickKind === "enrich"
+                  ? "Для каждого выбранного отслеживаемого аккаунта обновятся bio, счётчики и аватары уже сохранённых подписчиков (без повторного съёма списка)."
+                  : "Снимается список подписчиков с площадки (модалка followers). Профили подписчиков не обновляются — используйте «Обновить профили»."}
               </p>
+              {audiencePickKind === "enrich" ? (
+                <div className="subs-field-wrap" style={{ marginBottom: 12 }}>
+                  <input
+                    value={enrichAccountSearch}
+                    onChange={(e) => setEnrichAccountSearch(e.target.value)}
+                    placeholder="Поиск по @нику, имени или профилю…"
+                    className="subs-field"
+                  />
+                  <span className="subs-field-icon">⌕</span>
+                </div>
+              ) : null}
+              <div style={{ marginBottom: 14 }}>
+                <button
+                  type="button"
+                  onClick={() => void syncFromDashboard()}
+                  disabled={syncBusy || loading}
+                  className="subs-btn subs-btn--sync"
+                  style={{ width: "100%", justifyContent: "center" }}
+                >
+                  {syncBusy ? "…" : "Синхр. с дашборда"}
+                </button>
+              </div>
               <div style={{ marginBottom: 12 }}>
                 <div className="mono subs-hint" style={{ marginBottom: 6 }}>
                   Площадка
                 </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <div className="subs-modal-chip-row">
                   <button
                     type="button"
                     onClick={() => setBulkModalPlatforms([])}
@@ -1466,7 +2057,7 @@ export default function App() {
                 <div className="mono subs-hint" style={{ marginBottom: 6 }}>
                   Профиль
                 </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <div className="subs-modal-chip-row">
                   <button
                     type="button"
                     onClick={() => setBulkModalProfileKeys([])}
@@ -1512,35 +2103,103 @@ export default function App() {
                   })}
                 </div>
               </div>
-              <label
-                title="Действует и для «Собрать» у отдельного аккаунта в таблице, и для массового сбора."
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 10,
-                  marginBottom: 12,
-                  cursor: "pointer",
-                  fontSize: 13,
-                  color: "var(--ink-dim)",
-                  lineHeight: 1.45,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={bulkSkipExistingMemberProfiles}
-                  onChange={(e) => setBulkSkipExistingMemberProfiles(e.target.checked)}
-                  style={{ marginTop: 3, flexShrink: 0 }}
-                />
-                <span>
-                  Пропускать уже сохранённых подписчиков: не открывать их профили на дашборде (быстрее, меньше
-                  срабатываний антибота). Новые по-прежнему снимаются полностью.
-                </span>
-              </label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+              {audiencePickKind === "collect" ? (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 10,
+                    marginBottom: 12,
+                    cursor: "pointer",
+                    fontSize: 13,
+                    color: "var(--ink-dim)",
+                    lineHeight: 1.45,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={bulkSkipZeroSubscribersInDb}
+                    onChange={(e) => setBulkSkipZeroSubscribersInDb(e.target.checked)}
+                    style={{ marginTop: 3, flexShrink: 0 }}
+                  />
+                  <span>Пропускать с 0 подписчиков в БД</span>
+                </label>
+              ) : null}
+              <div style={{ marginBottom: 12 }}>
+                <div
+                  className="mono subs-hint"
+                  style={{
+                    marginBottom: 8,
+                    fontSize: 11,
+                    letterSpacing: "0.2em",
+                    color: "var(--ink-mute)",
+                  }}
+                >
+                  ПРОПУСКАТЬ НЕДАВНО ОБНОВЛЁННЫЕ
+                </div>
+                <div className="subs-modal-chip-row">
+                  {SUBS_BULK_SKIP_RECENT_HOURS.map((h) => (
+                    <button
+                      key={h}
+                      type="button"
+                      className={`subs-chip${bulkSkipRecentHours === h ? " subs-chip--active" : ""}`}
+                      style={{ fontSize: 12 }}
+                      onClick={() => setBulkSkipRecentHours(h)}
+                    >
+                      {h === 0 ? "Не пропускать" : `< ${h}ч`}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {bulkSkipRecentHours > 0 ? (
+                <p
+                  style={{
+                    fontSize: 12,
+                    color: "rgba(250,204,21,0.92)",
+                    margin: "0 0 12px",
+                    lineHeight: 1.45,
+                  }}
+                >
+                  Аккаунты с съёмом аудитории за последние {bulkSkipRecentHours} ч будут пропущены (как в автообновлении
+                  дашборда).
+                </p>
+              ) : null}
+              <div style={{ marginBottom: 12 }}>
+                <div className="mono subs-hint" style={{ marginBottom: 6 }}>
+                  Сортировка
+                </div>
+                <div className="subs-modal-chip-row">
+                  <button
+                    type="button"
+                    className={`subs-chip${bulkModalAudienceSort === "default" ? " subs-chip--active" : ""}`}
+                    style={{ fontSize: 12 }}
+                    onClick={() => setBulkModalAudienceSort("default")}
+                  >
+                    Как в списке
+                  </button>
+                  <button
+                    type="button"
+                    className={`subs-chip${bulkModalAudienceSort === "sync_desc" ? " subs-chip--active" : ""}`}
+                    style={{ fontSize: 12 }}
+                    onClick={() => setBulkModalAudienceSort("sync_desc")}
+                  >
+                    Новее сверху
+                  </button>
+                  <button
+                    type="button"
+                    className={`subs-chip${bulkModalAudienceSort === "sync_asc" ? " subs-chip--active" : ""}`}
+                    style={{ fontSize: 12 }}
+                    onClick={() => setBulkModalAudienceSort("sync_asc")}
+                  >
+                    Старее сверху
+                  </button>
+                </div>
+              </div>
+              <div className="subs-modal-inline-actions">
                 <button
                   type="button"
                   className="subs-btn subs-btn--sm subs-btn--muted"
-                  onClick={() => setBulkSelectedIds(new Set(bulkModalSyncableAccounts.map((a) => a.id)))}
+                  onClick={() => setBulkSelectedIds(new Set(audiencePickSyncableAccounts.map((a) => a.id)))}
                 >
                   Выбрать все с дашбордом
                 </button>
@@ -1560,19 +2219,31 @@ export default function App() {
                   marginBottom: 16,
                 }}
               >
-                {bulkModalAccounts.length === 0 ? (
+                {audiencePickListAccounts.length === 0 ? (
                   <p className="subs-muted" style={{ margin: 8 }}>
                     Нет аккаунтов по текущим фильтрам.
                   </p>
                 ) : (
-                  bulkModalAccounts.map((a) => {
+                  bulkModalAccountsOrdered.map((a) => {
                     const can = !!a.dashboard_account_id;
                     const checked = bulkSelectedIds.has(a.id);
                     const meta = PLATFORMS.find((p) => p.id === a.platform);
+                    const skipByRecent =
+                      can &&
+                      bulkSkipRecentHours > 0 &&
+                      isSubsAudienceSyncedWithinHours(a.audience_last_synced_at, bulkSkipRecentHours);
+                    const skipByZeroDb =
+                      audiencePickKind === "collect" &&
+                      bulkSkipZeroSubscribersInDb &&
+                      can &&
+                      (a.audience_count ?? 0) === 0;
+                    const skipHighlight = checked && (skipByRecent || skipByZeroDb);
+                    const showMembersPreview =
+                      audiencePickKind === "enrich" && can && (a.audience_count ?? 0) > 0;
                     return (
                       <label
                         key={a.id}
-                        className="subs-bulk-pick-row"
+                        className={`subs-bulk-pick-row${showMembersPreview ? " subs-bulk-pick-row--with-actions" : ""}`}
                         style={{
                           display: "flex",
                           alignItems: "flex-start",
@@ -1581,6 +2252,8 @@ export default function App() {
                           borderRadius: 10,
                           cursor: can ? "pointer" : "default",
                           opacity: can ? 1 : 0.55,
+                          border: skipHighlight ? "1px solid rgba(255,255,255,0.14)" : "1px solid transparent",
+                          background: skipHighlight ? "rgba(255,255,255,0.03)" : undefined,
                         }}
                       >
                         <input
@@ -1611,51 +2284,115 @@ export default function App() {
                               {a.display_name}
                             </span>
                           ) : null}
+                          <span
+                            className="tnum"
+                            style={{ display: "block", fontSize: 11, color: "var(--ink-dim)", marginTop: 4 }}
+                          >
+                            {audiencePickKind === "enrich"
+                              ? `Подписчиков в БД: ${fmtNum(a.audience_count ?? 0)}`
+                              : `Снято: ${fmtDate(a.audience_last_synced_at)}`}
+                          </span>
                           {!can ? (
                             <span style={{ display: "block", fontSize: 11, color: "var(--ink-dim)", marginTop: 4 }}>
                               Нет связи с дашбордом
                             </span>
                           ) : null}
                         </span>
+                        {showMembersPreview ? (
+                          <button
+                            type="button"
+                            className="subs-icon-btn"
+                            title="Список подписчиков в БД"
+                            aria-label={`Подписчики @${a.username}`}
+                            disabled={bulkBusy}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setMembersPreviewAccount({
+                                id: a.id,
+                                username: a.username,
+                                display_name: a.display_name,
+                                platform: a.platform,
+                                dashboard_account_id: a.dashboard_account_id,
+                                audience_count: a.audience_count,
+                              });
+                            }}
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                              <path
+                                d="M2 12C2 12 5.5 5 12 5C18.5 5 22 12 22 12C22 12 18.5 19 12 19C5.5 19 2 12 2 12Z"
+                                stroke="currentColor"
+                                strokeWidth="1.75"
+                                strokeLinejoin="round"
+                              />
+                              <circle cx="12" cy="12" r="3.25" stroke="currentColor" strokeWidth="1.75" />
+                            </svg>
+                          </button>
+                        ) : null}
                       </label>
                     );
                   })
                 )}
               </div>
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
-                <span className="subs-muted" style={{ fontSize: 13 }}>
-                  К запуску: <strong className="tnum">{bulkPickCount}</strong> из {bulkModalSyncableAccounts.length}
-                </span>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <button type="button" className="subs-btn subs-btn--muted subs-btn--sm" onClick={() => setBulkModalOpen(false)}>
+              {(bulkRunDetail?.items?.length ?? 0) > 0 ? (
+                <button
+                  type="button"
+                  className="subs-btn subs-btn--muted"
+                  style={{ width: "100%", marginBottom: 12, fontSize: 12 }}
+                  onClick={() => setBulkRunDetailOpen(true)}
+                >
+                  Подробнее: очередь и слоты воркеров
+                </button>
+              ) : null}
+              <div className="subs-modal-footer">
+                <div style={{ fontSize: 13, color: "var(--ink-mute)", lineHeight: 1.45, minWidth: 0 }}>
+                  К запуску:{" "}
+                  <strong className="tnum" style={{ color: "var(--ink)" }}>
+                    {bulkPickWillRunCount}
+                  </strong>{" "}
+                  из{" "}
+                  <strong className="tnum" style={{ color: "var(--ink)" }}>
+                    {bulkPickCount}
+                  </strong>{" "}
+                  выбранных
+                </div>
+                <div className="subs-modal-footer-actions">
+                  <button type="button" className="subs-btn subs-btn--muted subs-btn--sm" onClick={() => setAudiencePickOpen(false)}>
                     Отмена
                   </button>
                   <button
                     type="button"
                     className="subs-btn-emphasis"
                     style={{ padding: "10px 18px", fontSize: 13 }}
-                    disabled={bulkPickCount === 0}
+                    disabled={bulkPickCount === 0 || bulkPickWillRunCount === 0}
                     onClick={() =>
                       void runBulk(
-                        bulkModalSyncableAccounts.filter((a) => bulkSelectedIds.has(a.id)).map((a) => a.id),
+                        audiencePickSyncableAccounts.filter((a) => bulkSelectedIds.has(a.id)).map((a) => a.id),
+                        audiencePickKind,
                       )
                     }
                   >
-                    Запустить сбор
+                    {audiencePickKind === "enrich" ? "Запустить обновление" : "Запустить сбор"}
                   </button>
                 </div>
               </div>
             </div>
           </div>
         )}
+
+        {membersPreviewAccount ? (
+          <SubsMembersPreviewModal
+            account={membersPreviewAccount}
+            onClose={() => setMembersPreviewAccount(null)}
+            fetchJson={fetchJson}
+            subsApiBase={subsApi()}
+            showToast={showToast}
+            platformColor={PLATFORMS.find((p) => p.id === membersPreviewAccount.platform)?.color ?? "#9ca3af"}
+            platformLabel={subsPlatformLabel(membersPreviewAccount.platform)}
+            bulkBusy={bulkBusy}
+            onRequestAudienceStop={requestAudienceStop}
+          />
+        ) : null}
 
         {csvPreviewOpen && (
           <div
@@ -1683,7 +2420,7 @@ export default function App() {
               style={{
                 maxWidth: "min(1100px, 100%)",
                 width: "100%",
-                maxHeight: csvPreviewSubview === "charts" ? "min(92vh, 900px)" : "min(88vh, 720px)",
+                maxHeight: "min(88vh, 720px)",
                 overflow: "hidden",
                 display: "flex",
                 flexDirection: "column",
@@ -1701,19 +2438,8 @@ export default function App() {
                 <div>
                   <h3 id="subs-csv-preview-title" style={{ margin: 0, fontSize: 16, color: "var(--ink)" }}>
                     Последний CSV
-                    {csvPreviewSubview === "charts" ? (
-                      <span className="subs-muted" style={{ fontWeight: 400, fontSize: 13 }}>
-                        {" "}
-                        — графики
-                      </span>
-                    ) : null}
                   </h3>
-                  {csvPreviewSubview === "charts" && presumedStats?.generated_at ? (
-                    <p className="subs-muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
-                      Сформирован: {fmtDate(presumedStats.generated_at)}
-                    </p>
-                  ) : null}
-                  {csvPreviewSubview !== "charts" && csvPreview?.generated_at ? (
+                  {csvPreview?.generated_at ? (
                     <p className="subs-muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
                       Сформирован: {fmtDate(csvPreview.generated_at)}
                       {csvPreview.row_total != null ? (
@@ -1725,13 +2451,13 @@ export default function App() {
                       {csvPreview.truncated ? " · в таблице показан фрагмент" : null}
                     </p>
                   ) : null}
-                  {csvPreviewSubview !== "charts" && csvPreview?.query_string ? (
+                  {csvPreview?.query_string ? (
                     <p className="mono subs-muted" style={{ margin: "4px 0 0", fontSize: 10, wordBreak: "break-all" }}>
                       {csvPreview.query_string}
                     </p>
                   ) : null}
                 </div>
-                <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                <div className="subs-modal-toolbar-actions">
                   <a
                     href={`${subsApi()}/api/subscribers/members/export/last.csv`}
                     className="subs-btn subs-btn--sm subs-btn--muted"
@@ -1740,31 +2466,12 @@ export default function App() {
                   >
                     Скачать файл
                   </a>
-                  {csvPreviewSubview === "charts" ? (
-                    <button
-                      type="button"
-                      className="subs-btn subs-btn--sm subs-btn--muted"
-                      disabled={presumedStatsLoading}
-                      onClick={() => setCsvPreviewSubview("table")}
-                    >
-                      Таблица
-                    </button>
-                  ) : null}
                   <button type="button" className="subs-btn subs-btn--sm subs-btn--muted" onClick={() => setCsvPreviewOpen(false)}>
                     Закрыть
                   </button>
                 </div>
               </div>
-              {csvPreviewSubview === "charts" ? (
-                <div className="subs-csv-preview-scroll subs-csv-charts-scroll">
-                  <PresumedChartsPanel
-                    data={presumedStats}
-                    loading={presumedStatsLoading}
-                    error={presumedStatsErr}
-                    onRetry={() => void loadPresumedStats()}
-                  />
-                </div>
-              ) : csvPreviewLoading ? (
+              {csvPreviewLoading ? (
                 <p style={{ margin: "18px 0", color: "var(--ink-dim)" }}>Загрузка…</p>
               ) : csvPreviewErr ? (
                 <p style={{ margin: "18px 0", color: "var(--danger)" }}>{csvPreviewErr}</p>
@@ -1840,7 +2547,7 @@ export default function App() {
                 дашборда (если для аккаунта задана связь). При следующем съёме запись может снова появиться, если
                 человек всё ещё подписан.
               </p>
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <div className="subs-modal-actions">
                 <button
                   type="button"
                   className="subs-btn subs-btn--muted subs-btn--sm"
@@ -1887,8 +2594,6 @@ export default function App() {
           </div>
         )}
 
-        {mainTab === "subscribers" && (
-          <>
         {loadErr && <div className="subs-alert">{loadErr}</div>}
 
         <div className="subs-toolbar">
@@ -1968,63 +2673,59 @@ export default function App() {
 
         {overview && s && (
           <>
-            <div className="subs-metrics">
-              {(
-                [
-                  ["Аккаунтов", fmtNum(s.tracked_accounts_count), "accounts" as const, "Сортировка по нику"],
-                  ["Уникальных", fmtNum(s.unique_subscribers_total), "unique" as const, "Подписчики: по числу наших аккаунтов"],
-                  ["Приватных", fmtNum(s.private_subscribers_total), "private" as const, "Только закрытые профили"],
-                  ["С данными", fmtNum(s.accounts_with_audience_rows), "with_data" as const, "Аккаунты с подписчиками в базе"],
-                  ["Уже съём", fmtNum(s.accounts_synced_at_least_once), "synced" as const, "Аккаунты с датой последнего съёма"],
-                ] as const
-              ).map(([label, value, key, hint]) => {
-                const active = insightMetric === key;
-                const accent = key === "unique";
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    title={hint}
-                    aria-pressed={active}
-                    onClick={() => toggleInsightMetric(key)}
-                    className={`subs-metric subs-metric--btn${accent ? " subs-metric--accent" : ""}${active ? " subs-metric--active" : ""}`}
-                  >
-                    <div className="mono subs-metric-label">{label}</div>
-                    <div className="subs-metric-value tnum">{value}</div>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="subs-columns">
-              <section className="subs-col-left">
-                <div className="subs-panel">
-                  <div className="subs-panel-title">Собрать подписчиков</div>
-                  <p className="subs-panel-text">
-                    Съём через API дашборда и импорт в БД subs. Сначала «Синхр. с дашборда», затем авторизация площадок на
-                    вкладке «Авторизация».
-                  </p>
+            {subsMainView === "charts" ? (
+              <section className="subs-charts-main" aria-labelledby="subs-charts-main-title">
+                <div className="subs-charts-main-head">
+                  <div>
+                    <h2 id="subs-charts-main-title" className="mono" style={{ margin: 0, fontSize: 15, color: "var(--ink)" }}>
+                      Графики
+                      <span className="subs-muted" style={{ fontWeight: 400, fontSize: 13 }}>
+                        {" "}
+                        — по данным БД
+                      </span>
+                    </h2>
+                    {presumedStats?.generated_at ? (
+                      <p className="subs-muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                        Расчёт: {fmtDate(presumedStats.generated_at)}
+                        {presumedStats.member_row_count != null ? (
+                          <>
+                            {" "}
+                            · учтено строк: <span className="tnum">{presumedStats.member_row_count}</span>
+                          </>
+                        ) : null}
+                      </p>
+                    ) : (
+                      <p className="subs-muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                        Диаграммы по колонкам «Предполагаемый …» для всех подписчиков в текущих фильтрах площадки и профиля (как у «Скачать CSV»).
+                      </p>
+                    )}
+                  </div>
                   <button
                     type="button"
-                    disabled={bulkBusy || loading || !syncableAccounts.length}
-                    onClick={() => {
-                      if (!syncableAccounts.length) {
-                        showToast("Нет аккаунтов с привязкой к дашборду — сначала «Синхр. с дашборда»", true);
-                        return;
-                      }
-                      setBulkModalPlatforms([]);
-                      setBulkModalProfileKeys([]);
-                      setBulkSelectedIds(new Set(syncableAccounts.map((a) => a.id)));
-                      setBulkModalOpen(true);
-                    }}
-                    className="subs-btn-emphasis"
+                    className="subs-btn subs-btn--sm subs-btn--muted"
+                    disabled={presumedStatsLoading}
+                    onClick={() => void loadPresumedStats()}
                   >
-                    {bulkBusy ? "Сбор…" : `Собрать для всех… (${syncableAccounts.length})`}
+                    {presumedStatsLoading ? "…" : "↻ Обновить"}
                   </button>
                 </div>
-
-                <div>
-                  <div className="mono subs-section-head">Отслеживаемые аккаунты</div>
+                <div className="subs-charts-main-scroll subs-csv-preview-scroll subs-csv-charts-scroll">
+                  <PresumedChartsPanel
+                    data={presumedStats}
+                    loading={presumedStatsLoading}
+                    error={presumedStatsErr}
+                    onRetry={() => void loadPresumedStats()}
+                  />
+                </div>
+              </section>
+            ) : (
+              <>
+            <div className="subs-columns">
+              <section className="subs-col-left">
+                <div className="subs-col-panel">
+                  <div className="subs-col-panel-top">
+                    <div className="mono subs-section-head">Отслеживаемые аккаунты</div>
+                  </div>
                   <div className="subs-field-wrap">
                     <input
                       value={accountSearch}
@@ -2034,6 +2735,11 @@ export default function App() {
                     />
                     <span className="subs-field-icon">⌕</span>
                   </div>
+                  {accounts.length > 0 ? (
+                    <div className="subs-meta-line">
+                      Показано {pagedAccountsForTable.length} из {displayAccountsForTable.length}
+                    </div>
+                  ) : null}
                   {accounts.length === 0 ? (
                     <p className="subs-muted">Нет аккаунтов выбранных площадок в текущей выборке.</p>
                   ) : displayAccountsForTable.length === 0 ? (
@@ -2041,119 +2747,125 @@ export default function App() {
                       Нет аккаунтов по выбранной метрике. Повторный клик по той же карточке сверху снимает фильтр.
                     </p>
                   ) : (
-                    <div className="subs-scroll">
-                      <table className="subs-table">
-                        <thead>
-                          <tr>
-                            <th>Площадка</th>
-                            <th>Аккаунт</th>
-                            <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>В базе</th>
-                            <th>Съём</th>
-                            <th style={{ whiteSpace: "nowrap" }}>Действия</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {displayAccountsForTable.map((a) => (
-                            <tr key={a.id} className={membersFilterAccountId === a.id ? "subs-row-selected" : undefined}>
-                              <td style={{ color: "var(--ink-dim)", fontSize: 12 }}>{a.platform}</td>
-                              <td>
-                                <button
-                                  type="button"
-                                  className="subs-tracked-account-btn"
-                                  title={
-                                    membersFilterAccountId === a.id
-                                      ? "Показать всех подписчиков"
-                                      : "Показать только подписчиков этого аккаунта"
-                                  }
-                                  onClick={() =>
-                                    setMembersFilterAccountId((cur) => (cur === a.id ? null : a.id))
-                                  }
-                                >
-                                  <div style={{ fontWeight: 600 }}>@{a.username}</div>
-                                  {a.display_name ? (
-                                    <div style={{ fontSize: 11, color: "var(--ink-mute)" }}>{a.display_name}</div>
-                                  ) : null}
-                                </button>
-                              </td>
-                              <td style={{ textAlign: "right" }} className="tnum">
-                                {a.audience_count}
-                              </td>
-                              <td style={{ fontSize: 11, color: "var(--ink-dim)", whiteSpace: "nowrap" }}>
-                                {fmtDate(a.audience_last_synced_at)}
-                              </td>
-                              <td style={{ whiteSpace: "nowrap" }}>
-                                <button
-                                  type="button"
-                                  disabled={refreshingId === a.id || bulkBusy || !a.dashboard_account_id}
-                                  onClick={() => void runOne(a.id)}
-                                  className="subs-btn-ghost"
-                                  title={
-                                    !a.dashboard_account_id
-                                      ? "Сначала синхронизируйте с дашборда"
-                                      : undefined
-                                  }
-                                >
-                                  {refreshingId === a.id ? "Сбор…" : "Собрать"}
-                                </button>
-                              </td>
+                    <div className="subs-col-table-block">
+                      <div className="subs-scroll">
+                        <table className="subs-table">
+                          <thead>
+                            <tr>
+                              <th>Площадка</th>
+                              <th>Аккаунт</th>
+                              <th style={{ textAlign: "right", whiteSpace: "nowrap" }}>Подписчики в БД</th>
+                              <th>Съём</th>
+                              <th style={{ whiteSpace: "nowrap" }}>Действия</th>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                          </thead>
+                          <tbody>
+                            {pagedAccountsForTable.map((a) => (
+                              <tr key={a.id} className={membersFilterAccountId === a.id ? "subs-row-selected" : undefined}>
+                                <td style={{ color: "var(--ink-dim)", fontSize: 12 }}>{a.platform}</td>
+                                <td className="subs-table-name-col">
+                                  <div className="subs-table-name-stack">
+                                    <button
+                                      type="button"
+                                      className="subs-tracked-account-btn"
+                                      title={
+                                        membersFilterAccountId === a.id
+                                          ? "Показать всех подписчиков"
+                                          : "Показать только подписчиков этого аккаунта"
+                                      }
+                                      onClick={() =>
+                                        setMembersFilterAccountId((cur) => (cur === a.id ? null : a.id))
+                                      }
+                                    >
+                                      <div style={{ fontWeight: 600 }}>@{a.username}</div>
+                                      {a.display_name ? (
+                                        <div className="subs-table-name-secondary">{a.display_name}</div>
+                                      ) : null}
+                                    </button>
+                                  </div>
+                                </td>
+                                <td style={{ textAlign: "right" }} className="tnum">
+                                  {a.audience_count}
+                                </td>
+                                <td style={{ fontSize: 11, color: "var(--ink-dim)", whiteSpace: "nowrap" }}>
+                                  {fmtDate(a.audience_last_synced_at)}
+                                </td>
+                                <td className="subs-table-actions-col">
+                                  <div className="subs-table-actions-stack">
+                                    <button
+                                      type="button"
+                                      disabled={refreshingId === a.id || bulkBusy || !a.dashboard_account_id}
+                                      onClick={() => void runOne(a.id)}
+                                      className="subs-btn-ghost"
+                                      title={
+                                        !a.dashboard_account_id
+                                          ? "Сначала синхронизируйте с дашборда"
+                                          : undefined
+                                      }
+                                    >
+                                      {refreshingId === a.id ? "Сбор…" : "Собрать"}
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      {accountTablePages > 1 ? (
+                        <SubsPagerBar
+                          page={accountTablePage}
+                          totalPages={accountTablePages}
+                          onPageChange={setAccountTablePage}
+                        />
+                      ) : null}
                     </div>
                   )}
                 </div>
               </section>
 
               <section className="subs-col-right">
-                <div style={{ width: "100%" }}>
-                  <div
-                    style={{
-                      display: "flex",
-                      flexWrap: "wrap",
-                      alignItems: "center",
-                      justifyContent: "space-between",
-                      gap: 10,
-                      marginBottom: 8,
-                    }}
-                  >
-                    <div className="mono subs-section-head" style={{ marginBottom: 0 }}>
-                      {membersFilterAccountId != null
-                        ? `Подписчики: ${membersFilterAccountLabel ?? "…"}`
-                        : "Все подписчики (уникальные)"}
+                <div className="subs-col-panel">
+                  <div className="subs-col-panel-top">
+                    <div className="subs-members-toolbar">
+                      <div className="mono subs-section-head subs-section-head--toolbar">
+                        {membersFilterAccountId != null
+                          ? `Подписчики: ${membersFilterAccountLabel ?? "…"}`
+                          : "Все подписчики (уникальные)"}
+                      </div>
+                      <div className="subs-members-toolbar-actions">
+                        <button
+                          type="button"
+                          className="subs-btn subs-btn--sm subs-btn--muted"
+                          disabled={exportCsvBusy || membersLoading}
+                          title="Все подписчики по всем видимым отслеживаемым аккаунтам (площадка, профиль, поиск, карточки метрик). Выбранный слева аккаунт на состав файла не влияет."
+                          onClick={() => void exportMembersCsv()}
+                        >
+                          {exportCsvBusy ? "…" : "Скачать CSV"}
+                        </button>
+                        <button
+                          type="button"
+                          className="subs-btn subs-btn--sm subs-btn--muted"
+                          disabled={csvPreviewLoading}
+                          title="Таблица из последнего успешного экспорта CSV (после «Скачать CSV»)"
+                          onClick={() => void openLastCsvPreview()}
+                        >
+                          {csvPreviewLoading ? "…" : "Последний CSV"}
+                        </button>
+                      </div>
                     </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                      <button
-                        type="button"
-                        className="subs-btn subs-btn--sm subs-btn--muted"
-                        disabled={exportCsvBusy || membersLoading}
-                        title="Все строки по текущим фильтрам (площадка, профиль, поиск, аккаунт слева, карточки метрик)"
-                        onClick={() => void exportMembersCsv()}
-                      >
-                        {exportCsvBusy ? "…" : "Скачать CSV"}
-                      </button>
-                      <button
-                        type="button"
-                        className="subs-btn subs-btn--sm subs-btn--muted"
-                        disabled={csvPreviewLoading}
-                        title="Таблица из последнего успешного экспорта CSV (после «Скачать CSV»)"
-                        onClick={() => void openLastCsvPreview()}
-                      >
-                        {csvPreviewLoading ? "…" : "Последний CSV"}
-                      </button>
-                    </div>
+                    {membersFilterAccountId != null ? (
+                      <div className="subs-members-filter-reset">
+                        <button
+                          type="button"
+                          className="subs-btn subs-btn--sm subs-btn--muted"
+                          onClick={() => setMembersFilterAccountId(null)}
+                        >
+                          Сбросить фильтр
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
-                  {membersFilterAccountId != null ? (
-                    <div style={{ marginBottom: 10 }}>
-                      <button
-                        type="button"
-                        className="subs-btn subs-btn--sm subs-btn--muted"
-                        onClick={() => setMembersFilterAccountId(null)}
-                      >
-                        Сбросить фильтр
-                      </button>
-                    </div>
-                  ) : null}
                   <div className="subs-field-wrap">
                     <input
                       value={memberSearchInput}
@@ -2167,6 +2879,7 @@ export default function App() {
                   <div className="subs-meta-line">
                     {membersLoading ? "Загрузка списка…" : `Показано ${memberRows.length} из ${memberTotal}`}
                   </div>
+                  <div className="subs-col-table-block">
                   <div className="subs-scroll">
                     <table className="subs-table">
                       <thead>
@@ -2184,18 +2897,20 @@ export default function App() {
                           return (
                             <tr key={m.id}>
                               <td style={{ color: "var(--ink-dim)", fontSize: 12 }}>{m.platform}</td>
-                              <td>
-                                <button
-                                  type="button"
-                                  className="subs-member-name-btn"
-                                  onClick={() => setMemberCardId(m.id)}
-                                  title="Подробности"
-                                >
-                                  <span style={{ fontWeight: 600 }}>@{m.username}</span>
-                                </button>
-                                {m.display_name ? (
-                                  <div style={{ fontSize: 11, color: "var(--ink-mute)" }}>{m.display_name}</div>
-                                ) : null}
+                              <td className="subs-table-name-col">
+                                <div className="subs-table-name-stack">
+                                  <button
+                                    type="button"
+                                    className="subs-member-name-btn"
+                                    onClick={() => setMemberCardId(m.id)}
+                                    title="Подробности"
+                                  >
+                                    <span style={{ fontWeight: 600 }}>@{m.username}</span>
+                                  </button>
+                                  {m.display_name ? (
+                                    <div className="subs-table-name-secondary">{m.display_name}</div>
+                                  ) : null}
+                                </div>
                               </td>
                               <td style={{ color: "var(--ink-dim)", fontSize: 12 }}>{m.is_private ? "да" : "нет"}</td>
                               <td
@@ -2204,21 +2919,23 @@ export default function App() {
                               >
                                 {m.follows_tracked_accounts}
                               </td>
-                              <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                                {href ? (
-                                  <a href={href} target="_blank" rel="noreferrer" className="subs-link-out">
-                                    Профиль
-                                  </a>
-                                ) : null}
-                                {href ? <span style={{ display: "inline-block", width: 10 }} /> : null}
-                                <button
-                                  type="button"
-                                  className="subs-btn subs-btn--sm subs-btn--danger-text"
-                                  disabled={memberDeleteBusy}
-                                  onClick={() => setMemberDeleteTarget(m)}
-                                >
-                                  Удалить
-                                </button>
+                              <td className="subs-table-actions-col">
+                                <div className="subs-table-actions-stack">
+                                  {href ? (
+                                    <a href={href} target="_blank" rel="noreferrer" className="subs-link-out">
+                                      Профиль
+                                    </a>
+                                  ) : null}
+                                  {href ? <span style={{ display: "inline-block", width: 10 }} /> : null}
+                                  <button
+                                    type="button"
+                                    className="subs-btn subs-btn--sm subs-btn--danger-text"
+                                    disabled={memberDeleteBusy}
+                                    onClick={() => setMemberDeleteTarget(m)}
+                                  >
+                                    Удалить
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
@@ -2226,91 +2943,26 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
-                  {memberTotal > MEM_PAGE ? (
-                    <div className="subs-pager">
-                      <button
-                        type="button"
-                        disabled={memberPage <= 1 || membersLoading}
-                        onClick={() => setMemberPage((p) => Math.max(1, p - 1))}
-                        className="subs-btn subs-btn--sm subs-btn--muted"
-                        style={{ opacity: memberPage <= 1 ? 0.45 : 1 }}
-                      >
-                        Назад
-                      </button>
-                      <span className="mono tnum subs-mono-note">
-                        Стр. {memberPage} / {memberPages}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={memberPage >= memberPages || membersLoading}
-                        onClick={() => setMemberPage((p) => Math.min(memberPages, p + 1))}
-                        className="subs-btn subs-btn--sm subs-btn--muted"
-                        style={{ opacity: memberPage >= memberPages ? 0.45 : 1 }}
-                      >
-                        Вперёд
-                      </button>
-                    </div>
-                  ) : null}
+                  <SubsPagerBar
+                    page={memberPage}
+                    totalPages={memberPages}
+                    disabled={membersLoading}
+                    onPageChange={setMemberPage}
+                  />
+                  </div>
                 </div>
               </section>
             </div>
 
-            <div className="subs-top-block">
-              <div className="mono subs-section-head">Топ пересечений</div>
-              {top.length === 0 ? (
-                <p className="subs-muted">Пока пусто — сначала соберите аудиторию.</p>
-              ) : (
-                <div className="subs-scroll" style={{ maxHeight: "none" }}>
-                  <table className="subs-table">
-                    <thead>
-                      <tr>
-                        <th style={{ width: 36 }}>#</th>
-                        <th>Ник</th>
-                        <th>Прив.</th>
-                        <th style={{ textAlign: "right" }}>Наших акк.</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {top.slice(0, 20).map((m, idx) => {
-                        const href = profileUrl(m.platform, m.username);
-                        return (
-                          <tr key={m.id}>
-                            <td style={{ color: "var(--ink-mute)" }}>{idx + 1}</td>
-                            <td>
-                              <button
-                                type="button"
-                                className="subs-member-name-btn"
-                                onClick={() => setMemberCardId(m.id)}
-                                title="Подробности"
-                              >
-                                <span style={{ fontWeight: 600 }}>@{m.username}</span>
-                              </button>
-                            </td>
-                            <td style={{ color: "var(--ink-dim)" }}>{m.is_private ? "да" : "нет"}</td>
-                            <td style={{ textAlign: "right", fontWeight: 700 }} className="tnum subs-num-hot">
-                              {m.follows_tracked_accounts}
-                            </td>
-                            <td>
-                              {href ? (
-                                <a href={href} target="_blank" rel="noreferrer" className="subs-link-out">
-                                  Профиль
-                                </a>
-                              ) : null}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </>
-        )}
+            </>
+            )}
           </>
         )}
       </main>
+
+      {bulkRunDetailOpen ? (
+        <SubsBulkRunDetailOverlay detail={bulkRunDetail} onClose={() => setBulkRunDetailOpen(false)} />
+      ) : null}
     </div>
   );
 }

@@ -640,6 +640,7 @@ let TOTAL = {
   views: { value: 0, delta: 0, yesterdayDelta: null },
   likes: { value: 0, delta: 0, yesterdayDelta: null },
   posts: { value: 0, delta: 0, yesterdayDelta: null },
+  clicks: { value: 0, delta: 0, yesterdayDelta: null },
   accounts: 0,
 };
 
@@ -690,9 +691,14 @@ function _mapAccountApiRow(a) {
     views: Number(a.view_count || 0),
     dViews: Number(a.view_delta || 0),
     likes: Number(a.like_count || 0),
-    dLikes: Number(a.like_delta || 0),
+    dLikes:
+      String(a.platform || '').toLowerCase() === 'facebook' && !Number(a.like_count || 0)
+        ? 0
+        : Number(a.like_delta ?? 0),
     posts: Number(a.post_count || 0),
     dPosts: Number(a.post_delta || 0),
+    clicks: Number(a.link_click_count || 0),
+    dClicks: Number(a.link_click_delta ?? 0),
     unavailable: !!a.profile_unavailable,
     unavailableReason: String(a.profile_unavailable_reason || a.unavailable_reason || ''),
     isPlatformHidden: !!a.is_platform_hidden,
@@ -740,6 +746,11 @@ function _totalFromSummary(summary) {
       value: Number(summary.post_count || 0),
       delta: Number(summary.post_delta || 0),
       yesterdayDelta: _parseSummaryYesterdayDelta(summary.yesterday_post_delta),
+    },
+    clicks: {
+      value: Number(summary.link_click_count || 0),
+      delta: Number(summary.link_click_delta || 0),
+      yesterdayDelta: null,
     },
     accounts: Number(summary.account_count || 0),
   };
@@ -990,6 +1001,33 @@ function _apiTunnelDeadHint(err) {
   );
 }
 
+/** Текст `detail` из JSON-ответа DRF при ошибке (иначе пользователь видит только «HTTP xxx»). */
+function _formatApiDetailField(detail) {
+  if (detail == null) return '';
+  if (typeof detail === 'string') return detail.trim();
+  if (Array.isArray(detail)) {
+    return detail
+      .map((x) => (x && typeof x === 'object' ? JSON.stringify(x) : String(x)))
+      .filter(Boolean)
+      .join('; ');
+  }
+  if (typeof detail === 'object') return JSON.stringify(detail);
+  return String(detail);
+}
+
+async function _errorMessageFromResponse(res, fallback) {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (!ct.includes('application/json')) return fallback;
+  try {
+    const body = await res.json();
+    if (body && typeof body === 'object') {
+      const d = body.detail != null ? _formatApiDetailField(body.detail) : '';
+      if (d) return `${d} (HTTP ${res.status})`;
+    }
+  } catch (_) {}
+  return fallback;
+}
+
 async function _fetchJson(url) {
   const candidates = _apiBaseCandidates();
 
@@ -997,7 +1035,10 @@ async function _fetchJson(url) {
   for (const base of candidates) {
     try {
       const res = await fetch(`${base}${url}`, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      if (!res.ok) {
+        const fb = `HTTP ${res.status} for ${base}${url}`;
+        throw new Error(await _errorMessageFromResponse(res, fb));
+      }
       return res.json();
     } catch (err) {
       lastErr = err;
@@ -1026,7 +1067,10 @@ async function _postJson(url, payload) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload ?? {}),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      if (!res.ok) {
+        const fb = `HTTP ${res.status} for ${base}${url}`;
+        throw new Error(await _errorMessageFromResponse(res, fb));
+      }
       return res.status === 204 ? null : res.json();
     } catch (err) {
       lastErr = err;
@@ -1041,7 +1085,10 @@ async function _delete(url) {
   for (const base of candidates) {
     try {
       const res = await fetch(`${base}${url}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      if (!res.ok) {
+        const fb = `HTTP ${res.status} for ${base}${url}`;
+        throw new Error(await _errorMessageFromResponse(res, fb));
+      }
       return;
     } catch (err) {
       lastErr = err;
@@ -1060,7 +1107,10 @@ async function _patchJson(url, payload) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload ?? {}),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      if (!res.ok) {
+        const fb = `HTTP ${res.status} for ${base}${url}`;
+        throw new Error(await _errorMessageFromResponse(res, fb));
+      }
       return res.status === 204 ? null : res.json();
     } catch (err) {
       lastErr = err;
@@ -1338,6 +1388,91 @@ function _externalProfileUrl(platform, username) {
   }
 }
 
+/** Ссылка на публикацию: сначала post_url из БД, иначе собираем из platform + username + external_id. */
+function _postOpenUrl(platform, username, externalId, postUrl) {
+  const direct = String(postUrl || '').trim();
+  if (/^https?:\/\//i.test(direct)) return direct;
+  const u = _normUser(username);
+  const ext = String(externalId || '').trim();
+  if (!ext) return null;
+  switch (String(platform || '')) {
+    case 'tiktok':
+      return u ? `https://www.tiktok.com/@${encodeURIComponent(u)}/video/${encodeURIComponent(ext)}` : null;
+    case 'instagram':
+      if (/^[A-Za-z0-9_-]+$/.test(ext)) {
+        return `https://www.instagram.com/p/${encodeURIComponent(ext)}/`;
+      }
+      return null;
+    case 'youtube':
+      return `https://www.youtube.com/watch?v=${encodeURIComponent(ext)}`;
+    case 'telegram':
+      return u ? `https://t.me/${encodeURIComponent(u)}/${encodeURIComponent(ext)}` : null;
+    case 'x':
+      return u ? `https://x.com/${encodeURIComponent(u)}/status/${encodeURIComponent(ext)}` : null;
+    case 'threads':
+      return `https://www.threads.com/t/${encodeURIComponent(ext)}`;
+    case 'facebook':
+      if (ext.startsWith('http')) return ext;
+      return u ? `https://www.facebook.com/${encodeURIComponent(u)}/posts/${encodeURIComponent(ext)}` : null;
+    case 'reddit':
+      if (ext.startsWith('/')) return `https://www.reddit.com${ext}`;
+      if (ext.startsWith('http')) return ext;
+      return null;
+    case 'rumble':
+      if (ext.startsWith('http')) return ext;
+      return u ? `https://rumble.com/c/${encodeURIComponent(u)}` : null;
+    default:
+      return null;
+  }
+}
+
+function _openPostInNewTab(platform, username, externalId, postUrl) {
+  const href = _postOpenUrl(platform, username, externalId, postUrl);
+  if (!href) return false;
+  window.open(href, '_blank', 'noopener,noreferrer');
+  return true;
+}
+
+function _postScrapeNotFound(p) {
+  return !!(p && (p.scrape_not_found || p.missing_from_scrape_at));
+}
+
+/** Оранжевая точка-индикатор (как зелёная на кнопке «Автообновление»). */
+function ScrapeMissingDot({ size = 8, marginRight, style }) {
+  const color = '#fb923c';
+  return (
+    <span
+      aria-hidden
+      style={{
+        width: size,
+        height: size,
+        borderRadius: 999,
+        background: color,
+        display: 'inline-block',
+        flexShrink: 0,
+        marginRight: marginRight ?? 0,
+        boxShadow: `0 0 8px ${color}`,
+        ...style,
+      }}
+    />
+  );
+}
+
+async function _deleteJson(url) {
+  const candidates = _apiBaseCandidates();
+  let lastErr = null;
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}${url}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${base}${url}`);
+      return null;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to delete ${url}`)));
+}
+
 function AccountAvatar({ src, name, size = 36, borderColor = 'rgba(106,169,255,0.25)', fallbackBg = 'linear-gradient(135deg, #6aa9ff40, #ec489940)' }) {
   const [broken, setBroken] = React.useState(false);
   const showImage = !!src && !broken;
@@ -1412,6 +1547,226 @@ function DeltaGrowthIcon({ size = 17, color = 'currentColor' }) {
       />
       <path d="M17 8h3.5V11.5" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+function ClockIcon({ size = 18, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke={color} strokeWidth="2" />
+      <path d="M12 7v5l3 2" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function _sortScheduleTimes(times) {
+  return [...new Set(
+    (Array.isArray(times) ? times : [])
+      .map((t) => String(t).trim())
+      .filter((t) => /^\d{2}:\d{2}$/.test(t)),
+  )].sort((a, b) => {
+    const [ah, am] = a.split(':').map(Number);
+    const [bh, bm] = b.split(':').map(Number);
+    return (ah * 60 + am) - (bh * 60 + bm);
+  });
+}
+
+const DEFAULT_AUTO_REFRESH_TIMES = ['06:00', '12:00', '18:00', '00:00'];
+
+function _normalizeScheduleTimesOrDefault(times) {
+  const sorted = _sortScheduleTimes(times);
+  return sorted.length > 0 ? sorted : [...DEFAULT_AUTO_REFRESH_TIMES];
+}
+
+function ScheduleTimesEditorModal({ accent, customSlots, onClose, onApply }) {
+  const [draftTimes, setDraftTimes] = useStateMd(() => _sortScheduleTimes(customSlots));
+  const [newTime, setNewTime] = useStateMd('');
+
+  const addTime = () => {
+    const t = String(newTime || '').trim();
+    if (!/^\d{2}:\d{2}$/.test(t)) return;
+    if (DEFAULT_AUTO_REFRESH_TIMES.includes(t)) return;
+    setDraftTimes((prev) => _sortScheduleTimes([...prev, t]));
+    setNewTime('');
+  };
+
+  const removeTime = (timeValue) => {
+    const t = String(timeValue || '').trim();
+    setDraftTimes((prev) => {
+      const next = _sortScheduleTimes(prev.filter((x) => x !== t));
+      onApply(next);
+      return next;
+    });
+  };
+
+  const apply = () => {
+    onApply(_sortScheduleTimes(draftTimes));
+    onClose();
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 110,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0,0,0,0.72)',
+        padding: 16,
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        role="dialog"
+        aria-modal
+        aria-labelledby="schedule-times-editor-title"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: '100%',
+          maxWidth: 400,
+          borderRadius: 16,
+          border: '1px solid var(--line)',
+          background: 'rgba(18,20,28,0.98)',
+          padding: 20,
+          boxShadow: '0 24px 56px rgba(0,0,0,0.65)',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <span style={{
+            width: 36,
+            height: 36,
+            borderRadius: 999,
+            border: '1px solid var(--line)',
+            background: 'rgba(255,255,255,0.04)',
+            display: 'grid',
+            placeItems: 'center',
+            color: 'var(--ink-dim)',
+          }}
+          >
+            <ClockIcon size={18} />
+          </span>
+          <div>
+            <h3 id="schedule-times-editor-title" style={{ margin: 0, fontSize: 17, color: '#fff' }}>
+              Время автообновления
+            </h3>
+            <p style={{ margin: '6px 0 0', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.45 }}>
+              Здесь только дополнительные слоты (не 06:00 / 12:00 / 18:00 / 00:00). «Удалить» сразу убирает время из списка.
+            </p>
+          </div>
+        </div>
+
+        {draftTimes.length === 0 ? (
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--ink-mute)' }}>Нет слотов — при сохранении подставятся значения по умолчанию.</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12, maxHeight: 220, overflowY: 'auto' }}>
+            {draftTimes.map((t) => (
+              <div
+                key={t}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 10,
+                  padding: '10px 12px',
+                  borderRadius: 10,
+                  border: '1px solid var(--line)',
+                  background: 'rgba(255,255,255,0.02)',
+                }}
+              >
+                <span className="mono" style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>{t}</span>
+                <button
+                  type="button"
+                  onClick={() => removeTime(t)}
+                  title={`Удалить ${t}`}
+                  style={{
+                    padding: '6px 10px',
+                    borderRadius: 8,
+                    border: '1px solid rgba(239,68,68,0.45)',
+                    background: 'rgba(239,68,68,0.12)',
+                    color: '#fca5a5',
+                    cursor: 'pointer',
+                    fontSize: 12,
+                  }}
+                >
+                  Удалить
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+          <input
+            type="time"
+            value={newTime}
+            onChange={(e) => setNewTime(e.target.value)}
+            style={{
+              flex: 1,
+              padding: '11px 14px',
+              borderRadius: 10,
+              background: 'rgba(255,255,255,0.025)',
+              border: '1px solid var(--line-2)',
+              color: 'var(--ink)',
+              fontSize: 13,
+              fontFamily: 'JetBrains Mono, monospace',
+            }}
+          />
+          <button
+            type="button"
+            onClick={addTime}
+            style={{
+              padding: '11px 14px',
+              borderRadius: 10,
+              border: '1px solid var(--line)',
+              background: 'rgba(255,255,255,0.03)',
+              color: 'var(--ink)',
+              cursor: 'pointer',
+              fontSize: 13,
+            }}
+          >
+            Добавить
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              flex: 1,
+              padding: 12,
+              borderRadius: 10,
+              border: '1px solid var(--line)',
+              background: 'transparent',
+              color: 'var(--ink-dim)',
+              cursor: 'pointer',
+              fontSize: 14,
+            }}
+          >
+            Отмена
+          </button>
+          <button
+            type="button"
+            onClick={apply}
+            style={{
+              flex: 1,
+              padding: 12,
+              borderRadius: 10,
+              border: 'none',
+              background: accent,
+              color: '#000',
+              fontWeight: 600,
+              cursor: 'pointer',
+              fontSize: 14,
+            }}
+          >
+            Применить
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1658,7 +2013,7 @@ async function loadDashboardData() {
     const parts = [
       'Не удалось получить данные с backend API (все запросы завершились ошибкой).',
       '1) Запустите Django из папки backend: python manage.py runserver (порт 8000).',
-      '2) trycloudflare: из папки new_frontend выполните npm run tunnel — нужен cloudflared.new-frontend.yml (маршруты ^/api → :8000, остальное → :5174). Команда только на 5174 API не отдаёт.',
+      '2) trycloudflare: из папки new_frontend выполните npm run tunnel — конфиг cloudflared.5174.yml (маршруты ^/api → :8000, остальное → :5174). Команда только на 5174 API не отдаёт.',
       '3) Если API на другом origin: localStorage.setItem("new_frontend_api_base", "https://…").',
     ];
     const hintTry = /trycloudflare\.com/i.test(window.location.hostname || '');
@@ -2947,80 +3302,109 @@ function BigChart({ accent, series = [], isMobile = false }) {
 }
 
 // ── SCENE 3: Top accounts leaderboard ──────────────────────
-function SceneTop({ accent }) {
-  const top = [...ACCOUNTS].sort((a, b) => Number(b.dViews || 0) - Number(a.dViews || 0)).slice(0, 8);
-  const max = top.length > 0 ? Math.max(1, Number(top[0].dViews || 0)) : 1;
-  const totalAccounts = Math.max(1, Number(TOTAL.accounts || ACCOUNTS.length || 1));
-  const maxPlatformAccounts = Math.max(1, ...(PLATFORMS || []).map((p) => Number(p.accounts || 0)));
+const TV_CLICKS_COLOR = '#a78bfa';
+
+function TvTopLeaderboardRow({ a, i, rankAccent, maxDelta, totalValue, deltaValue, deltaColor, barMetric }) {
+  const barPct = maxDelta > 0 ? (Number(barMetric || 0) / maxDelta) * 100 : 0;
+  const meta = PLATFORM_META[a.platform] || { color: '#9ca3af', label: a.platform || 'Unknown' };
+  const prof = PROFILE_META[a.profile] || { color: '#525a70', label: 'Без профиля' };
+  const deltaNum = Number(deltaValue || 0);
   return (
-    <div style={{ width: '100%', height: '100%', padding: '0 56px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32 }}>
-      {/* Leaderboard list */}
-      <div>
-        <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 18 }}>TOP MOVERS · 24H · BY VIEW DELTA</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {top.map((a, i) => {
-            const w = ((Number(a.dViews || 0) / max) * 100);
-            const meta = PLATFORM_META[a.platform] || { color: '#9ca3af', label: a.platform || 'Unknown' };
-            const prof = PROFILE_META[a.profile] || { color: '#525a70', label: 'Без профиля' };
-            return (
-              <div key={a.id || `${a.platform}:${a.username || a.handle}`} style={{
-                position: 'relative', padding: '14px 20px', borderRadius: 14,
-                background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)',
-                overflow: 'hidden',
-              }}>
-                <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(90deg, ${prof.color}22, transparent ${Math.min(95, w + 20)}%)`, opacity: 0.7 }} />
-                <div style={{ position: 'relative', display: 'grid', gridTemplateColumns: '36px 52px 1fr auto auto', alignItems: 'center', gap: 16 }}>
-                  <div className="mono tnum" style={{ fontSize: 22, fontWeight: 700, color: i < 3 ? accent : 'rgba(255,255,255,0.45)' }}>{String(i + 1).padStart(2, '0')}</div>
-                  <AccountAvatar
-                    src={a.avatarUrl}
-                    name={a.name}
-                    size={44}
-                    borderColor={`${meta.color}55`}
-                    fallbackBg={`linear-gradient(135deg, ${meta.color}55, ${prof.color}40)`}
-                  />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 19, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{_tvBroadcastAccountTitle(a)}</div>
-                    <div style={{ display: 'flex', gap: 8, marginTop: 4, alignItems: 'center' }}>
-                      <span className="mono" style={{ fontSize: 11, color: meta.color, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{meta.label}</span>
-                      <span style={{ width: 3, height: 3, borderRadius: 999, background: 'rgba(255,255,255,0.3)' }} />
-                      <span className="mono" style={{ fontSize: 11, color: prof.color, letterSpacing: '0.1em' }}>{prof.label}</span>
-                    </div>
-                  </div>
-                  <div className="mono tnum" style={{ fontSize: 18, color: 'rgba(255,255,255,0.65)', textAlign: 'right', minWidth: 64 }}>
-                    {fmt(a.views)}
-                  </div>
-                  <div className="mono tnum" style={{ fontSize: 22, color: '#4ade80', fontWeight: 600, textAlign: 'right', minWidth: 90 }}>
-                    {_hasDelta(a.dViews) ? `+${fmt(a.dViews)}` : ''}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
+    <div style={{
+      position: 'relative', padding: '11px 16px', borderRadius: 14,
+      background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.05)', overflow: 'hidden',
+    }}>
+      <div style={{ position: 'absolute', inset: 0, background: `linear-gradient(90deg, ${prof.color}22, transparent ${Math.min(95, barPct + 20)}%)`, opacity: 0.7 }} />
+      <div style={{ position: 'relative', display: 'grid', gridTemplateColumns: '32px 44px 1fr auto auto', alignItems: 'center', gap: 12 }}>
+        <div className="mono tnum" style={{ fontSize: 20, fontWeight: 700, color: i < 3 ? rankAccent : 'rgba(255,255,255,0.45)' }}>{String(i + 1).padStart(2, '0')}</div>
+        <AccountAvatar src={a.avatarUrl} name={a.name} size={40} borderColor={`${meta.color}55`} fallbackBg={`linear-gradient(135deg, ${meta.color}55, ${prof.color}40)`} />
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 17, fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{_tvBroadcastAccountTitle(a)}</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 3, alignItems: 'center' }}>
+            <span className="mono" style={{ fontSize: 10, color: meta.color, letterSpacing: '0.1em', textTransform: 'uppercase' }}>{meta.label}</span>
+            <span style={{ width: 3, height: 3, borderRadius: 999, background: 'rgba(255,255,255,0.3)' }} />
+            <span className="mono" style={{ fontSize: 10, color: prof.color, letterSpacing: '0.1em' }}>{prof.label}</span>
+          </div>
+        </div>
+        <div className="mono tnum" style={{ fontSize: 16, color: 'rgba(255,255,255,0.65)', textAlign: 'right', minWidth: 56 }}>{fmt(totalValue)}</div>
+        <div className="mono tnum" style={{ fontSize: 20, color: deltaColor, fontWeight: 600, textAlign: 'right', minWidth: 80 }}>
+          {_hasDelta(deltaNum) ? `${deltaNum >= 0 ? '+' : ''}${fmt(deltaNum)}` : '0'}
         </div>
       </div>
+    </div>
+  );
+}
 
-      {/* Right column: distribution + profiles */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 28 }}>
-          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 18 }}>BY PROFILE</div>
-          <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center' }}>
-            {PROFILES.map(p => (
+function TvTopLeaderboardBlock({ title, rows, rankAccent, maxDelta, getTotal, getDelta, getBarMetric, deltaColor }) {
+  return (
+    <div>
+      <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 12 }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {rows.map((a, i) => (
+          <TvTopLeaderboardRow
+            key={`${a.id || a.handle}-${title}`}
+            a={a}
+            i={i}
+            rankAccent={rankAccent}
+            maxDelta={maxDelta}
+            totalValue={getTotal(a)}
+            deltaValue={getDelta(a)}
+            deltaColor={deltaColor}
+            barMetric={getBarMetric(a)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function _tvClicksStackParts(clicks, dClicks) {
+  const total = Math.max(0, Number(clicks || 0));
+  if (total <= 0) return null;
+  const delta = Number(dClicks || 0);
+  if (delta <= 0) return { total, base: total, growth: 0 };
+  const growth = Math.min(delta, total);
+  return { total, base: total - growth, growth };
+}
+
+function SceneTop({ accent }) {
+  const topViews = [...ACCOUNTS].sort((a, b) => Number(b.dViews || 0) - Number(a.dViews || 0)).slice(0, 5);
+  const topClicks = [...ACCOUNTS].sort((a, b) => Number(b.dClicks || 0) - Number(a.dClicks || 0)).slice(0, 5);
+  const maxViews = topViews.length > 0 ? Math.max(1, Number(topViews[0].dViews || 0)) : 1;
+  const maxClicks = topClicks.length > 0 ? Math.max(1, Number(topClicks[0].dClicks || 0)) : 1;
+  const totalAccounts = Math.max(1, Number(TOTAL.accounts || ACCOUNTS.length || 1));
+  const profilesVisible = (PROFILES || []).filter((p) => Number(p.accounts || 0) > 0);
+  const maxPlatformAccounts = Math.max(1, ...(PLATFORMS || []).map((p) => Number(p.accounts || 0)));
+  const platformClicks = (PLATFORMS || []).map((p) => {
+    const accs = ACCOUNTS.filter((a) => a.platform === p.id);
+    return { id: p.id, label: p.label, color: p.color, clicks: accs.reduce((s, a) => s + Number(a.clicks || 0), 0), dClicks: accs.reduce((s, a) => s + Number(a.dClicks || 0), 0) };
+  }).filter((p) => Number(p.clicks || 0) > 0).sort((a, b) => Number(b.clicks || 0) - Number(a.clicks || 0));
+  const maxPlatformClicks = platformClicks.length > 0 ? Math.max(1, ...platformClicks.map((p) => Number(p.clicks || 0))) : 1;
+
+  return (
+    <div style={{ width: '100%', height: '100%', padding: '0 56px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28, minHeight: 0 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 18, minHeight: 0, justifyContent: 'center' }}>
+        <TvTopLeaderboardBlock title="TOP MOVERS · 24H · BY VIEW DELTA" rows={topViews} rankAccent={accent} maxDelta={maxViews} getTotal={(a) => a.views} getDelta={(a) => a.dViews} getBarMetric={(a) => a.dViews} deltaColor="#4ade80" />
+        <TvTopLeaderboardBlock title="TOP CLICKS · 24H · BY LINK DELTA" rows={topClicks} rankAccent={TV_CLICKS_COLOR} maxDelta={maxClicks} getTotal={(a) => a.clicks} getDelta={(a) => a.dClicks} getBarMetric={(a) => a.dClicks} deltaColor={TV_CLICKS_COLOR} />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16, minHeight: 0, justifyContent: 'center' }}>
+        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 22 }}>
+          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 14 }}>BY PROFILE</div>
+          <div style={{ display: 'flex', justifyContent: 'space-around', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+            {profilesVisible.length === 0 ? (
+              <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.08em' }}>Нет аккаунтов по профилям</div>
+            ) : profilesVisible.map((p) => (
               <div key={p.id} style={{ textAlign: 'center' }}>
-                <RadialDial
-                  value={Math.min(1, Math.max(0, Number(p.accounts || 0) / totalAccounts))}
-                  size={140}
-                  color={p.color}
-                  label={p.accounts}
-                  sub={p.label}
-                />
+                <RadialDial value={Math.min(1, Math.max(0, Number(p.accounts || 0) / totalAccounts))} size={120} color={p.color} label={p.accounts} sub={p.label} />
               </div>
             ))}
           </div>
         </div>
-        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 28, flex: 1 }}>
-          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 18 }}>PLATFORM DISTRIBUTION</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {PLATFORMS.map(p => (
+        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 22 }}>
+          <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 14 }}>PLATFORM DISTRIBUTION</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {PLATFORMS.map((p) => (
               <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 60px', alignItems: 'center', gap: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color }} />
@@ -3032,6 +3416,52 @@ function SceneTop({ accent }) {
                 <div className="mono tnum" style={{ fontSize: 14, color: 'rgba(255,255,255,0.6)', textAlign: 'right' }}>{p.accounts}</div>
               </div>
             ))}
+          </div>
+        </div>
+        <div style={{ borderRadius: 20, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.015)', padding: 22 }}>
+          <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, marginBottom: 10 }}>
+            <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em' }}>CLICKS BY PLATFORM</div>
+            <div className="mono" style={{ fontSize: 9, color: 'rgba(255,255,255,0.32)', letterSpacing: '0.12em' }}>+24Ч</div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {platformClicks.length === 0 ? (
+              <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.08em' }}>Нет переходов по платформам</div>
+            ) : platformClicks.map((p) => {
+              const parts = _tvClicksStackParts(p.clicks, p.dClicks);
+              const barW = parts ? Math.min(100, (parts.total / maxPlatformClicks) * 100) : 0;
+              const basePct = parts && parts.total > 0 ? (parts.base / parts.total) * 100 : 100;
+              const growthPct = parts && parts.total > 0 ? (parts.growth / parts.total) * 100 : 0;
+              const deltaNum = Number(p.dClicks || 0);
+              const deltaColor = deltaNum < 0 ? '#f87171' : p.color;
+              return (
+                <div key={`clicks-${p.id}`} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 72px', alignItems: 'center', gap: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: 2, background: p.color }} />
+                    <span style={{ fontSize: 14 }}>{p.label}</span>
+                  </div>
+                  <div style={{ height: 8, borderRadius: 2, background: 'rgba(255,255,255,0.04)', overflow: 'hidden', position: 'relative' }}>
+                    {parts && (
+                      <div style={{
+                        position: 'absolute', left: 0, top: 0, bottom: 0, width: `${barW}%`,
+                        display: 'flex', flexDirection: 'row', borderRadius: 2, overflow: 'hidden',
+                        minWidth: parts.growth > 0 && parts.base > 0 ? 4 : 0,
+                      }}>
+                        {parts.base > 0 && (
+                          <div style={{ flex: `0 0 ${basePct}%`, background: p.color, opacity: 0.38, minWidth: parts.growth > 0 ? 2 : 0 }} />
+                        )}
+                        {parts.growth > 0 && (
+                          <div style={{ flex: `0 0 ${growthPct}%`, background: p.color, opacity: 0.92, minWidth: 2 }} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <div className="mono tnum" style={{ fontSize: 13, color: 'rgba(255,255,255,0.75)', textAlign: 'right', lineHeight: 1.25 }}>
+                    <div>{fmt(p.clicks)}</div>
+                    <div style={{ fontSize: 11, color: deltaColor }}>{_hasDelta(deltaNum) ? `${deltaNum >= 0 ? '+' : ''}${fmt(deltaNum)}` : '+0'}</div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
@@ -3388,11 +3818,13 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
         if (sortKey === 'followers') return _toSortableNumber(a.dFollowers);
         if (sortKey === 'likes') return _toSortableNumber(a.dLikes);
         if (sortKey === 'posts') return _toSortableNumber(a.dPosts);
+        if (sortKey === 'clicks') return _toSortableNumber(a.dClicks);
         return _toSortableNumber(a.dViews);
       }
       if (sortKey === 'followers') return _toSortableNumber(a.followers);
       if (sortKey === 'likes') return _toSortableNumber(a.likes);
       if (sortKey === 'posts') return _toSortableNumber(a.posts);
+      if (sortKey === 'clicks') return _toSortableNumber(a.clicks);
       return _toSortableNumber(a.views);
     };
     rows.sort((a, b) => {
@@ -3564,13 +3996,14 @@ function _topBarStatsFromTotal() {
     views: { value: TOTAL.views.value, delta: TOTAL.views.delta },
     likes: { value: TOTAL.likes.value, delta: TOTAL.likes.delta },
     posts: { value: TOTAL.posts.value, delta: TOTAL.posts.delta },
+    clicks: { value: TOTAL.clicks.value, delta: TOTAL.clicks.delta },
   };
 }
 
 /** Суммы по списку аккаунтов (как на старом фронте) — для шапки при активных фильтрах. */
 function _aggregateBarStatsFromAccountRows(rows) {
   const z = { value: 0, delta: 0 };
-  const out = { followers: { ...z }, views: { ...z }, likes: { ...z }, posts: { ...z }, count: 0 };
+  const out = { followers: { ...z }, views: { ...z }, likes: { ...z }, posts: { ...z }, clicks: { ...z }, count: 0 };
   if (!Array.isArray(rows) || rows.length === 0) return out;
   out.count = rows.length;
   for (const a of rows) {
@@ -3578,10 +4011,12 @@ function _aggregateBarStatsFromAccountRows(rows) {
     out.views.value += Number(a.views || 0);
     out.likes.value += Number(a.likes || 0);
     out.posts.value += Number(a.posts || 0);
+    out.clicks.value += Number(a.clicks || 0);
     out.followers.delta += Number(a.dFollowers ?? 0);
     out.views.delta += Number(a.dViews ?? 0);
     out.likes.delta += Number(a.dLikes ?? 0);
     out.posts.delta += Number(a.dPosts ?? 0);
+    out.clicks.delta += Number(a.dClicks ?? 0);
   }
   return out;
 }
@@ -3635,6 +4070,7 @@ function TopBar({
     { label: isMobile ? 'ПРОСМ' : 'ПРОСМОТРЫ',  value: s.views.value,     delta: s.views.delta,     color: '#ec4899' },
     { label: isMobile ? 'ЛАЙК' : 'ЛАЙКИ',      value: s.likes.value,     delta: s.likes.delta,     color: '#f59e0b' },
     { label: isMobile ? 'ПУБЛ' : 'ПУБЛИКАЦИИ', value: s.posts.value,     delta: s.posts.delta,     color: accent },
+    { label: isMobile ? 'ПЕР' : 'ПЕРЕХОДЫ',   value: s.clicks.value,    delta: s.clicks.delta,    color: '#a78bfa' },
   ];
   return (
     <header style={{
@@ -3652,7 +4088,7 @@ function TopBar({
       </div>
       <div style={{
         display: isMobile ? 'grid' : 'flex',
-        gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : undefined,
+        gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(5, minmax(0, 1fr))',
         alignItems: 'center',
         gap: isMobile ? 8 : 8,
         overflow: 'visible',
@@ -4100,6 +4536,7 @@ function FilterBar({
                 { key: 'views', short: 'Просм', title: 'Просмотры' },
                 { key: 'likes', short: 'Лайки', title: 'Лайки' },
                 { key: 'posts', short: 'Публ', title: 'Публикации' },
+                { key: 'clicks', short: 'Пер', title: 'Переходы' },
               ].map(({ key, short, title }) => {
                 const active = sortKey === key;
                 const mark = active ? (sortOrder === 'desc' ? ' ↓' : ' ↑') : '';
@@ -4131,7 +4568,7 @@ function FilterBar({
   );
 }
 
-function Pill({ active, onClick, children, dot, title }) {
+function Pill({ active, onClick, children, dot, title, style: styleProp }) {
   const isMobile = useIsMobile(980);
   return (
     <button type="button" title={title} onClick={onClick} style={{
@@ -4142,6 +4579,7 @@ function Pill({ active, onClick, children, dot, title }) {
       border: '1px solid ' + (active ? '#fff' : 'var(--line)'),
       fontSize: isMobile ? 12 : 13, fontWeight: active ? 600 : 500,
       display: 'inline-flex', alignItems: 'center', gap: 6,
+      ...styleProp,
     }}>
       {dot && <span style={{ width: 6, height: 6, borderRadius: 999, background: dot }} />}
       {children}
@@ -4183,7 +4621,7 @@ function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOr
   return (
     <div style={{ borderRadius: 14, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', overflow: 'hidden' }}>
       <div style={{
-        display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 1.1fr 1.2fr',
+        display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 0.8fr 1.1fr 1.2fr',
         padding: '10px 20px', gap: 16, borderBottom: '1px solid var(--line)',
         fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.18em', textTransform: 'uppercase',
         fontFamily: 'JetBrains Mono, monospace',
@@ -4198,6 +4636,7 @@ function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOr
         {metricBtn('views', 'Просмотры')}
         {metricBtn('likes', 'Лайки')}
         {metricBtn('posts', 'Публ.')}
+        {metricBtn('clicks', 'Переходы')}
         <div>Обновлён</div>
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, minWidth: 0 }}>
           <span style={{ letterSpacing: '0.18em', textTransform: 'uppercase', fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -4241,7 +4680,7 @@ function AccountRow({ a, i, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId 
   const profileMeta = PROFILE_META[a.profile] || { color: '#525a70', label: 'Без профиля' };
   return (
     <div style={{
-      display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 1.1fr 1.2fr',
+      display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 0.8fr 1fr 0.8fr 0.8fr 0.8fr 1.1fr 1.2fr',
       padding: '16px 20px', gap: 16, alignItems: 'center',
       borderBottom: i < ACCOUNTS.length - 1 ? '1px solid var(--line)' : 'none',
       fontSize: 14,
@@ -4295,6 +4734,14 @@ function AccountRow({ a, i, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId 
           </div>
         )}
       </div>
+      <div style={{ textAlign: 'right' }} title="Переходы по короткой ссылке из bio (Links)">
+        <div className="mono tnum">{fmt(a.clicks)}</div>
+        {_hasDelta(a.dClicks) && (
+          <div className="mono tnum" style={{ fontSize: 12, color: _deltaColor(a.dClicks), textShadow: _deltaGlow(a.dClicks) }}>
+            {a.dClicks >= 0 ? '+' : ''}{fmt(a.dClicks)}
+          </div>
+        )}
+      </div>
       <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{a.updated}</div>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
         <button onClick={() => onRefreshOne?.(a.id)} disabled={rowBusyId === a.id} style={{ minHeight: isMobile ? 40 : undefined, padding: isMobile ? '8px 10px' : '6px 10px', borderRadius: 8, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: 'pointer', fontSize: 12, opacity: rowBusyId === a.id ? 0.6 : 1 }}>
@@ -4342,8 +4789,8 @@ function AccountsCards({ rows, accent, onOpenAccount, onRefreshOne, onDeleteOne,
                 <AvailabilityBadge unavailable={a.unavailable} reason={a.unavailableReason} />
               </div>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
-              {[['Followers', a.followers, a.dFollowers, '#4ade80'], ['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent]].map(([l, v, d, c]) => (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(0, 1fr))', gap: 10 }}>
+              {[['Followers', a.followers, a.dFollowers, '#4ade80'], ['Views', a.views, a.dViews, '#ec4899'], ['Likes', a.likes, a.dLikes, '#f59e0b'], ['Posts', a.posts, a.dPosts, accent], ['Clicks', a.clicks, a.dClicks, '#a78bfa']].map(([l, v, d, c]) => (
                 <div key={l}>
                   <div className="mono" style={{ fontSize: 9, color: 'var(--ink-mute)', letterSpacing: '0.18em' }}>{l.toUpperCase()}</div>
                   <div className="mono tnum" style={{ fontSize: 17, fontWeight: 600 }}>{fmt(v)}</div>
@@ -4384,6 +4831,8 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
   const [softLoading, setSoftLoading] = useStateDetail(false);
   const [analyticsPosts, setAnalyticsPosts] = useStateDetail([]);
   const [postThumbState, setPostThumbState] = useStateDetail({});
+  const [postMissingModal, setPostMissingModal] = useStateDetail(null);
+  const [postDeleteBusy, setPostDeleteBusy] = useStateDetail(false);
 
   const load = async ({ silent = false } = {}) => {
     if (silent) setSoftLoading(true);
@@ -4394,7 +4843,13 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
         _fetchJson(`/api/accounts/${accountId}/posts/`),
       ]);
       setAccount(a);
-      setPosts(Array.isArray(p) ? p : []);
+      const postList = Array.isArray(p) ? p : [];
+      setPosts(postList);
+      setPostMissingModal((prev) => {
+        if (!prev) return null;
+        const updated = postList.find((x) => x.id === prev.id);
+        return updated && _postScrapeNotFound(updated) ? prev : null;
+      });
     } catch (e) {
       await uiAlert(`Не удалось загрузить аккаунт: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
@@ -4404,6 +4859,32 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
   };
 
   useEffectDetail(() => { void load(); }, [accountId]);
+
+  const deleteMissingPost = async (post) => {
+    if (!post?.id) return;
+    if (!(await uiConfirm('Удалить публикацию из дашборда? Действие необратимо.', 'Подтверждение'))) return;
+    setPostDeleteBusy(true);
+    try {
+      await _deleteJson(`/api/accounts/${accountId}/posts/${post.id}/`);
+      setPostMissingModal(null);
+      await load({ silent: true });
+      if (typeof onDataChanged === 'function') onDataChanged();
+    } catch (e) {
+      await uiAlert(`Не удалось удалить: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    } finally {
+      setPostDeleteBusy(false);
+    }
+  };
+
+  const openAccountOnPlatform = () => {
+    if (!account) return;
+    const href = _externalProfileUrl(account.platform, account.username);
+    if (!href) {
+      void uiAlert('Не удалось собрать ссылку на профиль.', 'Аккаунт');
+      return;
+    }
+    window.open(href, '_blank', 'noopener,noreferrer');
+  };
 
   useEffectDetail(() => {
     let cancelled = false;
@@ -4505,12 +4986,13 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4, minmax(120px, 1fr))', gap: 10, marginBottom: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(5, minmax(100px, 1fr))', gap: 10, marginBottom: 16 }}>
         {[
           ['Подписчики', Number(account.follower_count || 0), Number(account.follower_delta || 0)],
           ['Просмотры', Number(account.view_count || 0), Number(account.view_delta || 0)],
           ['Лайки', Number(account.like_count || 0), Number(account.like_delta || 0)],
           ['Публикации', Number(account.post_count || 0), Number(account.post_delta || 0)],
+          ['Переходы', Number(account.link_click_count || 0), Number(account.link_click_delta || 0)],
         ].map(([label, val, delta]) => (
           <div key={label} style={{ border: '1px solid var(--line)', borderRadius: 12, background: 'rgba(255,255,255,0.02)', padding: 14 }}>
             <div style={{ fontSize: 13, color: 'var(--ink-mute)' }}>{label}</div>
@@ -4537,9 +5019,58 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
             {posts.map((p, idx) => {
               const thumbKey = String(p.id || p.external_id || p.post_url || idx);
               const thumbState = postThumbState[thumbKey] || 'idle';
+              const postHref = _postOpenUrl(account.platform, account.username, p.external_id, p.post_url);
+              const scrapeMissing = _postScrapeNotFound(p);
               return (
-              <div key={thumbKey} style={{ border: '1px solid var(--line)', borderRadius: 12, overflow: 'hidden', background: 'rgba(255,255,255,0.02)' }}>
+              <div
+                key={thumbKey}
+                role={postHref ? 'link' : undefined}
+                tabIndex={postHref ? 0 : undefined}
+                title={postHref ? 'Открыть публикацию на площадке' : undefined}
+                onClick={() => { if (postHref) _openPostInNewTab(account.platform, account.username, p.external_id, p.post_url); }}
+                onKeyDown={(e) => {
+                  if (!postHref) return;
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    _openPostInNewTab(account.platform, account.username, p.external_id, p.post_url);
+                  }
+                }}
+                style={{
+                  border: scrapeMissing ? '1px solid rgba(251,146,60,0.45)' : '1px solid var(--line)',
+                  borderRadius: 12,
+                  overflow: 'hidden',
+                  background: scrapeMissing ? 'rgba(251,146,60,0.06)' : 'rgba(255,255,255,0.02)',
+                  cursor: postHref ? 'pointer' : 'default',
+                }}
+              >
                 <div style={{ position: 'relative', height: 160, background: 'rgba(15,23,42,0.7)' }}>
+                  {scrapeMissing ? (
+                    <button
+                      type="button"
+                      title="Не найден при обновлении — нажмите для действий"
+                      aria-label="Публикация не найдена при обновлении"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setPostMissingModal(p);
+                      }}
+                      style={{
+                        position: 'absolute',
+                        top: 6,
+                        right: 6,
+                        zIndex: 3,
+                        padding: 6,
+                        border: 'none',
+                        background: 'transparent',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <ScrapeMissingDot />
+                    </button>
+                  ) : null}
                   {!!p.thumbnail_url && (
                     <img
                       src={p.thumbnail_url}
@@ -4586,33 +5117,188 @@ function AccountDetailScreen({ accountId, onBack, onDataChanged }) {
           <div style={{ color: 'var(--ink-mute)' }}>Нет данных аналитики.</div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {analyticsPosts.map((p, i) => (
-              <div key={p.id || i} style={{ border: '1px solid var(--line)', borderRadius: 12, background: 'rgba(255,255,255,0.02)', padding: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            {analyticsPosts.map((p, i) => {
+              const pl = p?.account?.platform || account.platform;
+              const un = p?.account?.username || account.username;
+              const postHref = _postOpenUrl(pl, un, p.external_id, p.post_url);
+              const scrapeMissing = _postScrapeNotFound(p);
+              return (
+              <div
+                key={p.id || i}
+                role={postHref ? 'link' : undefined}
+                tabIndex={postHref ? 0 : undefined}
+                title={postHref ? 'Открыть публикацию на площадке' : undefined}
+                onClick={() => { if (postHref) _openPostInNewTab(pl, un, p.external_id, p.post_url); }}
+                onKeyDown={(e) => {
+                  if (!postHref) return;
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    _openPostInNewTab(pl, un, p.external_id, p.post_url);
+                  }
+                }}
+                style={{
+                  border: scrapeMissing ? '1px solid rgba(251,146,60,0.45)' : '1px solid var(--line)',
+                  borderRadius: 12,
+                  background: scrapeMissing ? 'rgba(251,146,60,0.06)' : 'rgba(255,255,255,0.02)',
+                  padding: 12,
+                  cursor: postHref ? 'pointer' : 'default',
+                  position: 'relative',
+                }}
+              >
+                {scrapeMissing ? (
+                  <button
+                    type="button"
+                    title="Не найден при обновлении — нажмите для действий"
+                    aria-label="Публикация не найдена при обновлении"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setPostMissingModal(p);
+                    }}
+                    style={{
+                      position: 'absolute',
+                      top: 6,
+                      right: 6,
+                      zIndex: 2,
+                      padding: 6,
+                      border: 'none',
+                      background: 'transparent',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <ScrapeMissingDot />
+                  </button>
+                ) : null}
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, paddingRight: scrapeMissing ? 28 : 0 }}>
                   <div style={{ color: 'var(--ink-dim)', fontSize: 13 }}>{String(p.description || '').slice(0, 120)}</div>
                   <div className="mono" style={{ color: '#4ade80', fontSize: 12 }}>+{fmt(Number(p.view_delta || 0))}</div>
                 </div>
               </div>
-            ))}
+            );})}
           </div>
         )
       )}
+
+      {postMissingModal ? (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 95,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: 'rgba(0,0,0,0.72)',
+            padding: 16,
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget && !postDeleteBusy) setPostMissingModal(null); }}
+        >
+          <div
+            role="dialog"
+            aria-modal
+            aria-labelledby="post-missing-modal-title"
+            style={{
+              width: '100%',
+              maxWidth: 440,
+              borderRadius: 16,
+              border: '1px solid rgba(251,146,60,0.45)',
+              background: 'rgba(18,20,28,0.98)',
+              padding: 20,
+              boxShadow: '0 24px 56px rgba(0,0,0,0.65)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 14 }}>
+              <ScrapeMissingDot size={8} style={{ marginTop: 6 }} />
+              <div>
+                <h3 id="post-missing-modal-title" style={{ margin: 0, fontSize: 17, color: '#fff' }}>
+                  Публикация не найдена
+                </h3>
+                <p style={{ margin: '10px 0 0', fontSize: 13, color: 'var(--ink-mute)', lineHeight: 1.5 }}>
+                  При последнем обновлении этой публикации не было в ответе скрапера. Она сохранена в дашборде.
+                  Откройте профиль на площадке и проверьте вручную — затем удалите запись здесь, если поста больше нет.
+                </p>
+                {postMissingModal.external_id ? (
+                  <p className="mono" style={{ margin: '8px 0 0', fontSize: 11, color: 'var(--ink-dim)' }}>
+                    ID: {String(postMissingModal.external_id)}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 10, justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                disabled={postDeleteBusy}
+                onClick={() => setPostMissingModal(null)}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: 10,
+                  border: '1px solid var(--line)',
+                  background: 'rgba(255,255,255,0.04)',
+                  color: 'var(--ink)',
+                  cursor: postDeleteBusy ? 'default' : 'pointer',
+                  opacity: postDeleteBusy ? 0.6 : 1,
+                }}
+              >
+                Закрыть
+              </button>
+              <button
+                type="button"
+                disabled={postDeleteBusy}
+                onClick={() => openAccountOnPlatform()}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: 10,
+                  border: '1px solid rgba(106,169,255,0.45)',
+                  background: 'rgba(106,169,255,0.12)',
+                  color: '#93c5fd',
+                  cursor: postDeleteBusy ? 'default' : 'pointer',
+                  opacity: postDeleteBusy ? 0.6 : 1,
+                }}
+              >
+                Перейти в аккаунт
+              </button>
+              <button
+                type="button"
+                disabled={postDeleteBusy}
+                onClick={() => { void deleteMissingPost(postMissingModal); }}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: 10,
+                  border: '1px solid rgba(239,68,68,0.45)',
+                  background: 'rgba(239,68,68,0.15)',
+                  color: '#fca5a5',
+                  cursor: postDeleteBusy ? 'default' : 'pointer',
+                  opacity: postDeleteBusy ? 0.6 : 1,
+                }}
+              >
+                {postDeleteBusy ? 'Удаление…' : 'Удалить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 
 // ===== screen-analytics.jsx =====
+
 // Analytics screen — atomic-themed redesign of "Аналитика" tab.
 
 const { useState: useStateAn, useEffect: useEffectAn } = React;
 
-function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
+function AnalyticsScreen({ tweaks, onOpenGlobalModal, onOpenAccount }) {
   const isMobile = useIsMobile(980);
   const accent = tweaks.accent || '#6aa9ff';
   const pageSize = isMobile ? 5 : 20;
   const [period, setPeriod] = useStateAn('1d');
   const [platform, setPlatform] = useStateAn('all');
+  const [scrapeFilter, setScrapeFilter] = useStateAn('active');
   const [sortBy, setSortBy] = useStateAn('view_delta');
   const [minViews, setMinViews] = useStateAn(10);
   const [hashtagSort, setHashtagSort] = useStateAn('count');
@@ -4637,16 +5323,29 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
           min_views: String(minViews),
         });
         if (platform !== 'all') params.set('platform', platform);
+        if (scrapeFilter === 'missing') {
+          params.set('scrape_filter', 'missing');
+          if (minViews > 0) params.set('min_views', String(minViews));
+          else params.set('min_views', '0');
+        } else {
+          params.set('scrape_filter', 'active');
+          params.set('min_views', String(minViews));
+        }
+        const insightsUrl = `/api/accounts/analytics/insights/?period=${encodeURIComponent(period)}${platform !== 'all' ? `&platform=${encodeURIComponent(platform)}` : ''}&min_views=${encodeURIComponent(String(minViews))}&scrape_filter=active`;
         const [res, insightsRes] = await Promise.all([
           _fetchJson(`/api/accounts/analytics/top-posts/?${params.toString()}`),
-          _fetchJson(`/api/accounts/analytics/insights/?period=${encodeURIComponent(period)}${platform !== 'all' ? `&platform=${encodeURIComponent(platform)}` : ''}&min_views=${encodeURIComponent(String(minViews))}`).catch(() => null),
+          scrapeFilter === 'missing' ? Promise.resolve(null) : _fetchJson(insightsUrl).catch(() => null),
         ]);
         const mapped = Array.isArray(res?.items) ? res.items.map((p) => ({
           handle: p?.account?.platform === 'rumble'
             ? String(p?.account?.username || '')
             : `@${String(p?.account?.username || '')}`,
+          username: String(p?.account?.username || ''),
           platform: String(p?.account?.platform || ''),
+          accountId: Number(p?.account?.id || 0) || null,
+          postId: Number(p?.id || 0) || null,
           date: _ruShortDate(p?.posted_at || '').slice(0, 8).replace(/\./g, '.'),
+          missingSince: p?.missing_from_scrape_at ? _ruShortDate(String(p.missing_from_scrape_at)) : '',
           text: String(p?.description || ''),
           delta: Number(p?.view_delta || 0),
           views: Number(p?.view_count || 0),
@@ -4654,6 +5353,8 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
           er: Number(p?.engagement_rate || 0),
           thumb: String(p?.thumbnail_url || ''),
           postUrl: String(p?.post_url || ''),
+          externalId: String(p?.external_id || ''),
+          scrapeNotFound: Boolean(p?.scrape_not_found || p?.missing_from_scrape_at),
         })) : [];
         if (!cancelled) {
           setTopPosts(mapped);
@@ -4675,11 +5376,11 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
       }
     })();
     return () => { cancelled = true; };
-  }, [period, platform, sortBy, page, minViews, pageSize]);
+  }, [period, platform, scrapeFilter, sortBy, page, minViews, pageSize]);
 
   React.useEffect(() => {
     setPage(1);
-  }, [period, platform, sortBy, minViews]);
+  }, [period, platform, scrapeFilter, sortBy, minViews]);
 
   const sortOptions = [
     { id: 'view_delta', label: 'Прирост просмотров' },
@@ -4864,9 +5565,31 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
           ))}
         </div>
 
+        <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.12em' }}>ПОСТЫ</span>
+          <Pill active={scrapeFilter === 'active'} onClick={() => setScrapeFilter('active')}>Активные в съёме</Pill>
+          <Pill
+            active={scrapeFilter === 'missing'}
+            onClick={() => setScrapeFilter('missing')}
+            style={scrapeFilter === 'missing' ? {
+              borderColor: 'rgba(251,146,60,0.65)',
+              background: 'rgba(251,146,60,0.22)',
+              color: '#ffedd5',
+            } : undefined}
+          >
+            <ScrapeMissingDot />
+            Возможно удалённые
+          </Pill>
+        </div>
+
         <SectionHeader
-          kicker="TOP MOVERS"
-          title={<>Топ постов <span style={{ color: 'var(--ink-mute)', fontWeight: 400, marginLeft: 8 }}>({totalPosts || topPosts.length})</span></>}
+          kicker={scrapeFilter === 'missing' ? 'ВОЗМОЖНО УДАЛЕНЫ' : 'TOP MOVERS'}
+          title={(
+            <>
+              {scrapeFilter === 'missing' ? 'Посты не найдены при обновлении' : 'Топ постов'}
+              <span style={{ color: 'var(--ink-mute)', fontWeight: 400, marginLeft: 8 }}>({totalPosts || topPosts.length})</span>
+            </>
+          )}
           right={
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               {loading && <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)' }}>Загрузка...</span>}
@@ -4892,52 +5615,63 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
                   </option>
                 ))}
               </select>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(String(e.target.value || 'view_delta'))}
-                style={{
-                  minWidth: isMobile ? 180 : 240,
-                  padding: '8px 10px',
-                  borderRadius: 10,
-                  border: '1px solid var(--line)',
-                  background: 'rgba(148,163,184,0.16)',
-                  color: '#ffffff',
-                  fontSize: 14,
-                  fontFamily: 'inherit',
-                  cursor: 'pointer',
-                }}
-              >
-                {sortOptions.map((o) => (
-                  <option
-                    key={o.id}
-                    value={o.id}
-                    style={{ color: '#ffffff', background: '#374151' }}
-                  >
-                    {o.label}
-                  </option>
-                ))}
-              </select>
+              {scrapeFilter !== 'missing' ? (
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(String(e.target.value || 'view_delta'))}
+                  style={{
+                    minWidth: isMobile ? 180 : 240,
+                    padding: '8px 10px',
+                    borderRadius: 10,
+                    border: '1px solid var(--line)',
+                    background: 'rgba(148,163,184,0.16)',
+                    color: '#ffffff',
+                    fontSize: 14,
+                    fontFamily: 'inherit',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {sortOptions.map((o) => (
+                    <option
+                      key={o.id}
+                      value={o.id}
+                      style={{ color: '#ffffff', background: '#374151' }}
+                    >
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
             </div>
           }
         />
+
+        {scrapeFilter === 'missing' ? (
+          <p style={{ margin: '0 0 12px', fontSize: 13, color: 'rgba(251,191,36,0.92)', lineHeight: 1.45 }}>
+            Посты, которые не попали в последний съём аккаунта. Сортировка — по дате пометки (новые сверху). Откройте карточку аккаунта для проверки и удаления.
+          </p>
+        ) : null}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
             {topPosts.map((p, i) => (
               <PostRow
-                key={`${p.postUrl || p.handle}-${i}`}
+                key={`${p.postId || p.postUrl || p.handle}-${i}`}
                 p={p}
                 accent={accent}
                 rank={((page - 1) * pageSize) + i + 1}
                 max={(topPosts[0]?.delta || 1)}
                 isMobile={isMobile}
+                onOpenAccount={onOpenAccount}
               />
             ))}
           </div>
         </div>
         {topPosts.length === 0 && !loading && (
           <div style={{ marginTop: 10, borderRadius: 12, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', padding: 14, fontSize: 13, color: 'var(--ink-mute)' }}>
-            Нет данных для выбранных фильтров.
+            {scrapeFilter === 'missing'
+              ? 'Нет постов с пометкой «не найден при обновлении» для выбранных фильтров.'
+              : 'Нет данных для выбранных фильтров.'}
           </div>
         )}
         <style>{`@keyframes anFadeIn { from { opacity: 0; } to { opacity: 1; } }`}</style>
@@ -4959,6 +5693,7 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
           </button>
         </div>
 
+        {scrapeFilter !== 'missing' ? (
         <div style={{ marginTop: 20, display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
           <div style={{ borderRadius: 14, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.015)', overflow: 'hidden' }}>
             <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--line)', fontWeight: 600 }}>Сравнение платформ</div>
@@ -5047,28 +5782,73 @@ function AnalyticsScreen({ tweaks, onOpenGlobalModal }) {
             </div>
           </div>
         </div>
+        ) : null}
       </main>
     </div>
   );
 }
 
-function PostRow({ p, accent, rank, max, isMobile = false }) {
+function PostRow({ p, accent, rank, max, isMobile = false, onOpenAccount }) {
   const meta = PLATFORM_META[p.platform] || { color: '#9ca3af', label: p.platform || 'Unknown' };
-  const w = Math.max(0, (p.delta / Math.max(1, max)) * 100);
+  const scrapeMissing = Boolean(p.scrapeNotFound);
+  const w = scrapeMissing ? 0 : Math.max(0, (p.delta / Math.max(1, max)) * 100);
   const [thumbBroken, setThumbBroken] = React.useState(false);
+  const username = String(p.username || p.handle || '').replace(/^@/, '');
+  const postHref = scrapeMissing ? null : _postOpenUrl(p.platform, username, p.externalId, p.postUrl);
   React.useEffect(() => {
     setThumbBroken(false);
   }, [p.thumb]);
   return (
-    <div style={{
+    <div
+      role={postHref ? 'link' : undefined}
+      tabIndex={postHref ? 0 : undefined}
+      title={scrapeMissing ? 'Не найден при обновлении' : (postHref ? 'Открыть публикацию на площадке' : undefined)}
+      onClick={() => { if (postHref) _openPostInNewTab(p.platform, username, p.externalId, p.postUrl); }}
+      onKeyDown={(e) => {
+        if (!postHref) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          _openPostInNewTab(p.platform, username, p.externalId, p.postUrl);
+        }
+      }}
+      style={{
       position: 'relative',
       display: 'grid',
       gridTemplateColumns: isMobile ? '1fr' : '40px 64px minmax(120px, 1fr) auto 82px',
       gap: isMobile ? 10 : 14,
       alignItems: 'center',
-      padding: isMobile ? '12px 12px' : '14px 18px', borderRadius: 14, border: '1px solid var(--line)',
-      background: 'rgba(255,255,255,0.015)', overflow: 'hidden',
+      padding: isMobile ? '12px 12px' : '14px 18px', borderRadius: 14,
+      border: scrapeMissing ? '1px solid rgba(251,146,60,0.55)' : '1px solid var(--line)',
+      background: scrapeMissing ? 'rgba(251,146,60,0.06)' : 'rgba(255,255,255,0.015)', overflow: 'hidden',
+      cursor: postHref ? 'pointer' : 'default',
     }}>
+      {scrapeMissing ? (
+        <button
+          type="button"
+          title="Перейти в карточку аккаунта"
+          aria-label="Публикация не найдена при обновлении — открыть аккаунт"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (p.accountId && onOpenAccount) onOpenAccount(p.accountId);
+          }}
+          style={{
+            position: 'absolute',
+            top: 6,
+            right: 6,
+            zIndex: 3,
+            padding: 6,
+            border: 'none',
+            background: 'transparent',
+            cursor: p.accountId && onOpenAccount ? 'pointer' : 'default',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <ScrapeMissingDot />
+        </button>
+      ) : null}
       <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: `${w}%`, background: `linear-gradient(90deg, ${meta.color}10, transparent)`, opacity: 0.8 }} />
       <div className="mono tnum" style={{ position: 'relative', fontSize: isMobile ? 15 : 18, fontWeight: 700, color: rank <= 3 ? accent : 'var(--ink-mute)' }}>
         {String(rank).padStart(2, '0')}
@@ -5099,7 +5879,9 @@ function PostRow({ p, accent, rank, max, isMobile = false }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, minWidth: 0 }}>
           <PlatformGlyph id={p.platform} size={14} />
           <span style={{ fontSize: 14, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.handle}</span>
-          <span className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', marginLeft: 'auto', flexShrink: 0 }}>{p.date}</span>
+          <span className="mono" style={{ fontSize: 11, color: scrapeMissing ? 'rgba(251,191,36,0.9)' : 'var(--ink-mute)', marginLeft: 'auto', flexShrink: 0 }}>
+            {scrapeMissing && p.missingSince ? `с ${p.missingSince}` : p.date}
+          </span>
         </div>
         <div style={{ fontSize: 13, color: 'var(--ink-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.text}</div>
       </div>
@@ -5110,8 +5892,8 @@ function PostRow({ p, accent, rank, max, isMobile = false }) {
         <div className="mono tnum" style={{ color: 'var(--ink-dim)' }}>♥ {fmt(p.likes)}</div>
         <div className="mono tnum" style={{ color: 'var(--ink-mute)' }}>ER {p.er.toFixed(1)}%</div>
       </div>
-      <div className="mono tnum" style={{ position: 'relative', fontSize: isMobile ? 20 : 22, fontWeight: 600, color: '#4ade80', textAlign: isMobile ? 'left' : 'right' }}>
-        +{fmt(p.delta)}
+      <div className="mono tnum" style={{ position: 'relative', fontSize: isMobile ? 18 : 20, fontWeight: 600, color: scrapeMissing ? 'rgba(251,191,36,0.95)' : '#4ade80', textAlign: isMobile ? 'left' : 'right' }}>
+        {scrapeMissing ? 'не в съёме' : `+${fmt(p.delta)}`}
       </div>
     </div>
   );
@@ -5135,6 +5917,27 @@ function _authImportCookiesEndpoint(platformId) {
   const supported = new Set(['tiktok', 'instagram', 'x', 'threads', 'facebook', 'rumble', 'reddit']);
   if (!supported.has(platformId)) return null;
   return `/api/settings/${platformId}/import-cookies/`;
+}
+
+/** Ожидание фоновой задачи входа (POST …/start-auth/ → job_id). */
+async function _pollAuthJob(jobId, { maxMs = 240000, intervalMs = 700 } = {}) {
+  const deadline = Date.now() + maxMs;
+  let lastMsg = '';
+  while (Date.now() < deadline) {
+    const st = await _fetchJson(`/api/settings/job/${encodeURIComponent(jobId)}/`);
+    const msg = String(st?.message || '').trim();
+    if (msg) lastMsg = msg;
+    if (st?.status === 'done') return st;
+    if (st?.status === 'error') {
+      throw new Error(msg || 'Ошибка авторизации');
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    lastMsg
+      ? `${lastMsg}\n\nПревышено время ожидания. Проверьте панель задач — окно Chromium могло открыться за другими окнами.`
+      : 'Превышено время ожидания. Проверьте, открылось ли окно браузера (панель задач).',
+  );
 }
 
 function SettingsScreen({ tweaks, onBack, onDataChanged, onOpenGlobalModal }) {
@@ -5213,11 +6016,16 @@ function SessionCard({ p, accent, onDataChanged }) {
   const doAuth = async () => {
     setBusy(true);
     try {
-      await _postJson(_authStartEndpoint(p.id), {});
-      await uiAlert('Окно авторизации запущено.', 'Авторизация');
+      const res = await _postJson(_authStartEndpoint(p.id), {});
+      const jobId = res?.job_id;
+      if (!jobId) {
+        throw new Error('Сервер не вернул идентификатор задачи (job_id).');
+      }
+      const st = await _pollAuthJob(jobId);
+      await uiAlert(String(st?.message || 'Авторизация завершена.'), 'Авторизация');
       await onDataChanged?.();
     } catch (e) {
-      await uiAlert(`Не удалось запустить авторизацию: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+      await uiAlert(`Не удалось выполнить авторизацию: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
       setBusy(false);
     }
@@ -5241,11 +6049,16 @@ function SessionCard({ p, accent, onDataChanged }) {
     }
     setImportBusy(true);
     try {
-      await _postJson(importEndpoint, { cookies: cookiesRaw.trim() });
+      const res = await _postJson(importEndpoint, { cookies: cookiesRaw.trim() });
+      const jobId = res?.job_id;
+      if (!jobId) {
+        throw new Error('Сервер не вернул идентификатор задачи (job_id).');
+      }
+      const st = await _pollAuthJob(jobId, { maxMs: 120000 });
       setShowImport(false);
       setCookiesRaw('');
       await onDataChanged?.();
-      await uiAlert('Cookies импортированы, дождись завершения job.', 'Импорт cookies');
+      await uiAlert(String(st?.message || 'Cookies импортированы.'), 'Импорт cookies');
     } catch (e) {
       await uiAlert(`Не удалось импортировать cookies: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
@@ -5577,6 +6390,17 @@ function AutoRefreshRunDetailOverlay({ status, accent, onClose, refreshAutoStatu
     const t = setInterval(() => { void refreshAutoStatus?.(); }, 2000);
     return () => clearInterval(t);
   }, [refreshAutoStatus]);
+  const pipeline = status?.active_pipeline || '';
+  const overlayKicker = pipeline === 'refresh_all'
+    ? 'СБОР ВСЕХ'
+    : pipeline === 'bulk_refresh'
+      ? 'ВЫБРАННЫЕ'
+      : 'АВТООБНОВЛЕНИЕ';
+  const overlayTitle = pipeline === 'refresh_all'
+    ? 'Детали сбора всех'
+    : pipeline === 'bulk_refresh'
+      ? 'Детали обновления выбранных'
+      : 'Детали прогона';
   const rd = status?.run_detail && typeof status.run_detail === 'object' ? status.run_detail : {};
   const items = Array.isArray(rd.items) ? rd.items : [];
   const wc = Number(rd.worker_count || 0);
@@ -5611,8 +6435,8 @@ function AutoRefreshRunDetailOverlay({ status, accent, onClose, refreshAutoStatu
       <div style={{ width: '100%', maxWidth: 520, maxHeight: 'min(88vh, 620px)', overflowY: 'auto', borderRadius: 16, border: '1px solid var(--line)', background: 'rgba(18,20,28,0.98)', padding: 20 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 16 }}>
           <div>
-            <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 6 }}>АВТООБНОВЛЕНИЕ</div>
-            <div style={{ fontSize: 17, fontWeight: 600, color: '#fff' }}>Детали прогона</div>
+            <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 6 }}>{overlayKicker}</div>
+            <div style={{ fontSize: 17, fontWeight: 600, color: '#fff' }}>{overlayTitle}</div>
             <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginTop: 8, lineHeight: 1.45 }}>Параллельных потоков: {wc || '—'}. Номер слота 1…N — только у строки «Обновляется».</div>
           </div>
           <button type="button" onClick={onClose} style={{ padding: '8px 12px', borderRadius: 10, border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-dim)', cursor: 'pointer' }}>✕</button>
@@ -5637,7 +6461,6 @@ function AutoRefreshRunDetailOverlay({ status, accent, onClose, refreshAutoStatu
 
 function ScheduleModal({ accent, onDataChanged, onClose }) {
   const isMobile = useIsMobile(760);
-  const PRESET_TIMES = ['06:00', '09:00', '12:00', '15:00', '18:00', '21:00', '00:00'];
   const SKIP_OPTIONS = [0, 1, 3, 6, 12, 24];
   const [loading, setLoading] = useStateMd(true);
   const [saving, setSaving] = useStateMd(false);
@@ -5646,13 +6469,12 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const [auto, setAuto] = useStateMd(true);
   const [intervalHours, setIntervalHours] = useStateMd(6);
   const [skipRecent, setSkipRecent] = useStateMd(0);
-  const [selectedTimes, setSelectedTimes] = useStateMd(['06:00', '12:00', '18:00']);
-  const [customTime, setCustomTime] = useStateMd('');
+  const [selectedTimes, setSelectedTimes] = useStateMd([...DEFAULT_AUTO_REFRESH_TIMES]);
+  const [customScheduleSlots, setCustomScheduleSlots] = useStateMd([]);
+  const [timesModalOpen, setTimesModalOpen] = useStateMd(false);
   const [csvReport, setCsvReport] = useStateMd(true);
   const [includeHiddenPlatform, setIncludeHiddenPlatform] = useStateMd(false);
   const [includeHiddenProfile, setIncludeHiddenProfile] = useStateMd(false);
-  const [includeUnavailable, setIncludeUnavailable] = useStateMd(false);
-  const [accountDeltaPeriodDays, setAccountDeltaPeriodDays] = useStateMd(1);
   const [reportDownloading, setReportDownloading] = useStateMd(false);
   const [runBusy, setRunBusy] = useStateMd(false);
   const [runDetailOpen, setRunDetailOpen] = useStateMd(false);
@@ -5677,17 +6499,13 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
         setAuto(!!sched.enabled);
         setIntervalHours(Number(sched.interval_hours || 6));
         setSkipRecent(Number(sched.skip_recent_hours ?? 0));
-        setSelectedTimes(
-          Array.isArray(sched.times) && sched.times.length > 0
-            ? sched.times.filter((t) => /^\d{2}:\d{2}$/.test(String(t)))
-            : ['06:00', '12:00', '18:00']
-        );
+        const loadedTimes = _sortScheduleTimes(sched.times);
+        const activeTimes = loadedTimes.length > 0 ? loadedTimes : [...DEFAULT_AUTO_REFRESH_TIMES];
+        setSelectedTimes(activeTimes);
+        setCustomScheduleSlots(activeTimes.filter((t) => !DEFAULT_AUTO_REFRESH_TIMES.includes(t)));
         setCsvReport(!!sched.auto_refresh_csv_report);
         setIncludeHiddenPlatform(!!sched.include_hidden_platform_accounts);
         setIncludeHiddenProfile(!!sched.include_hidden_profile_accounts);
-        setIncludeUnavailable(!!sched.include_unavailable_accounts);
-        const apd = Number(sched.account_delta_period_days);
-        setAccountDeltaPeriodDays([1, 7, 30].includes(apd) ? apd : 1);
         setStatus(st);
       } catch (e) {
         await uiAlert(`Не удалось загрузить расписание: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
@@ -5708,16 +6526,16 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
     const wasRunning = !!prevRunningRef.current;
     const isRunning = !!status?.is_running;
     if (wasRunning && !isRunning) {
+      void refreshAutoStatus();
       void onDataChanged?.();
     }
     prevRunningRef.current = isRunning;
   }, [status?.is_running, onDataChanged]);
 
   const buildSchedulePayload = () => {
-    const times = selectedTimes
-      .map((t) => String(t).trim())
-      .filter((t) => /^\d{2}:\d{2}$/.test(t))
-      .sort();
+    const times = mode === 'times'
+      ? _sortScheduleTimes(selectedTimes)
+      : [];
     return {
       enabled: auto,
       mode,
@@ -5726,11 +6544,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       auto_refresh_csv_report: csvReport,
       include_hidden_platform_accounts: includeHiddenPlatform,
       include_hidden_profile_accounts: includeHiddenProfile,
-      include_unavailable_accounts: includeUnavailable,
-      account_delta_period_days: [1, 7, 30].includes(Number(accountDeltaPeriodDays))
-        ? Number(accountDeltaPeriodDays)
-        : 1,
-      times: mode === 'times' ? times : [],
+      times,
     };
   };
 
@@ -5748,19 +6562,19 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
     }
   };
 
-  const toggleTime = (timeValue) => {
-    setSelectedTimes((prev) => {
-      const has = prev.includes(timeValue);
-      if (has) return prev.filter((t) => t !== timeValue);
-      return [...prev, timeValue];
-    });
-  };
+  const pillsRowTimes = _sortScheduleTimes([
+    ...DEFAULT_AUTO_REFRESH_TIMES,
+    ...customScheduleSlots,
+  ]);
 
-  const addCustomTime = () => {
-    const t = String(customTime || '').trim();
+  const toggleTime = (timeValue) => {
+    const t = String(timeValue || '').trim();
     if (!/^\d{2}:\d{2}$/.test(t)) return;
-    setSelectedTimes((prev) => (prev.includes(t) ? prev : [...prev, t]));
-    setCustomTime('');
+    setSelectedTimes((prev) => {
+      const cur = _sortScheduleTimes(prev);
+      if (cur.includes(t)) return cur.filter((x) => x !== t);
+      return _sortScheduleTimes([...cur, t]);
+    });
   };
 
   const runNow = async () => {
@@ -5812,7 +6626,11 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
 
   const stopNow = async () => {
     try {
-      await _postJson('/api/accounts/auto-refresh-stop/', {});
+      if (status?.active_pipeline === 'refresh_all') {
+        await _postJson('/api/accounts/refresh-all-stop/', {});
+      } else {
+        await _postJson('/api/accounts/auto-refresh-stop/', {});
+      }
       const st = await _fetchJson('/api/accounts/auto-refresh-status/').catch(() => null);
       setStatus(st);
       await uiAlert('Остановка отправлена.', 'Автообновление');
@@ -5920,20 +6738,6 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
             <input type="checkbox" checked={includeHiddenProfile} onChange={(e) => setIncludeHiddenProfile(e.target.checked)} />
             Учитывать скрытые профили
           </label>
-          <label style={{ display: 'flex', gap: 8, alignItems: 'center', cursor: 'pointer', color: 'var(--ink-dim)', fontSize: 13 }}>
-            <input type="checkbox" checked={includeUnavailable} onChange={(e) => setIncludeUnavailable(e.target.checked)} />
-            Учитывать недоступные аккаунты
-          </label>
-        </div>
-        <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-          <div style={{ fontSize: 12, color: 'var(--ink-mute)', marginBottom: 8 }}>Период приростов в списке аккаунтов</div>
-          <DeltaPeriodCycleButton
-            value={accountDeltaPeriodDays}
-            onCycle={() => setAccountDeltaPeriodDays((v) => _nextDeltaPeriodDays(v))}
-            disabled={saving}
-            isMobile={isMobile}
-            accent={accent}
-          />
         </div>
       </div>
 
@@ -5950,22 +6754,63 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 10 }}>ВРЕМЯ ОБНОВЛЕНИЯ · MSK</div>
       {mode === 'times' ? (
         <>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
-            {PRESET_TIMES.map((t) => (
-              <Pill key={t} active={selectedTimes.includes(t)} onClick={() => toggleTime(t)}>{t}</Pill>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            {pillsRowTimes.map((t) => (
+              <Pill
+                key={t}
+                active={selectedTimes.includes(t)}
+                onClick={() => toggleTime(t)}
+                title={selectedTimes.includes(t) ? `${t}: в расписании (нажмите, чтобы убрать)` : `${t}: не в расписании (нажмите, чтобы добавить)`}
+              >
+                <span className="mono">{t}</span>
+              </Pill>
             ))}
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>
-            <input
-              type="time"
-              value={customTime}
-              onChange={(e) => setCustomTime(e.target.value)}
-              style={{ flex: 1, padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'JetBrains Mono, monospace' }}
-            />
-            <button onClick={addCustomTime} style={{ padding: '11px 14px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.03)', color: 'var(--ink)', cursor: 'pointer', fontSize: 13 }}>
-              + Добавить
+            <button
+              type="button"
+              onClick={() => setTimesModalOpen(true)}
+              title="Управление временем автообновления"
+              aria-label="Управление временем автообновления"
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 999,
+                border: '1px solid var(--line)',
+                background: 'rgba(255,255,255,0.04)',
+                color: 'var(--ink-dim)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                flexShrink: 0,
+              }}
+            >
+              <ClockIcon size={18} />
             </button>
           </div>
+          <p style={{ margin: '0 0 18px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.45 }}>
+            Нажмите на время — включить или выключить слот (серый = выключен). Дополнительные слоты добавляйте и удаляйте по иконке часов.
+            Не забудьте «Сохранить», чтобы записать расписание на сервер.
+          </p>
+          {timesModalOpen && (
+            <ScheduleTimesEditorModal
+              accent={accent}
+              customSlots={customScheduleSlots}
+              onClose={() => setTimesModalOpen(false)}
+              onApply={(nextCustom) => {
+                const prevCustom = customScheduleSlots;
+                const removed = prevCustom.filter((c) => !nextCustom.includes(c));
+                const added = nextCustom.filter((c) => !prevCustom.includes(c));
+                setCustomScheduleSlots(_sortScheduleTimes(nextCustom));
+                setSelectedTimes((prev) => {
+                  let next = prev.filter((t) => !removed.includes(t));
+                  for (const t of added) {
+                    if (!next.includes(t)) next = [...next, t];
+                  }
+                  return _sortScheduleTimes(next);
+                });
+              }}
+            />
+          )}
         </>
       ) : (
         <input type="number" min={1} max={48} value={intervalHours} onChange={(e) => setIntervalHours(Number(e.target.value || 1))} style={{ width: '100%', marginBottom: 18, padding: '11px 14px', borderRadius: 10, background: 'rgba(255,255,255,0.025)', border: '1px solid var(--line-2)', color: 'var(--ink)', fontSize: 13, fontFamily: 'JetBrains Mono, monospace' }} />
@@ -5983,14 +6828,32 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       <div style={{ display: 'flex', gap: 10, flexDirection: isMobile ? 'column' : 'row' }}>
         <button onClick={saveSchedule} disabled={saving} style={{ flex: 1, padding: 14, borderRadius: 12, background: accent, color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer', opacity: saving ? 0.6 : 1 }}>{saving ? 'Сохранение…' : 'Сохранить'}</button>
         <button onClick={runNow} disabled={runBusy || !!status?.is_running} style={{ flex: 1, padding: 14, borderRadius: 12, background: '#4ade80', color: '#000', border: 'none', fontSize: 14, fontWeight: 600, cursor: runBusy || status?.is_running ? 'default' : 'pointer', opacity: runBusy || status?.is_running ? 0.7 : 1 }}>
-          {runBusy ? 'Запуск…' : (status?.is_running ? 'Уже запущено' : 'Запустить сейчас')}
+          {runBusy ? 'Запуск…' : (status?.is_running ? (status.active_pipeline === 'refresh_all' ? 'Сбор всех уже идёт' : 'Уже запущено') : 'Запустить сейчас')}
         </button>
-        <button onClick={stopNow} style={{ flex: 1, padding: 14, borderRadius: 12, background: '#ef4444', color: '#fff', border: 'none', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>Остановить</button>
+        <button
+          onClick={stopNow}
+          disabled={!status?.is_running}
+          style={{
+            flex: 1, padding: 14, borderRadius: 12, background: '#ef4444', color: '#fff', border: 'none', fontSize: 14, fontWeight: 600,
+            cursor: status?.is_running ? 'pointer' : 'default',
+            opacity: status?.is_running ? 1 : 0.45,
+          }}
+        >Остановить</button>
       </div>
       {status && (
         <div style={{ marginTop: 12 }}>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-            <span>Статус: {status.is_running ? 'идет' : 'не идет'} · {status.processed_accounts || 0}/{status.total_accounts || 0}</span>
+            <span>
+              Статус:{' '}
+              {!status.is_running
+                ? 'не идет'
+                : status.active_pipeline === 'refresh_all'
+                  ? 'идёт сбор всех'
+                  : status.active_pipeline === 'bulk_refresh'
+                    ? 'идёт обновление выбранных'
+                    : 'идёт автообновление'}{' '}
+              · {status.processed_accounts || 0}/{status.total_accounts || 0}
+            </span>
             <span>{Math.max(0, Math.min(100, Number(status.progress_percent || 0)))}%</span>
           </div>
           <div style={{ marginTop: 6, height: 8, borderRadius: 999, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', overflow: 'hidden' }}>
@@ -6219,9 +7082,109 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   const [includeUnavailable, setIncludeUnavailable] = useStateMd(false);
   const [selectedIds, setSelectedIds] = useStateMd(() => new Set(ACCOUNTS.map((a) => a.id)));
   const [busy, setBusy] = useStateMd(false);
+  const [runStatus, setRunStatus] = useStateMd(null);
   const [downloadCsvAfter, setDownloadCsvAfter] = useStateMd(false);
   const [updatedSortOrder, setUpdatedSortOrder] = useStateMd('desc'); // desc=newest first, asc=oldest first
+  const SKIP_OPTIONS = [0, 1, 3, 6, 12, 24];
+  const [skipRecent, setSkipRecent] = useStateMd(0);
+  const [runDetailOpen, setRunDetailOpen] = useStateMd(false);
   const refreshModeRef = React.useRef(null);
+  const pendingRunRef = React.useRef(null);
+  const prevRunningRef = React.useRef(false);
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const sched = await _fetchJson('/api/accounts/schedule/');
+        if (!mounted || !sched) return;
+        setSkipRecent(Number(sched.skip_recent_hours ?? 0));
+      } catch (_) { /* ignore */ }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  const persistSkipRecent = async () => {
+    await _postJson('/api/accounts/schedule/', { skip_recent_hours: skipRecent });
+  };
+
+  const refreshRunStatus = async () => {
+    const st = await _fetchJson('/api/accounts/auto-refresh-status/').catch(() => null);
+    setRunStatus(st);
+    return st;
+  };
+
+  const pipelineLabel = (st) => {
+    if (!st?.is_running) return 'не идёт';
+    if (st.active_pipeline === 'refresh_all') return 'идёт сбор всех';
+    if (st.active_pipeline === 'bulk_refresh') return 'идёт обновление выбранных';
+    return 'идёт автообновление по расписанию';
+  };
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const st = await refreshRunStatus();
+      if (!mounted || !st?.is_running) return;
+      if (st.active_pipeline === 'refresh_all') refreshModeRef.current = 'refresh_all';
+      else if (st.active_pipeline === 'bulk_refresh') refreshModeRef.current = 'bulk';
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  React.useEffect(() => {
+    if (!runStatus?.is_running) return undefined;
+    const timer = setInterval(() => { void refreshRunStatus(); }, 2000);
+    return () => clearInterval(timer);
+  }, [runStatus?.is_running]);
+
+  const finishRefreshAllRun = async (pending) => {
+    const lastSt = await refreshRunStatus().catch(() => null);
+    if (pending?.downloadCsv && lastSt?.has_csv_report) {
+      try {
+        const blob = await _fetchBlobWithApiBases('/api/accounts/refresh-all-report/');
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `refresh-report-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (_) { /* отчёт на сервере всё равно есть */ }
+    }
+    const failedN = Number(lastSt?.failed_accounts || 0);
+    const warn = (lastSt && lastSt.last_error) ? String(lastSt.last_error) : '';
+    const n = Number(pending?.idsCount || 0);
+    if (warn || failedN > 0) {
+      await uiAlert(
+        `Сбор завершён.${failedN > 0 ? ` Ошибок по аккаунтам: ${failedN}.` : ''}${warn ? `\n\n${warn}` : ''}\n\nРасширенный CSV-отчёт сохранён на сервере.`,
+        'Обновить аккаунты',
+      );
+    } else if (n > 0) {
+      await uiAlert(
+        `Обновлено: ${n}. Расширенный CSV с приростами и временем по аккаунтам сохранён на сервере.`,
+        'Обновить аккаунты',
+      );
+    }
+    await onDataChanged?.();
+    onClose?.();
+  };
+
+  React.useEffect(() => {
+    const wasRunning = !!prevRunningRef.current;
+    const isRunning = !!runStatus?.is_running;
+    if (wasRunning && !isRunning && pendingRunRef.current?.mode === 'refresh_all') {
+      const pending = pendingRunRef.current;
+      pendingRunRef.current = null;
+      refreshModeRef.current = null;
+      setBusy(false);
+      void finishRefreshAllRun(pending);
+    } else if (wasRunning && !isRunning) {
+      void onDataChanged?.();
+    }
+    prevRunningRef.current = isRunning;
+  }, [runStatus?.is_running, onDataChanged, onClose]);
+
+  const opInProgress = !!(runStatus?.is_running);
 
   const togglePlatform = (id) => {
     setSelectedPlatforms((prev) => {
@@ -6285,56 +7248,72 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
     });
   };
 
+  const selectedCount = Array.from(selectedIds).filter((id) => filtered.some((a) => a.id === id)).length;
+
+  const runRefreshClicks = async () => {
+    const ids = Array.from(selectedIds).filter((id) => filtered.some((a) => a.id === id));
+    if (ids.length === 0) {
+      await uiAlert('Ничего не выбрано.', 'Переходы');
+      return;
+    }
+    if (opInProgress) {
+      await uiAlert('Сейчас идёт сбор/обновление аккаунтов. Дождитесь завершения или остановите его.', 'Переходы');
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await _postJson('/api/accounts/refresh-link-clicks/', { ids });
+      const updated = Number(res?.updated || 0);
+      const changed = Number(res?.changed ?? updated);
+      const skipped = Number(res?.skipped || 0);
+      const total = Number(res?.total || ids.length);
+      const errs = Array.isArray(res?.errors) ? res.errors : [];
+      let msg = `Обработано: ${updated} из ${total}. Изменилось значений: ${changed}.`;
+      if (skipped > 0) {
+        msg += `\nПропущено (нет URL профиля или данных Links): ${skipped}.`;
+      }
+      if (updated > 0 && changed === 0) {
+        msg += '\n\nЧисла в БД совпали с ответом Links — прирост на экране мог не измениться.';
+      }
+      if (errs.length) {
+        const last = errs[errs.length - 1];
+        msg += `\n\nОшибок: ${errs.length}.`;
+        if (last?.detail) msg += `\nПоследняя: ${last.detail}`;
+      }
+      await onDataChanged?.();
+      await uiAlert(msg, errs.length ? 'Переходы — с ошибками' : 'Переходы');
+    } catch (e) {
+      await uiAlert(`Ошибка: ${e instanceof Error ? e.message : String(e)}`, 'Переходы');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runRefresh = async () => {
     const ids = Array.from(selectedIds).filter((id) => filtered.some((a) => a.id === id));
     if (ids.length === 0) {
       await uiAlert('Ничего не выбрано.', 'Обновить аккаунты');
       return;
     }
+    if (opInProgress) {
+      await uiAlert('Уже выполняется обновление. Дождитесь завершения или нажмите «Остановить».', 'Обновить аккаунты');
+      return;
+    }
     setBusy(true);
     try {
+      await persistSkipRecent();
       const selectedAll = ids.length === ACCOUNTS.length;
-      refreshModeRef.current = selectedAll ? 'refresh_all' : 'bulk';
-      /** @type {null | { last_error?: string | null, has_csv_report?: boolean, failed_accounts?: number, is_running?: boolean }} */
-      let lastSt = null;
+      const mode = selectedAll ? 'refresh_all' : 'bulk';
+      refreshModeRef.current = mode;
+      pendingRunRef.current = { mode, downloadCsv: downloadCsvAfter, idsCount: ids.length };
       if (selectedAll) {
         const params = new URLSearchParams();
         if (includeUnavailable) params.set('include_unavailable_accounts', '1');
         if (downloadCsvAfter) params.set('download_csv', '1');
         const qs = params.toString();
         await _postJson(`/api/accounts/refresh_all/${qs ? `?${qs}` : ''}`, {});
-        const deadline = Date.now() + 2 * 60 * 60 * 1000;
-        while (Date.now() < deadline) {
-          const st = await _fetchJson('/api/accounts/refresh-all-status/');
-          lastSt = st;
-          if (!st.is_running) break;
-          await new Promise((r) => setTimeout(r, 500));
-        }
-        if (lastSt && lastSt.is_running) {
-          throw new Error('Превышено время ожидания фонового сбора (2 ч). Проверьте статус на сервере.');
-        }
-        if (downloadCsvAfter && lastSt?.has_csv_report) {
-          const blob = await _fetchBlobWithApiBases('/api/accounts/refresh-all-report/');
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `refresh-report-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
-          a.click();
-          URL.revokeObjectURL(url);
-        }
-        const failedN = Number(lastSt?.failed_accounts || 0);
-        const warn = (lastSt && lastSt.last_error) ? String(lastSt.last_error) : '';
-        if (warn || failedN > 0) {
-          await uiAlert(
-            `Сбор завершён.${failedN > 0 ? ` Ошибок по аккаунтам: ${failedN}.` : ''}${warn ? `\n\n${warn}` : ''}\n\nРасширенный CSV-отчёт сохранён на сервере.`,
-            'Обновить аккаунты',
-          );
-        } else {
-          await uiAlert(
-            `Обновлено: ${ids.length}. Расширенный CSV с приростами и временем по аккаунтам сохранён на сервере.`,
-            'Обновить аккаунты',
-          );
-        }
+        await refreshRunStatus();
+        return;
       } else {
         /** @type {{ accounts?: unknown[], errors?: { id: number, detail: string }[], cancelled?: boolean }} */
         const bulk = await _postJson('/api/accounts/bulk-refresh/', { ids });
@@ -6352,14 +7331,19 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
         } else {
           await uiAlert(`Обновлено: ${ids.length}`, 'Обновить аккаунты');
         }
+        pendingRunRef.current = null;
+        await onDataChanged?.();
+        await refreshRunStatus();
+        onClose?.();
       }
-      await onDataChanged?.();
-      onClose?.();
     } catch (e) {
+      pendingRunRef.current = null;
       await uiAlert(`Ошибка обновления: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     } finally {
-      refreshModeRef.current = null;
-      setBusy(false);
+      if (pendingRunRef.current?.mode !== 'refresh_all') {
+        refreshModeRef.current = null;
+        setBusy(false);
+      }
     }
   };
 
@@ -6380,16 +7364,72 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
     }
   };
 
+  const refreshLastAutoRefreshErrors = async () => {
+    let j;
+    try {
+      j = await _fetchJson('/api/accounts/auto-refresh-last-error-ids/');
+    } catch (e) {
+      await uiAlert(`Не удалось получить список: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+      return;
+    }
+    const serverIds = Array.isArray(j?.ids) ? j.ids.map((x) => Number(x)).filter((n) => Number.isFinite(n)) : [];
+    const known = new Set(ACCOUNTS.map((a) => a.id));
+    const ids = serverIds.filter((id) => known.has(id));
+    if (serverIds.length === 0) {
+      await uiAlert(
+        'В последнем завершённом автообновлении по расписанию не было аккаунтов со статусом «ошибка», либо прогон ещё ни разу не завершился.',
+        'Повторить ошибки',
+      );
+      return;
+    }
+    if (ids.length === 0) {
+      await uiAlert(
+        'Аккаунты с ошибками из последнего автообновления отсутствуют в текущем списке (удалены или не попали в выгрузку API).',
+        'Повторить ошибки',
+      );
+      return;
+    }
+    setBusy(true);
+    refreshModeRef.current = 'bulk';
+    try {
+      const bulk = await _postJson('/api/accounts/bulk-refresh/', { ids });
+      const ok = Array.isArray(bulk?.accounts) ? bulk.accounts.length : 0;
+      const errs = Array.isArray(bulk?.errors) ? bulk.errors : [];
+      const lastErr = errs.length ? String(errs[errs.length - 1].detail || '') : '';
+      let msg = `Готово: успешно ${ok} из ${ids.length}`;
+      if (bulk?.cancelled) msg += '. Обновление остановлено.';
+      if (errs.length) {
+        msg += `. Ошибок: ${errs.length}.`;
+        if (lastErr) msg += `\n\nПоследняя: ${lastErr}`;
+      }
+      if (errs.length || bulk?.cancelled) {
+        await uiAlert(msg, 'Повторить ошибки');
+      } else {
+        await uiAlert(`Обновлено: ${ids.length}`, 'Повторить ошибки');
+      }
+      await onDataChanged?.();
+      onClose?.();
+    } catch (e) {
+      await uiAlert(`Ошибка обновления: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    } finally {
+      refreshModeRef.current = null;
+      setBusy(false);
+    }
+  };
+
   const stopRefresh = async () => {
     try {
-      const mode = refreshModeRef.current;
-      if (mode === 'refresh_all') {
+      const pipeline = runStatus?.active_pipeline || (
+        refreshModeRef.current === 'refresh_all' ? 'refresh_all' : 'bulk_refresh'
+      );
+      if (pipeline === 'refresh_all') {
         await _postJson('/api/accounts/refresh-all-stop/', {});
         await uiAlert('Остановка сбора всех запрошена. Текущие аккаунты в воркерах завершатся, затем процесс остановится.', 'Остановка обновления');
       } else {
         await _postJson('/api/accounts/auto-refresh-stop/', {});
         await uiAlert('Остановка запрошена. Текущий аккаунт завершится и процесс остановится.', 'Остановка обновления');
       }
+      await refreshRunStatus();
     } catch (e) {
       await uiAlert(`Не удалось остановить: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
     }
@@ -6417,9 +7457,23 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
       const f = input.files?.[0];
       if (!f) return;
       try {
-        await _postFormDataJsonWithApiBases('/api/accounts/import-snapshot/', f, 'file');
+        const summary = await _postFormDataJsonWithApiBases('/api/accounts/import-snapshot/', f, 'file');
         await onDataChanged?.();
-        await uiAlert('CSV импортирован.', 'CSV');
+        const parts = [];
+        if (summary.accounts_created) parts.push(`аккаунтов создано: ${summary.accounts_created}`);
+        if (summary.accounts_updated) parts.push(`аккаунтов обновлено: ${summary.accounts_updated}`);
+        if (summary.posts_created) parts.push(`постов создано: ${summary.posts_created}`);
+        if (summary.posts_updated) parts.push(`постов обновлено: ${summary.posts_updated}`);
+        if (summary.account_snapshots_upserted) parts.push(`снапшотов аккаунтов: ${summary.account_snapshots_upserted}`);
+        if (summary.post_snapshots_upserted) parts.push(`снапшотов постов: ${summary.post_snapshots_upserted}`);
+        const errs = Array.isArray(summary.errors) ? summary.errors : [];
+        let msg = parts.length ? parts.join('\n') : 'Данные обработаны (без изменений счётчиков).';
+        if (errs.length) {
+          const errLines = errs.slice(0, 20).map((e) => `${e.section || '—'}, строка ${e.row}: ${e.message}`);
+          if (errs.length > 20) errLines.push(`…и ещё ${errs.length - 20} ошибок`);
+          msg += `\n\nОшибки (${errs.length}):\n${errLines.join('\n')}`;
+        }
+        await uiAlert(msg, errs.length ? 'CSV — с ошибками' : 'CSV импортирован');
       } catch (e) {
         await uiAlert(`Не удалось импортировать CSV: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
       }
@@ -6516,24 +7570,126 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
       <button
         type="button"
         onClick={() => { void downloadSavedRefreshReport(); }}
-        style={{ padding: '8px 14px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', fontSize: 13, cursor: 'pointer', marginBottom: 12 }}
+        style={{ padding: '8px 14px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', fontSize: 13, cursor: 'pointer', marginBottom: 8 }}
       >
         Скачать сохранённый отчёт последнего сбора (CSV)
       </button>
+      <button
+        type="button"
+        disabled={busy || opInProgress}
+        onClick={() => { void refreshLastAutoRefreshErrors(); }}
+        style={{ padding: '8px 14px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', fontSize: 13, cursor: (busy || opInProgress) ? 'default' : 'pointer', marginBottom: 12, display: 'block', opacity: (busy || opInProgress) ? 0.6 : 1 }}
+      >
+        Повторить ошибки последнего автообновления
+      </button>
+      <div style={{ fontSize: 11, color: 'var(--ink-mute)', marginTop: -6, marginBottom: 12, lineHeight: 1.45 }}>
+        Те же аккаунты, что со статусом «ошибка» в последнем завершённом автообновлении по расписанию (или «запустить сейчас»). В CSV-отчёте этого прогона они в колонке «ID аккаунта»; список ID сохраняется на сервере даже если выгрузка CSV в файл отключена в настройках.
+      </div>
+
+      <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', letterSpacing: '0.2em', marginBottom: 10 }}>ПРОПУСКАТЬ НЕДАВНО ОБНОВЛЁННЫЕ</div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+        {SKIP_OPTIONS.map((h) => (
+          <Pill key={h} active={skipRecent === h} onClick={() => setSkipRecent(h)}>
+            {h === 0 ? 'Не пропускать' : `< ${h}ч`}
+          </Pill>
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--ink-mute)', marginBottom: 14, lineHeight: 1.45 }}>
+        Общая настройка с «Автообновлением». Перед «Обновить» сохраняется на сервер. Недавно обновлённые не открывают браузер.
+      </div>
+
+      {(opInProgress || runStatus) && (
+        <div style={{ marginBottom: 14, padding: '12px 14px', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.02)' }}>
+          <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span>
+              {pipelineLabel(runStatus)}
+              {opInProgress ? ` · ${runStatus?.processed_accounts || 0}/${runStatus?.total_accounts || 0}` : ''}
+            </span>
+            {opInProgress && (
+              <span>{Math.max(0, Math.min(100, Number(runStatus?.progress_percent || 0)))}%</span>
+            )}
+          </div>
+          {opInProgress && (
+            <>
+              <div style={{ marginTop: 8, height: 8, borderRadius: 999, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${Math.max(0, Math.min(100, Number(runStatus?.progress_percent || 0)))}%`,
+                    height: '100%',
+                    borderRadius: 999,
+                    background: 'linear-gradient(90deg, #22c55e, #4ade80)',
+                    transition: 'width 260ms ease',
+                  }}
+                />
+              </div>
+              {runStatus?.current_account && (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ink-dim)', lineHeight: 1.4 }}>
+                  Сейчас: <span className="mono">{runStatus.current_account}</span>
+                  {runStatus.cancel_requested ? <span style={{ color: '#fecaca' }}> · остановка…</span> : null}
+                </div>
+              )}
+              <div style={{ marginTop: 6, fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.45 }}>
+                Прогресс хранится на сервере — можно закрыть вкладку и открыть модалку снова.
+              </div>
+              {Number(runStatus?.skip_recent_hours_config || 0) > 0 && (
+                <div style={{ marginTop: 8, fontSize: 11, color: '#fde68a', lineHeight: 1.45 }}>
+                  На сервере включён пропуск недавних: &lt; {runStatus.skip_recent_hours_config} ч — такие аккаунты не дергают браузер. Выберите «Не пропускать» и нажмите «Обновить».
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {(runStatus?.is_running || (Array.isArray(runStatus?.run_detail?.items) && runStatus.run_detail.items.length > 0)) && (
+        <button
+          type="button"
+          onClick={() => setRunDetailOpen(true)}
+          style={{ width: '100%', marginBottom: 14, padding: '11px 14px', borderRadius: 12, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: 'pointer', fontSize: 14, fontWeight: 500 }}
+        >
+          Подробнее: очередь и слоты воркеров
+        </button>
+      )}
+      {runDetailOpen && (
+        <AutoRefreshRunDetailOverlay status={runStatus} accent={accent} onClose={() => setRunDetailOpen(false)} refreshAutoStatus={refreshRunStatus} />
+      )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <button onClick={onClose} style={{ padding: '10px 16px', borderRadius: 10, border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-dim)', cursor: 'pointer' }}>Закрыть</button>
         <div style={{ display: 'flex', gap: 8 }}>
-          {busy && (
+          {opInProgress && (
             <button
-              onClick={stopRefresh}
+              type="button"
+              onClick={() => { void stopRefresh(); }}
               style={{ padding: '10px 16px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.45)', background: 'rgba(239,68,68,0.12)', color: '#fecaca', fontWeight: 600, cursor: 'pointer' }}
             >
               Остановить
             </button>
           )}
-          <button onClick={runRefresh} disabled={busy} style={{ padding: '10px 18px', borderRadius: 10, border: 'none', background: '#fff', color: '#000', fontWeight: 600, cursor: 'pointer', opacity: busy ? 0.6 : 1 }}>
-            {busy ? 'Обновление...' : `Обновить (${Array.from(selectedIds).filter((id) => filtered.some((a) => a.id === id)).length})`}
+          <button
+            type="button"
+            onClick={() => { void runRefreshClicks(); }}
+            disabled={busy || opInProgress}
+            title="Запросить total_clicks из Links для выбранных аккаунтов (без scrape платформ)"
+            style={{
+              padding: '10px 16px',
+              borderRadius: 10,
+              border: '1px solid #a78bfa88',
+              background: 'rgba(167,139,250,0.14)',
+              color: '#e9d5ff',
+              fontWeight: 600,
+              cursor: (busy || opInProgress) ? 'default' : 'pointer',
+              opacity: (busy || opInProgress) ? 0.6 : 1,
+            }}
+          >
+            {busy && !opInProgress ? 'Переходы…' : `↻ Переходы (${selectedCount})`}
+          </button>
+          <button
+            type="button"
+            onClick={() => { void runRefresh(); }}
+            disabled={busy || opInProgress}
+            style={{ padding: '10px 18px', borderRadius: 10, border: 'none', background: '#fff', color: '#000', fontWeight: 600, cursor: (busy || opInProgress) ? 'default' : 'pointer', opacity: (busy || opInProgress) ? 0.6 : 1 }}
+          >
+            {(busy || opInProgress) ? 'Обновление...' : `Обновить (${selectedCount})`}
           </button>
         </div>
       </div>
@@ -6749,13 +7905,21 @@ function App() {
       {route === 'tv'        && <TVScreen tweaks={tweaks} onExit={() => setRoute('accounts')} />}
       {route === 'accounts'  && <AccountsScreen key={`acc-${dataKey}`} tweaks={tweaks} onNavigate={setRoute} onDataChanged={reloadData} onOpenGlobalModal={setGlobalModal} onOpenAccount={(id) => { setSelectedAccountId(id); setRoute('account_detail'); }} />}
       {route === 'account_detail' && selectedAccountId != null && <AccountDetailScreen key={`detail-${selectedAccountId}-${dataKey}`} accountId={selectedAccountId} onBack={() => setRoute('accounts')} onDataChanged={reloadData} />}
-      {route === 'analytics' && <AnalyticsScreen key={`an-${dataKey}`} tweaks={tweaks} onOpenGlobalModal={setGlobalModal} />}
+      {route === 'analytics' && (
+        <AnalyticsScreen
+          key={`an-${dataKey}`}
+          tweaks={tweaks}
+          onOpenGlobalModal={setGlobalModal}
+          onOpenAccount={(id) => { setSelectedAccountId(id); setRoute('account_detail'); }}
+        />
+      )}
       {route === 'settings'  && <SettingsScreen key={`set-${dataKey}`} tweaks={tweaks} onBack={() => setRoute('accounts')} onDataChanged={reloadData} onOpenGlobalModal={setGlobalModal} />}
 
       {globalModal && (
         <ModalOverlay onClose={() => setGlobalModal(null)}>
           {globalModal === 'refresh_all' && (
             <RefreshAllModal
+              key={`refresh-all-${dataKey}`}
               accent={tweaks.accent}
               onClose={() => setGlobalModal(null)}
               onDataChanged={reloadData}

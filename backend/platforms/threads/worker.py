@@ -1,6 +1,6 @@
 """
 Standalone subprocess — fetches Threads profile data via threads.net,
-или список подписчиков (клик по «N подписчиков / followers / subscribers» → модалка).
+или список подписчиков (клик по надписи «N follower(s)» / «N подписчиков» → модалка; отдельный URL ``/followers`` не открывается).
 
 Invoked by platforms/threads/scraper.py as:
     python threads/worker.py '{"username": "handle"}'
@@ -25,7 +25,19 @@ from playwright.async_api import async_playwright
 
 from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK
 
-NAV_TIMEOUT  = 30_000   # ms
+
+def threads_nav_timeout_ms() -> int:
+    """Таймаут page.goto на профиль Threads (мс). По умолчанию 60 с, как в audience_scrape."""
+    raw = os.getenv("THREADS_NAV_TIMEOUT_MS")
+    if raw is None or not str(raw).strip():
+        return 60_000
+    try:
+        return max(15_000, min(120_000, int(str(raw).strip())))
+    except ValueError:
+        return 60_000
+
+
+NAV_TIMEOUT = threads_nav_timeout_ms()
 LOAD_TIMEOUT = 20_000   # ms
 POST_OPEN_TIMEOUT_MS = int(os.getenv("THREADS_POST_OPEN_TIMEOUT_MS", "28000") or "28000")
 POST_VIEWS_MAX_POSTS = int(os.getenv("THREADS_POST_VIEWS_MAX_POSTS", "28") or "28")
@@ -388,9 +400,15 @@ async def run_once(arg: dict):
         )
         page = context.pages[0] if context.pages else await context.new_page()
         try:
-            return await execute_payload(page, _wu, arg)
-        finally:
-            await _wu.close_context(context, _browser)
+            result = await execute_payload(page, _wu, arg)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            _write_response({"error": f"Ошибка worker: {exc}"})
+            await _wu.finish_cli_session_keep_browser_by_default("threads_worker", context, _browser)
+            return
+        _write_response(result)
+        await _wu.finish_cli_session_keep_browser_by_default("threads_worker", context, _browser)
 
 
 async def execute_payload(page, _wu, arg: dict) -> dict:
@@ -413,6 +431,9 @@ async def execute_payload(page, _wu, arg: dict) -> dict:
             max_posts_per_follower=mpp,
             skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
             audience_account_id=audience_account_id,
+            list_only=bool(arg.get("list_only")),
+            enrich_only=bool(arg.get("enrich_only")),
+            enrich_usernames=arg.get("enrich_usernames"),
         )
     username = str(arg.get("username", "")).lstrip("@")
     if not username:
@@ -930,6 +951,16 @@ async def _threads_recover_page(page, context):
             await page.close()
     except Exception:
         pass
+    # Закрыть остальные вкладки контекста — иначе при каждом recover накапливаются окна Chromium.
+    try:
+        for p in list(context.pages):
+            try:
+                if not p.is_closed():
+                    await p.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
     try:
         return await context.new_page()
     except Exception:
@@ -956,6 +987,7 @@ async def daemon_main() -> None:
                 )
                 return
             page = context.pages[0] if context.pages else await context.new_page()
+            await _wu.warm_playwright_page_home(page, "threads")
             _scrape_timeout_s = 360.0
             try:
                 for line in sys.stdin:
@@ -1013,7 +1045,10 @@ async def daemon_main() -> None:
                         continue
                     _write_response(result)
             finally:
-                await _wu.close_context(context, _browser)
+                if _wu.worker_autoclose_browser_on_daemon_exit():
+                    await _wu.close_context(context, _browser)
+                else:
+                    await _wu.daemon_idle_keep_browser_open("threads_worker", page, platform="threads")
     except BaseException as exc:
         _write_response({"error": f"Критическая ошибка Threads worker: {exc}"})
 
@@ -1039,4 +1074,4 @@ if __name__ == "__main__":
         except Exception:
             _write_response({"error": "Невалидный JSON payload"})
             sys.exit(1)
-        _write_response(asyncio.run(run_once(one_payload)))
+        asyncio.run(run_once(one_payload))

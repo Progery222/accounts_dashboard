@@ -6,7 +6,6 @@ from __future__ import annotations
 import csv
 import io
 import json
-import re
 from datetime import datetime
 from typing import Any
 
@@ -22,26 +21,43 @@ SECTION_ACCOUNT_SNAPSHOTS = "ACCOUNT_SNAPSHOTS"
 SECTION_POST_SNAPSHOTS = "POST_SNAPSHOTS"
 
 
+def _bool_csv(value: bool) -> str:
+    return "1" if value else "0"
+
+
+def _parse_bool(cell: str, *, default: bool = False) -> bool:
+    v = (cell or "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "y", "да")
+
+
 def build_snapshot_csv() -> bytes:
     """UTF-8 с BOM, секции # PROFILES, # ACCOUNTS, # POSTS и исторические snapshots."""
     out = io.StringIO(newline="")
     out.write("\ufeff")
 
-    # —— PROFILES ——
     out.write(f"# {SECTION_PROFILES}\n")
-    prof_headers = ["id", "name", "color"]
+    prof_headers = ["id", "name", "color", "description", "avatar_url", "is_hidden"]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(prof_headers)
     for p in Profile.objects.order_by("id"):
-        w.writerow([p.id, p.name, p.color])
+        w.writerow([
+            p.id,
+            p.name,
+            p.color,
+            p.description,
+            p.avatar_url,
+            _bool_csv(p.is_hidden),
+        ])
 
     out.write("\n")
-    # —— ACCOUNTS ——
     out.write(f"# {SECTION_ACCOUNTS}\n")
     acc_headers = [
         "id", "username", "platform", "profile_id", "profile_name", "profile_color",
         "display_name", "avatar_url", "bio",
         "follower_count", "like_count", "view_count", "post_count",
+        "link_click_count", "profile_unavailable",
     ]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(acc_headers)
@@ -60,6 +76,8 @@ def build_snapshot_csv() -> bytes:
             a.like_count,
             a.view_count,
             a.post_count,
+            a.link_click_count,
+            _bool_csv(a.profile_unavailable),
         ])
 
     out.write(f"\n# {SECTION_POSTS}\n")
@@ -91,7 +109,7 @@ def build_snapshot_csv() -> bytes:
     out.write(f"\n# {SECTION_ACCOUNT_SNAPSHOTS}\n")
     acc_snap_headers = [
         "account_platform", "account_username", "date",
-        "follower_count", "like_count", "view_count", "post_count",
+        "follower_count", "like_count", "view_count", "post_count", "link_click_count",
     ]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(acc_snap_headers)
@@ -105,6 +123,7 @@ def build_snapshot_csv() -> bytes:
             s.like_count,
             s.view_count,
             s.post_count,
+            s.link_click_count,
         ])
 
     out.write(f"\n# {SECTION_POST_SNAPSHOTS}\n")
@@ -135,8 +154,6 @@ def _parse_sections(text: str) -> dict[str, list[list[str]]]:
     if lines and lines[0].startswith("\ufeff"):
         lines[0] = lines[0].lstrip("\ufeff")
 
-    # Keep raw section text first, then parse each section with csv.reader over
-    # the full block. This preserves multiline quoted cells.
     raw_sections: dict[str, list[str]] = {}
     current: str | None = None
 
@@ -192,13 +209,6 @@ def _parse_profile_id(v: str) -> int | None:
 
 
 def _resolve_profile(*, profile_id_raw: str, profile_name_raw: str, profile_color_raw: str) -> int | None:
-    """
-    Resolve profile for account import:
-      1) existing profile by id,
-      2) existing profile by name,
-      3) create profile by name/color.
-    Returns profile_id or None.
-    """
     pid = _parse_profile_id(profile_id_raw)
     if pid is not None:
         return pid
@@ -210,7 +220,6 @@ def _resolve_profile(*, profile_id_raw: str, profile_name_raw: str, profile_colo
 
     existing = Profile.objects.filter(name=name).order_by("id").first()
     if existing:
-        # Keep color in sync if imported color differs.
         if color and existing.color != color:
             existing.color = color
             existing.save(update_fields=["color"])
@@ -234,25 +243,34 @@ def _parse_hashtags(cell: str) -> list[str]:
     return [t.strip() for t in cell.split(";") if t.strip()]
 
 
-def _parse_posted_at(cell: str):
+def _parse_iso_datetime(cell: str):
     cell = (cell or "").strip()
     if not cell:
         return None
+    for raw in (cell.replace("Z", "+00:00"), cell):
+        try:
+            dt = datetime.fromisoformat(raw)
+            if timezone.is_naive(dt):
+                dt = timezone.make_aware(dt, timezone.get_current_timezone())
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_posted_at(cell: str):
+    return _parse_iso_datetime(cell)
 
 
 def _parse_date(cell: str):
     cell = (cell or "").strip()
     if not cell:
         return None
+    dt = _parse_iso_datetime(cell)
+    if dt is not None:
+        return dt.date()
     try:
         return datetime.fromisoformat(cell).date()
-    except ValueError:
-        return None
-    try:
-        dt = datetime.fromisoformat(cell.replace("Z", "+00:00"))
-        if timezone.is_naive(dt):
-            dt = timezone.make_aware(dt, timezone.get_current_timezone())
-        return dt
     except ValueError:
         return None
 
@@ -300,6 +318,10 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
     if prof_rows:
         header = [c.strip() for c in prof_rows[0]]
         hmap = {h.lower(): i for i, h in enumerate(header)}
+
+        def has_col(name: str) -> bool:
+            return name.lower() in hmap
+
         if "name" not in hmap:
             row_err(SECTION_PROFILES, 1, "В шапке PROFILES нужна колонка name")
         else:
@@ -324,14 +346,30 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     if obj is None:
                         obj = Profile.objects.create(name=name, color=color)
                         created = True
+                    update_fields: list[str] = []
                     if (not created) and color and obj.color != color:
                         obj.color = color
-                        obj.save(update_fields=["color"])
+                        update_fields.append("color")
+                    if has_col("description"):
+                        obj.description = col("description")
+                        update_fields.append("description")
+                    if has_col("avatar_url"):
+                        obj.avatar_url = col("avatar_url")
+                        update_fields.append("avatar_url")
+                    if has_col("is_hidden"):
+                        obj.is_hidden = _parse_bool(col("is_hidden"))
+                        update_fields.append("is_hidden")
+                    if update_fields:
+                        obj.save(update_fields=list(dict.fromkeys(update_fields)))
 
-    # ── ACCOUNTS (первая строка — заголовок) ──
+    # ── ACCOUNTS ──
     if acc_rows:
         header = [c.strip() for c in acc_rows[0]]
         hmap = {h.lower(): i for i, h in enumerate(header)}
+
+        def has_col(name: str) -> bool:
+            return name.lower() in hmap
+
         if "username" not in hmap and "user" not in hmap:
             row_err(SECTION_ACCOUNTS, 1, "В шапке ACCOUNTS нужна колонка username")
         elif "platform" not in hmap:
@@ -344,6 +382,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                 for rnum, row in enumerate(acc_rows[1:], start=2):
                     if not row or not any(c.strip() for c in row):
                         continue
+
                     def col(name: str, default="") -> str:
                         j = hmap.get(name.lower())
                         if j is None or j >= len(row):
@@ -373,23 +412,31 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         lc = _parse_int(col("like_count"))
                         vc = _parse_int(col("view_count"))
                         pc = _parse_int(col("post_count"))
+                        lcc = _parse_int(col("link_click_count")) if has_col("link_click_count") else 0
                     except ValueError as e:
                         row_err(SECTION_ACCOUNTS, rnum, f"Некорректное число: {e}")
                         continue
+                    profile_unavailable = (
+                        _parse_bool(col("profile_unavailable")) if has_col("profile_unavailable") else False
+                    )
+
+                    defaults = {
+                        "profile_id": prof,
+                        "display_name": display_name,
+                        "avatar_url": avatar_url,
+                        "bio": bio,
+                        "follower_count": fc,
+                        "like_count": lc,
+                        "view_count": vc,
+                        "post_count": pc,
+                        "link_click_count": lcc,
+                        "profile_unavailable": profile_unavailable,
+                    }
 
                     obj, created = Account.objects.get_or_create(
                         username=username,
                         platform=platform,
-                        defaults={
-                            "profile_id": prof,
-                            "display_name": display_name,
-                            "avatar_url": avatar_url,
-                            "bio": bio,
-                            "follower_count": fc,
-                            "like_count": lc,
-                            "view_count": vc,
-                            "post_count": pc,
-                        },
+                        defaults=defaults,
                     )
                     if not created:
                         obj.profile_id = prof
@@ -400,6 +447,10 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         obj.like_count = lc
                         obj.view_count = vc
                         obj.post_count = pc
+                        if has_col("link_click_count"):
+                            obj.link_click_count = lcc
+                        if has_col("profile_unavailable"):
+                            obj.profile_unavailable = profile_unavailable
                         obj.save()
                         result["accounts_updated"] += 1
                     else:
@@ -410,8 +461,15 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     snap.like_count = obj.like_count
                     snap.view_count = obj.view_count
                     snap.post_count = obj.post_count
+                    snap.link_click_count = obj.link_click_count
                     snap.save(
-                        update_fields=["follower_count", "like_count", "view_count", "post_count"]
+                        update_fields=[
+                            "follower_count",
+                            "like_count",
+                            "view_count",
+                            "post_count",
+                            "link_click_count",
+                        ]
                     )
 
     # ── POSTS ──
@@ -500,6 +558,10 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
     if acc_snap_rows:
         header = [c.strip() for c in acc_snap_rows[0]]
         hmap = {h.lower(): i for i, h in enumerate(header)}
+
+        def has_col(name: str) -> bool:
+            return name.lower() in hmap
+
         missing = [k for k in ("account_platform", "account_username", "date") if k not in hmap]
         if missing:
             row_err(
@@ -540,19 +602,23 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         lc = _parse_int(col("like_count"))
                         vc = _parse_int(col("view_count"))
                         pc = _parse_int(col("post_count"))
+                        lcc = _parse_int(col("link_click_count")) if has_col("link_click_count") else None
                     except ValueError as e:
                         row_err(SECTION_ACCOUNT_SNAPSHOTS, rnum, f"Некорректное число: {e}")
                         continue
 
+                    defaults: dict[str, int] = {
+                        "follower_count": fc,
+                        "like_count": lc,
+                        "view_count": vc,
+                        "post_count": pc,
+                    }
+                    if lcc is not None:
+                        defaults["link_click_count"] = lcc
                     AccountSnapshot.objects.update_or_create(
                         account=acc,
                         date=snap_date,
-                        defaults={
-                            "follower_count": fc,
-                            "like_count": lc,
-                            "view_count": vc,
-                            "post_count": pc,
-                        },
+                        defaults=defaults,
                     )
                     result["account_snapshots_upserted"] += 1
 

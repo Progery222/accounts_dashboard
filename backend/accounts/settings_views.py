@@ -10,6 +10,7 @@ Endpoints (фрагмент):
 import asyncio
 import os
 import shutil
+import sys
 import subprocess
 import tempfile
 import threading
@@ -55,11 +56,21 @@ def _cleanup_chrome_artifacts(profile_dir: str) -> None:
 
 
 def _get_profile_dir() -> str:
+    """Каталог профиля Chromium — тот же, что у worker_pool (ACCOUNTS_BROWSER_*)."""
     try:
         from django.conf import settings
-        return getattr(settings, "BROWSER_PROFILE_DIR", "") or _default_profile_dir()
+
+        accounts_prof = getattr(settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
+        if accounts_prof is not None:
+            p = Path(accounts_prof)
+            p.mkdir(parents=True, exist_ok=True)
+            return str(p)
+        legacy = (getattr(settings, "BROWSER_PROFILE_DIR", "") or "").strip()
+        if legacy:
+            return legacy
     except Exception:
-        return _default_profile_dir()
+        pass
+    return _default_profile_dir()
 
 
 def _get_setting(name: str, default: str = "") -> str:
@@ -480,28 +491,112 @@ def _release_chrome_profile_lock(profile_dir: str) -> None:
         except Exception:
             pass
 
-    # Linux: terminate stale Chromium processes bound to this user-data-dir.
     try:
-        subprocess.run(
-            ["pkill", "-f", f"--user-data-dir={profile_dir}"],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        from platforms.worker_utils import kill_chrome_processes_for_profile
+
+        kill_chrome_processes_for_profile(profile_dir)
     except Exception:
         pass
 
 
-def _run_tiktok_auth(job_id: str) -> None:
+def _prepare_browser_for_headed_auth(job_id: str | None = None) -> str:
+    """
+    Перед окном входа: остановить фоновые Playwright-воркеры (они держат профиль)
+    и снять lock Chromium.
+    """
     profile_dir = _get_profile_dir()
+    if job_id:
+        _set_job(
+            job_id,
+            "pending",
+            "Останавливаю фоновые воркеры и открываю окно браузера…",
+        )
+    try:
+        from platforms.worker_pool import shutdown_all_workers
+
+        shutdown_all_workers()
+    except Exception:
+        pass
+    time.sleep(0.4)
+    _release_chrome_profile_lock(profile_dir)
+    return profile_dir
+
+
+def _auth_nav_timeout_ms() -> int:
+    raw = os.environ.get("AUTH_NAV_TIMEOUT_MS")
+    if raw is None or not str(raw).strip():
+        return 45_000
+    try:
+        return max(15_000, min(120_000, int(str(raw).strip())))
+    except ValueError:
+        return 45_000
+
+
+def _format_headed_browser_error(exc: Exception) -> str:
+    msg = str(exc).replace("\r\n", " ").replace("\n", " ").strip()
+    low = msg.lower()
+    if "target page" in low or "has been closed" in low:
+        return (
+            f"{msg}. Возможно, профиль браузера занят — закройте другие окна Chromium "
+            "или дождитесь окончания автообновления и повторите."
+        )
+    if "process" in low and "exit" in low:
+        return (
+            f"{msg}. Не удалось запустить Chromium — проверьте Playwright "
+            "(python -m playwright install chromium) и что профиль не заблокирован."
+        )
+    if "timeout" in low and "exceeded" in low:
+        return f"{msg}. Проверьте интернет и повторите; при медленной сети увеличьте AUTH_NAV_TIMEOUT_MS."
+    return msg
+
+
+async def _launch_persistent_context(
+    pw,
+    profile_dir: str,
+    *,
+    headless: bool = False,
+    locale: str = "ru-RU",
+):
+    """Запуск Chromium с профилем; повтор при артефактах lock/CHROME_DELETE."""
+    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    last_exc: Exception | None = None
+    kwargs: dict = {
+        "headless": headless,
+        "args": ["--disable-blink-features=AutomationControlled"],
+        "locale": locale,
+    }
+    if not headless:
+        kwargs["viewport"] = {"width": 1280, "height": 900}
+    for attempt in range(2):
+        try:
+            return await pw.chromium.launch_persistent_context(profile_dir, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                _cleanup_chrome_artifacts(profile_dir)
+                await asyncio.sleep(0.8)
+    assert last_exc is not None
+    raise last_exc
+
+
+def _run_tiktok_auth(job_id: str) -> None:
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
     username = _get_setting("TIKTOK_USERNAME")
     password = _get_setting("TIKTOK_PASSWORD")
-    autofill_enabled = _get_setting("TIKTOK_AUTH_AUTOFILL", "false").strip().lower() in {
-        "1", "true", "yes", "on", "y",
-    }
+    # По умолчанию: автозаполнение, если в .env заданы и логин, и пароль.
+    # TIKTOK_AUTH_AUTOFILL=false — никогда не подставлять; true — подставлять при наличии пары.
+    raw_af = (_get_setting("TIKTOK_AUTH_AUTOFILL", "") or "").strip().lower()
+    if raw_af in {"0", "false", "no", "off", "n"}:
+        autofill_enabled = False
+    elif raw_af in {"1", "true", "yes", "on", "y"}:
+        autofill_enabled = True
+    else:
+        autofill_enabled = bool(username and password)
 
     async def _async():
         from playwright.async_api import async_playwright
+
+        from platforms.tiktok.auth_browser import try_fill_tiktok_login_credentials
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -511,49 +606,54 @@ def _run_tiktok_auth(job_id: str) -> None:
             xvfb_proc = _start_xvfb_if_needed()
             if xvfb_proc is not None:
                 _set_job(job_id, "pending", "Запущен Xvfb, открываю TikTok…")
-            _release_chrome_profile_lock(profile_dir)
 
             async with async_playwright() as pw:
-                ctx = None
-                for _attempt in range(2):
-                    try:
-                        ctx = await pw.chromium.launch_persistent_context(
-                            profile_dir,
-                            headless=False,
-                            args=["--disable-blink-features=AutomationControlled"],
-                            locale="en-US",
-                            viewport={"width": 1280, "height": 900},
-                        )
-                        break
-                    except Exception as _launch_exc:
-                        if _attempt == 0:
-                            _cleanup_chrome_artifacts(profile_dir)
-                            await asyncio.sleep(0.8)
-                        else:
-                            raise _launch_exc
+                ctx = await _launch_persistent_context(
+                    pw, profile_dir, headless=False, locale="en-US",
+                )
                 try:
                     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                     _set_job(job_id, "pending", "Открываю TikTok…")
-                    await page.goto("https://www.tiktok.com/login",
-                                    wait_until="domcontentloaded", timeout=30_000)
-                    await page.wait_for_timeout(1500)
-
-                    # Optional autofill only; never auto-submit to avoid triggering
-                    # TikTok "maximum login attempts" lockouts.
                     if autofill_enabled and username and password:
-                        try:
-                            await page.fill(
-                                'input[name="username"], input[placeholder*="email" i], input[autocomplete="username"]',
-                                username,
-                                timeout=4000,
+                        ok = await try_fill_tiktok_login_credentials(page, username, password)
+                        if ok:
+                            _set_job(
+                                job_id,
+                                "pending",
+                                "Логин и пароль подставлены — завершите вход (капча/2FA при необходимости)…",
                             )
-                            await page.wait_for_timeout(400)
-                            await page.fill('input[type="password"]', password, timeout=4000)
-                        except Exception:
-                            pass  # user fills manually
-
-                    _set_job(job_id, "pending", "Войдите в TikTok в открытом окне браузера (лучше через QR/2FA)…")
+                        else:
+                            print(
+                                "[tiktok_auth] автозаполнение не удалось — введите логин и пароль вручную.",
+                                file=sys.stderr,
+                            )
+                            try:
+                                await page.goto(
+                                    "https://www.tiktok.com/login",
+                                    wait_until="domcontentloaded",
+                                    timeout=_auth_nav_timeout_ms(),
+                                )
+                                await page.wait_for_timeout(1500)
+                            except Exception:
+                                pass
+                            _set_job(
+                                job_id,
+                                "pending",
+                                "Войдите в TikTok в открытом окне браузера (автоподстановка не сработала)…",
+                            )
+                    else:
+                        await page.goto(
+                            "https://www.tiktok.com/login",
+                            wait_until="domcontentloaded",
+                            timeout=_auth_nav_timeout_ms(),
+                        )
+                        await page.wait_for_timeout(1500)
+                        _set_job(
+                            job_id,
+                            "pending",
+                            "Войдите в TikTok в открытом окне браузера (лучше через QR/2FA)…",
+                        )
 
                     # Poll until sessionid cookie appears in the profile DB (up to 3 min)
                     for _ in range(180):
@@ -568,13 +668,14 @@ def _run_tiktok_auth(job_id: str) -> None:
                     await ctx.storage_state(path=str(state_path))
                     _set_job(job_id, "done", "Вход в TikTok выполнен успешно!")
                 except Exception as e:
-                    _set_job(job_id, "error", f"Ошибка: {e}")
+                    _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
                 finally:
-                    await ctx.close()
+                    if ctx is not None:
+                        await ctx.close()
         except FileNotFoundError:
             _set_job(job_id, "error", "Xvfb не установлен на сервере. Установите пакет xvfb.")
         except Exception as e:
-            _set_job(job_id, "error", f"Ошибка: {e}")
+            _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
         finally:
             if xvfb_proc is not None:
                 xvfb_proc.terminate()
@@ -718,47 +819,38 @@ def _run_platform_cookie_import(
     post_import_fn(ctx) is awaited before ctx.close() — use it for extra steps
     (e.g. saving an Instaloader session from the imported cookies).
     """
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
         from playwright.async_api import async_playwright
-        _set_job(job_id, "pending", "Открываю профиль браузера…")
-        Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
-        async with async_playwright() as pw:
-            ctx = None
-            for _attempt in range(2):
+        try:
+            _set_job(job_id, "pending", "Открываю профиль браузера…")
+
+            async with async_playwright() as pw:
+                ctx = await _launch_persistent_context(pw, profile_dir, headless=True)
                 try:
-                    ctx = await pw.chromium.launch_persistent_context(
-                        profile_dir,
-                        headless=True,
-                        args=["--disable-blink-features=AutomationControlled"],
-                    )
-                    break
-                except Exception as _launch_exc:
-                    if _attempt == 0:
-                        _cleanup_chrome_artifacts(profile_dir)
-                    else:
-                        raise _launch_exc
-            try:
-                await ctx.add_cookies(pw_cookies)
-                _set_job(job_id, "pending", "Куки добавлены, сохраняю профиль…")
-                # Export per-platform state BEFORE post_import_fn / close so that
-                # workers can use an ephemeral context and the profile stays intact.
-                if state_export_path:
-                    await ctx.storage_state(path=state_export_path)
-                if post_import_fn:
-                    await post_import_fn(ctx)
-            except Exception as e:
-                _set_job(job_id, "error", f"Ошибка добавления куков: {e}")
-                return
-            finally:
-                await ctx.close()
+                    await ctx.add_cookies(pw_cookies)
+                    _set_job(job_id, "pending", "Куки добавлены, сохраняю профиль…")
+                    # Export per-platform state BEFORE post_import_fn / close so that
+                    # workers can use an ephemeral context and the profile stays intact.
+                    if state_export_path:
+                        await ctx.storage_state(path=state_export_path)
+                    if post_import_fn:
+                        await post_import_fn(ctx)
+                except Exception as e:
+                    _set_job(job_id, "error", f"Ошибка добавления куков: {_format_headed_browser_error(e)}")
+                    return
+                finally:
+                    if ctx is not None:
+                        await ctx.close()
 
-        if has_session_fn():
-            _set_job(job_id, "done", success_msg)
-        else:
-            _set_job(job_id, "error", fail_msg)
+            if has_session_fn():
+                _set_job(job_id, "done", success_msg)
+            else:
+                _set_job(job_id, "error", fail_msg)
+        except Exception as e:
+            _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -990,7 +1082,7 @@ async def _instagram_login_fully_complete(context, page) -> bool:
 
 
 def _run_instagram_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
     username = _get_setting("INSTAGRAM_USERNAME")
     password = _get_setting("INSTAGRAM_PASSWORD")
     session_file = _get_setting("INSTAGRAM_SESSION_FILE", "instagram.session")
@@ -1006,18 +1098,16 @@ def _run_instagram_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                 _set_job(job_id, "pending", "Открываю Instagram…")
-                await page.goto("https://www.instagram.com/", wait_until="domcontentloaded", timeout=30_000)
+                await page.goto(
+                    "https://www.instagram.com/",
+                    wait_until="domcontentloaded",
+                    timeout=_auth_nav_timeout_ms(),
+                )
                 await page.wait_for_timeout(2000)
 
                 already_logged_in = await _instagram_login_fully_complete(ctx, page)
@@ -1082,12 +1172,13 @@ def _run_instagram_auth(job_id: str) -> None:
                     pass
 
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                try:
-                    await ctx.close()
-                except Exception:
-                    pass
+                if ctx is not None:
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1108,7 +1199,7 @@ def instagram_start_auth(request):
 # ── Telegram browser auth ─────────────────────────────────────────────────────
 
 def _run_telegram_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
         from playwright.async_api import async_playwright
@@ -1117,13 +1208,7 @@ def _run_telegram_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
@@ -1131,7 +1216,7 @@ def _run_telegram_auth(job_id: str) -> None:
                 await page.goto(
                     "https://web.telegram.org/k/",
                     wait_until="domcontentloaded",
-                    timeout=30_000,
+                    timeout=_auth_nav_timeout_ms(),
                 )
 
                 # Wait for the app to paint something (auth page or main UI)
@@ -1182,9 +1267,10 @@ def _run_telegram_auth(job_id: str) -> None:
                 _set_job(job_id, "done", "Вход в Telegram выполнен успешно!")
 
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1205,7 +1291,7 @@ def telegram_start_auth(request):
 # ── X (Twitter) browser auth ──────────────────────────────────────────────────
 
 def _run_x_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
         from playwright.async_api import async_playwright
@@ -1214,18 +1300,16 @@ def _run_x_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                 _set_job(job_id, "pending", "Открываю X…")
-                await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=30_000)
+                await page.goto(
+                    "https://x.com/home",
+                    wait_until="domcontentloaded",
+                    timeout=_auth_nav_timeout_ms(),
+                )
                 await page.wait_for_timeout(2000)
 
                 _IS_LOGGED_IN_JS = """
@@ -1259,9 +1343,10 @@ def _run_x_auth(job_id: str) -> None:
                 _set_job(job_id, "done", "Вход в X выполнен успешно!")
 
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1282,7 +1367,7 @@ def x_start_auth(request):
 # ── Threads browser auth ──────────────────────────────────────────────────────
 
 def _run_threads_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
         from playwright.async_api import async_playwright
@@ -1291,18 +1376,16 @@ def _run_threads_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
                 _set_job(job_id, "pending", "Открываю Threads…")
-                await page.goto("https://www.threads.com/", wait_until="domcontentloaded", timeout=30_000)
+                await page.goto(
+                    "https://www.threads.com/",
+                    wait_until="domcontentloaded",
+                    timeout=_auth_nav_timeout_ms(),
+                )
                 await page.wait_for_timeout(3000)
 
                 # Click "Continue as …" button if it appears (Instagram session already exists)
@@ -1350,9 +1433,10 @@ def _run_threads_auth(job_id: str) -> None:
                 _set_job(job_id, "done", "Вход в Threads выполнен успешно!")
 
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1373,7 +1457,7 @@ def threads_start_auth(request):
 # ── Facebook browser auth ─────────────────────────────────────────────────────
 
 def _run_facebook_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
     email    = _get_setting("FACEBOOK_EMAIL")
     password = _get_setting("FACEBOOK_PASSWORD")
 
@@ -1384,13 +1468,7 @@ def _run_facebook_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
@@ -1398,7 +1476,7 @@ def _run_facebook_auth(job_id: str) -> None:
                 await page.goto(
                     "https://www.facebook.com/",
                     wait_until="domcontentloaded",
-                    timeout=30_000,
+                    timeout=_auth_nav_timeout_ms(),
                 )
                 await page.wait_for_timeout(2000)
 
@@ -1428,7 +1506,7 @@ def _run_facebook_auth(job_id: str) -> None:
                         await page.goto(
                             "https://www.facebook.com/login/",
                             wait_until="domcontentloaded",
-                            timeout=20_000,
+                            timeout=_auth_nav_timeout_ms(),
                         )
                         await page.wait_for_timeout(1500)
 
@@ -1476,9 +1554,10 @@ def _run_facebook_auth(job_id: str) -> None:
                 _set_job(job_id, "done", "Вход в Facebook выполнен успешно!")
 
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1534,7 +1613,7 @@ def facebook_import_cookies(request):
 # ── Rumble browser auth ────────────────────────────────────────────────────────
 
 def _run_rumble_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
         from playwright.async_api import async_playwright
@@ -1543,17 +1622,15 @@ def _run_rumble_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
                 _set_job(job_id, "pending", "Открываю Rumble…")
-                await page.goto("https://rumble.com/", wait_until="domcontentloaded", timeout=30_000)
+                await page.goto(
+                    "https://rumble.com/",
+                    wait_until="domcontentloaded",
+                    timeout=_auth_nav_timeout_ms(),
+                )
                 await page.wait_for_timeout(2000)
 
                 _set_job(
@@ -1573,9 +1650,10 @@ def _run_rumble_auth(job_id: str) -> None:
                 await ctx.storage_state(path=str(state_path))
                 _set_job(job_id, "done", "Авторизация Rumble сохранена успешно!")
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1627,7 +1705,7 @@ def rumble_import_cookies(request):
 # ── Reddit browser auth ────────────────────────────────────────────────────────
 
 def _run_reddit_auth(job_id: str) -> None:
-    profile_dir = _get_profile_dir()
+    profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
         from playwright.async_api import async_playwright
@@ -1636,17 +1714,15 @@ def _run_reddit_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await pw.chromium.launch_persistent_context(
-                profile_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                locale="ru-RU",
-                viewport={"width": 1280, "height": 900},
-            )
+            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
                 _set_job(job_id, "pending", "Открываю Reddit…")
-                await page.goto("https://www.reddit.com/login/", wait_until="domcontentloaded", timeout=30_000)
+                await page.goto(
+                    "https://www.reddit.com/login/",
+                    wait_until="domcontentloaded",
+                    timeout=_auth_nav_timeout_ms(),
+                )
                 await page.wait_for_timeout(2000)
 
                 _set_job(
@@ -1666,9 +1742,10 @@ def _run_reddit_auth(job_id: str) -> None:
                 await ctx.storage_state(path=str(state_path))
                 _set_job(job_id, "done", "Авторизация Reddit сохранена успешно!")
             except Exception as e:
-                _set_job(job_id, "error", f"Ошибка: {e}")
+                _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
-                await ctx.close()
+                if ctx is not None:
+                    await ctx.close()
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

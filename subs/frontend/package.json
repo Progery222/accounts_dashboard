@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite --port 5180",
     "tunnel": "cloudflared tunnel --config cloudflared.5180.yml --url http://127.0.0.1:5180",
+    "tunnel:5180": "cloudflared tunnel --config cloudflared.5180.yml --url http://127.0.0.1:5180",
     "tunnel:login": "cloudflared tunnel login",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 5180"

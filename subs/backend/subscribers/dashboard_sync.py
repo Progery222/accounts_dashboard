@@ -19,17 +19,27 @@ def _dashboard_base() -> str:
     return getattr(settings, "DASHBOARD_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 
-def _http_json(method: str, path: str, *, body: dict | None = None, timeout: int = 120) -> Any:
+def _http_json(
+    method: str,
+    path: str,
+    *,
+    body: dict | None = None,
+    timeout: int = 120,
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
     url = f"{_dashboard_base()}{path}"
     data = None if body is None else json.dumps(body).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        **({"Content-Type": "application/json"} if data is not None else {}),
+    }
+    if extra_headers:
+        headers.update(extra_headers)
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
-        headers={
-            "Accept": "application/json",
-            **({"Content-Type": "application/json"} if data is not None else {}),
-        },
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -118,13 +128,18 @@ def sync_profiles_and_accounts() -> dict[str, int]:
     return {"profiles_upserted": p_n, "accounts_upserted": a_n}
 
 
-def dashboard_refresh_account(dashboard_account_id: int, body: dict | None = None) -> None:
-    _http_json(
+def dashboard_refresh_account(dashboard_account_id: int, body: dict | None = None) -> Any:
+    return _http_json(
         "POST",
         f"/api/accounts/{int(dashboard_account_id)}/audience/refresh/",
         body=body if body is not None else {},
-        timeout=600,
+        timeout=3600,
     )
+
+
+def dashboard_stop_audience_scrape() -> None:
+    """Прервать Playwright-съём на дашборде (текущий audience/refresh из subs)."""
+    _http_json("POST", "/api/accounts/audience-scrape-stop/", body={}, timeout=30)
 
 
 def import_audience_into_subs(subs_account: Account) -> tuple[int, int]:
@@ -161,19 +176,64 @@ def import_audience_into_subs(subs_account: Account) -> tuple[int, int]:
             uname = str(row.get("username") or "").strip()
             if not uname:
                 continue
+            existing_member = AudienceMember.objects.filter(
+                platform=plat,
+                username=uname[:255],
+            ).first()
+            prev_fn_by_user: dict[str, dict] = {}
+            if existing_member and isinstance(existing_member.follower_network, list):
+                for x in existing_member.follower_network:
+                    if isinstance(x, dict):
+                        ku = str(x.get("username") or "").strip().lstrip("@").lower()
+                        if ku:
+                            prev_fn_by_user[ku] = x
+            fn_raw = row.get("follower_network")
+            fn_list = fn_raw if isinstance(fn_raw, list) else []
+            fn_safe: list = []
+            for ent in fn_list:
+                if len(fn_safe) >= 100:
+                    break
+                if not isinstance(ent, dict):
+                    continue
+                eu = str(ent.get("username") or "").strip().lstrip("@").lower()
+                if not eu:
+                    continue
+                ebio = str(ent.get("bio") or "").strip()[:2000]
+                if not ebio:
+                    prev = prev_fn_by_user.get(eu)
+                    if isinstance(prev, dict):
+                        ebio = str(prev.get("bio") or "").strip()[:2000]
+                fn_safe.append(
+                    {
+                        "username": eu[:255],
+                        "display_name": str(ent.get("display_name") or "")[:255],
+                        "avatar_url": str(ent.get("avatar_url") or "")[:2048],
+                        "bio": ebio,
+                        "is_private": bool(ent.get("is_private")),
+                        "follower_count": int(ent.get("follower_count") or 0),
+                        "following_count": int(ent.get("following_count") or 0),
+                        "like_count": int(ent.get("like_count") or 0),
+                    },
+                )
+            dash_bio = str(row.get("bio") or "").strip()[:2000]
+            defaults: dict = {
+                "external_id": str(row.get("external_id") or "")[:160],
+                "display_name": str(row.get("display_name") or "")[:255],
+                "avatar_url": str(row.get("avatar_url") or "")[:2048],
+                "is_private": bool(row.get("is_private")),
+                "follower_count": int(row.get("follower_count") or 0),
+                "following_count": int(row.get("following_count") or 0),
+                "like_count": int(row.get("like_count") or 0),
+                "follower_network": fn_safe,
+            }
+            if dash_bio:
+                defaults["bio"] = dash_bio
+            elif not existing_member:
+                defaults["bio"] = ""
             member, _ = AudienceMember.objects.update_or_create(
                 platform=plat,
                 username=uname[:255],
-                defaults={
-                    "external_id": str(row.get("external_id") or "")[:160],
-                    "display_name": str(row.get("display_name") or "")[:255],
-                    "avatar_url": str(row.get("avatar_url") or "")[:2048],
-                    "bio": str(row.get("bio") or "")[:2000],
-                    "is_private": bool(row.get("is_private")),
-                    "follower_count": int(row.get("follower_count") or 0),
-                    "following_count": int(row.get("following_count") or 0),
-                    "like_count": int(row.get("like_count") or 0),
-                },
+                defaults=defaults,
             )
             AccountAudienceMembership.objects.get_or_create(
                 account=subs_account,

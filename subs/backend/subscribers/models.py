@@ -101,6 +101,11 @@ class AudienceMember(models.Model):
     follower_count = models.BigIntegerField(default=0)
     following_count = models.BigIntegerField(default=0)
     like_count = models.BigIntegerField(default=0)
+    follower_network = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Подписчики этого подписчика (TikTok), снимок с дашборда.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

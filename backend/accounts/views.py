@@ -37,6 +37,7 @@ from rest_framework.decorators import api_view, action
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
 from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT
+from .audience import AUDIENCE_SYNC_SUPPORTED_PLATFORMS
 from .models import (
     Account,
     AccountAudienceMembership,
@@ -67,7 +68,14 @@ from platforms.profile_unavailable import (
 logger = logging.getLogger(__name__)
 
 
+def _is_refresh_stats_rejection(exc: BaseException) -> bool:
+    """Отказ сохранить подозрительные нули — не путать с удалённым профилем на площадке."""
+    return "Обновление не применено" in str(exc or "")
+
+
 def _mark_profile_unavailable_if_applicable(account: Account, exc: BaseException) -> None:
+    if _is_refresh_stats_rejection(exc):
+        return
     if not is_profile_unavailable_error(str(exc)):
         return
     Account.objects.filter(pk=account.pk).update(profile_unavailable=True)
@@ -199,11 +207,25 @@ def _scrape(account: Account) -> dict:
     raise ValueError(f"Обновление для «{platform}» не поддерживается.")
 
 
-def _sync_posts(account: Account, posts_data: list) -> None:
+def _mark_unseen_posts_missing(account: Account, seen_external_ids: set[str]) -> None:
+    """Пометить посты, отсутствующие в успешном съёме (оранжевая лампочка в UI)."""
+    now = timezone.now()
+    account.posts.exclude(external_id__in=seen_external_ids).filter(
+        missing_from_scrape_at__isnull=True,
+    ).update(missing_from_scrape_at=now)
+
+
+def _sync_posts(
+    account: Account,
+    posts_data: list,
+    *,
+    mark_unseen_missing: bool = True,
+) -> set[str]:
     today = timezone.localdate()
     seen_external_ids: set[str] = set()
     is_instagram = account.platform == Platform.INSTAGRAM
     is_threads = account.platform == Platform.THREADS
+    is_facebook = account.platform == Platform.FACEBOOK
 
     def _to_int(v) -> int:
         if v is None:
@@ -251,6 +273,13 @@ def _sync_posts(account: Account, posts_data: list) -> None:
             if parsed_like_count > 0:
                 prev_likes = int(post.like_count or 0)
                 post.like_count = max(prev_likes, parsed_like_count)
+        # Facebook: 0 без подтверждения — «данных нет»; confirmed после detail (кнопка в viewport) — пишем 0.
+        elif is_facebook:
+            if pd.get("like_count_confirmed"):
+                post.like_count = parsed_like_count
+            elif parsed_like_count > 0:
+                prev_likes = int(post.like_count or 0)
+                post.like_count = max(prev_likes, parsed_like_count)
         else:
             post.like_count = parsed_like_count
         post.comment_count = _to_int(pd.get("comment_count", 0))
@@ -271,27 +300,81 @@ def _sync_posts(account: Account, posts_data: list) -> None:
             comment_count=post.comment_count,
         )
 
-    # Full sync: remove posts that disappeared from platform (deleted/hidden).
-    # Их исторические снэпшоты остаются в БД, но из текущих списков и агрегатов
-    # они уходят.
-    #
-    # ВНИМАНИЕ: удалять «всё» при пустом `posts_data` опасно — на скриншоте у
-    # пользователя один сбой парсинга TikTok стирал все ранее сохранённые
-    # посты профиля. Авторитетный пустой список (например, действительно
-    # пустой профиль) обрабатывается выше через `_posts_authoritative=False`
-    # → ветка `_sync_posts` вообще не вызывается, либо явно вызывается с
-    # `posts_data=[]` только когда у нас есть гарантия, что пост-list
-    # действительно пуст.
-    if posts_data:
-        account.posts.exclude(external_id__in=seen_external_ids).delete()
-    elif account.post_count == 0:
-        # Профиль действительно пуст по счётчику — можно подчистить.
-        account.posts.all().delete()
+    if seen_external_ids:
+        # Пост снова в съёме — снимаем «не найден» (лампочка в UI пропадает).
+        account.posts.filter(external_id__in=seen_external_ids).update(
+            missing_from_scrape_at=None,
+        )
+    if mark_unseen_missing:
+        _mark_unseen_posts_missing(account, seen_external_ids)
+    return seen_external_ids
+
+
+def _posts_for_account_stats(account: Account):
+    """Посты, участвующие в суммах просмотров/лайков и в счётчике публикаций."""
+    return account.posts.filter(missing_from_scrape_at__isnull=True)
+
+
+def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> None:
+    """
+    Пересчёт view_count / like_count / post_count по постам без «не найден при скрапе».
+    Итоговые значения не уменьшаем относительно stats_before (помеченные посты не «роняют» метрики).
+    """
+    agg = _posts_for_account_stats(account).aggregate(
+        total_views=Sum("view_count"),
+        total_likes=Sum("like_count"),
+    )
+    new_views = int(agg["total_views"] or 0)
+    prev_views = int(stats_before.get("view_count", 0) or 0)
+    if account.platform == Platform.FACEBOOK:
+        account.view_count = max(prev_views, new_views)
+    elif account.platform == Platform.RUMBLE:
+        account.view_count = max(prev_views, int(account.view_count or 0))
+    elif account.platform in (Platform.INSTAGRAM, Platform.THREADS):
+        account.view_count = max(prev_views, new_views)
+    else:
+        account.view_count = max(prev_views, new_views)
+    if account.platform in (
+        Platform.YOUTUBE,
+        Platform.TELEGRAM,
+        Platform.INSTAGRAM,
+        Platform.X,
+        Platform.THREADS,
+        Platform.RUMBLE,
+        Platform.REDDIT,
+        Platform.FACEBOOK,
+    ):
+        prev_likes = int(stats_before.get("like_count", 0) or 0)
+        account.like_count = max(prev_likes, int(agg["total_likes"] or 0))
+    active_post_count = _posts_for_account_stats(account).count()
+    prev_post_count = int(stats_before.get("post_count", 0) or 0)
+    scraped_post_count = int(account.post_count or 0)
+    account.post_count = max(prev_post_count, active_post_count, scraped_post_count)
 
 
 _STAT_FIELDS = frozenset(
     ("follower_count", "like_count", "view_count", "post_count")
 )
+
+_ACCOUNT_REFRESH_SAVE_FIELDS = (
+    "display_name",
+    "avatar_url",
+    "bio",
+    "follower_count",
+    "like_count",
+    "view_count",
+    "post_count",
+    "link_click_count",
+    "profile_unavailable",
+    "updated_at",
+)
+
+
+def _restore_account_updated_at(account_id: int, preserved) -> None:
+    """После неуспешного refresh не трогаем «Обновлён» в UI (auto_now / частичный save)."""
+    if preserved is None:
+        return
+    Account.objects.filter(pk=account_id).update(updated_at=preserved)
 
 
 def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -> bool:
@@ -304,9 +387,17 @@ def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -
     # Оставляем только защиту по view_count (для Threads он ещё и max с предыдущим в пайплайне).
     if account.platform == Platform.THREADS:
         fields = ["view_count"]
+    elif account.platform == Platform.INSTAGRAM:
+        # Подписчики и лайки со скрапа часто 0 при лимитах/антиботе при том же живом профиле;
+        # полная проверка как у «обычных» платформ давала ложный отказ и HTTP 400 без сохранения.
+        # Защищаемся от подозрительного обнуления по просмотрам и числу постов.
+        fields = ["view_count", "post_count"]
     elif account.platform == Platform.FACEBOOK:
         # Сумма лайков по постам может закономерно обнулиться (все посты ≤ MIN_VIEWS для детальных лайков).
-        fields = ["follower_count", "view_count", "post_count"]
+        # Подписчики со скрапа часто 0 при той же живой странице (DOM / headless / язык блока) —
+        # если требовать «не обнулять follower_count», весь refresh откатывается и **не сохраняются**
+        # лайки постов после enrich. Не включаем follower_count и like_count в эту проверку.
+        fields = ["view_count", "post_count"]
     for f in fields:
         prev = int(stats_before.get(f, 0) or 0)
         cur = int(getattr(account, f, 0) or 0)
@@ -357,7 +448,7 @@ def _refresh_all_delay_seconds(account: Account) -> float:
         Platform.INSTAGRAM: (0.0, 0.0),
         Platform.TIKTOK: (0.8, 1.6),
         Platform.X: (0.8, 1.6),
-        Platform.THREADS: (0.8, 1.6),
+        Platform.THREADS: (2.0, 4.0),
         Platform.FACEBOOK: (5.0, 10.0),
         Platform.YOUTUBE: (5.0, 10.0),
         Platform.TELEGRAM: (0.3, 0.8),
@@ -390,13 +481,27 @@ def _format_refresh_error(account: Account, exc: BaseException) -> tuple[str, in
     _mark_profile_unavailable_if_applicable(account, exc)
     if isinstance(exc, ValueError):
         return user_visible_profile_unavailable_error(str(exc)), status.HTTP_400_BAD_REQUEST
-    return f"Ошибка: {exc}", status.HTTP_502_BAD_GATEWAY
+    # 500: внутренняя ошибка съёма/БД — не «шлюз»; текст в detail для клиента и лог для сервера.
+    return f"Ошибка: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
 def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -> tuple[Account | None, str | None, int | None]:
+    from .refresh_priority import account_refresh_priority_session
+
     try:
-        return _refresh_with_retry(account, scraped=scraped), None, None
+        with account_refresh_priority_session():
+            return _refresh_with_retry(account, scraped=scraped), None, None
     except Exception as exc:
+        logger.warning(
+            "refresh.account_failed",
+            extra={
+                "account_id": getattr(account, "id", None),
+                "platform": getattr(account, "platform", None),
+                "username": getattr(account, "username", None),
+                "exc_type": type(exc).__name__,
+            },
+            exc_info=True,
+        )
         detail, code = _format_refresh_error(account, exc)
         return None, detail, code
 
@@ -421,6 +526,41 @@ def _prewarm_workers(accounts: list[Account]) -> None:
 
 
 _refresh_all_start_lock = threading.Lock()
+
+
+def _schedule_skip_recent_cutoff() -> tuple[int, datetime.datetime | None]:
+    """(часы из расписания, cutoff updated_at) или (0, None) если пропуск выключен."""
+    cfg = RefreshScheduleConfig.get()
+    try:
+        cfg.refresh_from_db(fields=["skip_recent_hours"])
+    except Exception:
+        pass
+    hours = max(0, int(getattr(cfg, "skip_recent_hours", 0) or 0))
+    if hours <= 0:
+        return 0, None
+    return hours, timezone.now() - datetime.timedelta(hours=hours)
+
+
+def _persist_auto_refresh_run_item(account_id: int, **kwargs) -> None:
+    try:
+        with transaction.atomic():
+            st = AutoRefreshState.objects.select_for_update().get(pk=1)
+            rd = dict(st.run_detail or {})
+            items = [dict(x) for x in (rd.get("items") or [])]
+            aid = int(account_id)
+            for i, it in enumerate(items):
+                if int(it.get("account_id", -1)) != aid:
+                    continue
+                items[i] = {**it, **kwargs}
+                break
+            rd["items"] = items
+            st.run_detail = rd
+            st.save(update_fields=["run_detail", "updated_at"])
+    except Exception as e:
+        logger.warning(
+            "auto_refresh.run_detail_update_failed",
+            extra={"account_id": account_id, "error": str(e)},
+        )
 
 
 def _persist_refresh_all_run_item(account_id: int, **kwargs) -> None:
@@ -718,6 +858,8 @@ def _run_refresh_all_background(
                 break
         return out
 
+    _prev_worker_autoclose = os.environ.get("WORKER_AUTOCLOSE_BROWSER_ON_EXIT")
+    os.environ["WORKER_AUTOCLOSE_BROWSER_ON_EXIT"] = "1"
     try:
         accounts_qs = Account.objects.all().order_by("platform", "id")
         accounts_qs = _apply_visibility_filters(
@@ -727,7 +869,7 @@ def _run_refresh_all_background(
         )
         accounts = list(accounts_qs)
         accounts = _interleave_accounts_by_platform(accounts)
-        worker_count = _int_env("AUTO_REFRESH_WORKERS", 4, min_v=1, max_v=16)
+        worker_count = _int_env("AUTO_REFRESH_WORKERS", 6, min_v=1, max_v=16)
         _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
         run_items = [
@@ -754,249 +896,268 @@ def _run_refresh_all_background(
         if not accounts:
             return
 
-        _prewarm_workers(accounts)
+        skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
 
-        ig_all = [a for a in accounts if a.platform == Platform.INSTAGRAM]
-        ig_preload: dict[str, dict] = {}
-        if len(ig_all) > 1:
+        from .refresh_priority import account_refresh_priority_session
+
+        with account_refresh_priority_session():
             try:
-                from platforms.instagram.scraper import fetch_instagram_profiles_bulk
+                from integrations.links_sync import begin_refresh_all_links, clear_refresh_all_links
 
-                ig_preload = fetch_instagram_profiles_bulk([a.username for a in ig_all])
+                begin_refresh_all_links(accounts)
             except Exception as e:
-                print(f"[refresh_all] instagram bulk prefetch failed: {e}", file=sys.stderr)
-                ig_preload = {}
+                print(f"[refresh_all] links preload failed: {e}", file=sys.stderr)
 
-        queue_lock = threading.Lock()
-        report_lock = threading.Lock()
-        cooldown_lock = threading.Lock()
-        stop_requested = threading.Event()
-        next_idx = 0
-        report_by_index: list[dict | None] = [None] * len(accounts)
-        platform_limits = _platform_limits(accounts)
-        platform_semaphores = {
-            p: threading.BoundedSemaphore(value=max(1, int(v)))
-            for p, v in platform_limits.items()
-        }
-        platform_next_allowed_at = {p: 0.0 for p in platform_limits.keys()}
+            from django.conf import settings as dj_settings
 
-        thread_slot_map: dict[int, int] = {}
-        thread_slot_lock = threading.Lock()
+            if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
+                _prewarm_workers(accounts)
 
-        def _worker_slot() -> int:
-            tid = threading.get_ident()
-            with thread_slot_lock:
-                if tid not in thread_slot_map:
-                    thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
-                return thread_slot_map[tid]
+            from .parallel_account_queue import ParallelAccountQueue
 
-        def _claim_index() -> int | None:
-            nonlocal next_idx
-            with queue_lock:
-                if next_idx >= len(accounts):
-                    return None
-                idx = next_idx
-                next_idx += 1
-                return idx
+            report_lock = threading.Lock()
+            stop_requested = threading.Event()
+            report_by_index: list[dict | None] = [None] * len(accounts)
+            platform_limits = _platform_limits(accounts)
+            account_queue = ParallelAccountQueue(len(accounts), platform_limits)
 
-        def _worker() -> None:
-            while True:
-                if stop_requested.is_set():
-                    return
-                if _refresh_all_cancel_requested():
-                    _refresh_all_set_user_stop_message()
-                    stop_requested.set()
-                    return
-                idx = _claim_index()
-                if idx is None:
-                    return
-                close_old_connections()
-                if stop_requested.is_set():
-                    return
-                account = accounts[idx]
-                before = {
-                    "follower_count": account.follower_count,
-                    "like_count": account.like_count,
-                    "view_count": account.view_count,
-                    "post_count": account.post_count,
-                }
+            thread_slot_map: dict[int, int] = {}
+            thread_slot_lock = threading.Lock()
 
-                sem = platform_semaphores.get(account.platform)
-                if sem is None:
-                    sem = threading.BoundedSemaphore(value=1)
-                    platform_semaphores[account.platform] = sem
-                    with cooldown_lock:
-                        platform_next_allowed_at.setdefault(account.platform, 0.0)
+            def _worker_slot() -> int:
+                tid = threading.get_ident()
+                with thread_slot_lock:
+                    if tid not in thread_slot_map:
+                        thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
+                    return thread_slot_map[tid]
 
-                with sem:
-                    while True:
+            def _worker() -> None:
+                while True:
+                    if stop_requested.is_set():
+                        return
+                    if _refresh_all_cancel_requested():
+                        _refresh_all_set_user_stop_message()
+                        stop_requested.set()
+                        return
+                    idx = account_queue.claim(
+                        lambda i: accounts[i].platform,
+                        stop_event=stop_requested,
+                    )
+                    if idx is None:
+                        return
+                    close_old_connections()
+                    account = accounts[idx]
+                    before = {
+                        "follower_count": account.follower_count,
+                        "like_count": account.like_count,
+                        "view_count": account.view_count,
+                        "post_count": account.post_count,
+                    }
+                    row: dict | None = None
+                    attempted_network = False
+                    try:
                         if stop_requested.is_set():
                             return
                         if _refresh_all_cancel_requested():
                             _refresh_all_set_user_stop_message()
                             stop_requested.set()
                             return
-                        with cooldown_lock:
-                            wait_sec = platform_next_allowed_at.get(account.platform, 0.0) - time.monotonic()
-                        if wait_sec <= 0:
-                            break
-                        time.sleep(min(0.2, wait_sec))
 
-                    slot = _worker_slot()
-                    RefreshAllState.objects.filter(pk=1).update(
-                        current_account=f"{account.platform}/@{account.username}",
-                        updated_at=timezone.now(),
-                    )
-                    _persist_refresh_all_run_item(account.id, status="running", worker=slot)
+                        slot = _worker_slot()
+                        RefreshAllState.objects.filter(pk=1).update(
+                            current_account=f"{account.platform}/@{account.username}",
+                            updated_at=timezone.now(),
+                        )
+                        _persist_refresh_all_run_item(account.id, status="running", worker=slot)
 
-                    row: dict | None = None
-                    acc_mono_start = time.monotonic()
-                    acc_wall_start = timezone.now()
-                    try:
-                        ig_key = _normalize_instagram_username_key(account.username)
-                        with _account_refresh_mutex(account.id):
+                        acc_mono_start = time.monotonic()
+                        acc_wall_start = timezone.now()
+                        try:
                             if (
-                                account.platform == Platform.INSTAGRAM
-                                and len(ig_all) > 1
-                                and ig_key in ig_preload
+                                cutoff is not None
+                                and account.updated_at
+                                and account.updated_at >= cutoff
                             ):
-                                _refresh_with_retry(account, scraped=ig_preload[ig_key])
+                                account.refresh_from_db(
+                                    fields=[
+                                        "follower_count",
+                                        "like_count",
+                                        "view_count",
+                                        "post_count",
+                                        "updated_at",
+                                    ],
+                                )
+                                skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
+                                row = {
+                                    "id": account.id,
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "status": "пропущен",
+                                    "follower_count": account.follower_count,
+                                    "follower_delta": 0,
+                                    "like_count": account.like_count,
+                                    "like_delta": 0,
+                                    "view_count": account.view_count,
+                                    "view_delta": 0,
+                                    "post_count": account.post_count,
+                                    "post_delta": 0,
+                                    "detail": skip_detail,
+                                }
+                                _refresh_all_atomic_progress(failed=False)
+                                _persist_refresh_all_run_item(
+                                    account.id,
+                                    status="skipped",
+                                    worker=None,
+                                    detail=skip_detail,
+                                )
                             else:
-                                _refresh_with_retry(account)
-                        account.refresh_from_db(
-                            fields=["follower_count", "like_count", "view_count", "post_count", "updated_at"],
-                        )
-                        after = {
-                            "follower_count": account.follower_count,
-                            "like_count": account.like_count,
-                            "view_count": account.view_count,
-                            "post_count": account.post_count,
-                        }
-                        changed = {k: (after[k] != before[k]) for k in before}
-                        changed_count = sum(1 for v in changed.values() if v)
-                        status_label = "нет обновлений" if changed_count == 0 else "обновилось"
-                        row = {
-                            "id": account.id,
-                            "platform": account.platform,
-                            "username": account.username,
-                            "status": status_label,
-                            "follower_count": after["follower_count"],
-                            "follower_delta": after["follower_count"] - before["follower_count"],
-                            "like_count": after["like_count"],
-                            "like_delta": after["like_count"] - before["like_count"],
-                            "view_count": after["view_count"],
-                            "view_delta": after["view_count"] - before["view_count"],
-                            "post_count": after["post_count"],
-                            "post_delta": after["post_count"] - before["post_count"],
-                        }
-                        _refresh_all_atomic_progress(failed=False)
-                        _persist_refresh_all_run_item(account.id, status="done", worker=None, detail="")
-                    except Exception as e:
-                        detail, _ = _format_refresh_error(account, e)
-                        row = {
-                            "id": account.id,
-                            "platform": account.platform,
-                            "username": account.username,
-                            "status": "ошибка",
-                            "error": detail,
-                            "follower_count": before["follower_count"],
-                            "follower_delta": None,
-                            "like_count": before["like_count"],
-                            "like_delta": None,
-                            "view_count": before["view_count"],
-                            "view_delta": None,
-                            "post_count": before["post_count"],
-                            "post_delta": None,
-                        }
-                        _refresh_all_atomic_progress(failed=True, last_error=str(detail or ""))
-                        _persist_refresh_all_run_item(
-                            account.id,
-                            status="error",
-                            worker=None,
-                            detail=str(detail or "")[:800],
-                        )
-                    acc_mono_end = time.monotonic()
-                    acc_wall_end = timezone.now()
-                    if row is not None:
-                        row["refresh_duration_sec"] = round(acc_mono_end - acc_mono_start, 3)
-                        row["refresh_started_local"] = _refresh_all_local_dt_str(acc_wall_start)
-                        row["refresh_finished_local"] = _refresh_all_local_dt_str(acc_wall_end)
-                        if row.get("status") not in ("ошибка", "не выполнено"):
-                            row["account_db_updated_local"] = _refresh_all_local_dt_str(account.updated_at)
-                        else:
-                            row["account_db_updated_local"] = ""
-                    pause_sec = _refresh_all_delay_seconds(account)
-                    if pause_sec > 0:
-                        with cooldown_lock:
-                            platform_next_allowed_at[account.platform] = max(
-                                platform_next_allowed_at.get(account.platform, 0.0),
-                                time.monotonic() + pause_sec,
+                                attempted_network = True
+                                with _account_refresh_mutex(account.id):
+                                    _refresh_with_retry(account)
+                                account.refresh_from_db(
+                                    fields=[
+                                        "follower_count",
+                                        "like_count",
+                                        "view_count",
+                                        "post_count",
+                                        "link_click_count",
+                                        "updated_at",
+                                    ],
+                                )
+                                after = {
+                                    "follower_count": account.follower_count,
+                                    "like_count": account.like_count,
+                                    "view_count": account.view_count,
+                                    "post_count": account.post_count,
+                                }
+                                changed = {k: (after[k] != before[k]) for k in before}
+                                changed_count = sum(1 for v in changed.values() if v)
+                                status_label = "нет обновлений" if changed_count == 0 else "обновилось"
+                                row = {
+                                    "id": account.id,
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "status": status_label,
+                                    "follower_count": after["follower_count"],
+                                    "follower_delta": after["follower_count"] - before["follower_count"],
+                                    "like_count": after["like_count"],
+                                    "like_delta": after["like_count"] - before["like_count"],
+                                    "view_count": after["view_count"],
+                                    "view_delta": after["view_count"] - before["view_count"],
+                                    "post_count": after["post_count"],
+                                    "post_delta": after["post_count"] - before["post_count"],
+                                }
+                                _refresh_all_atomic_progress(failed=False)
+                                _persist_refresh_all_run_item(account.id, status="done", worker=None, detail="")
+                        except Exception as e:
+                            detail, _ = _format_refresh_error(account, e)
+                            row = {
+                                "id": account.id,
+                                "platform": account.platform,
+                                "username": account.username,
+                                "status": "ошибка",
+                                "error": detail,
+                                "follower_count": before["follower_count"],
+                                "follower_delta": None,
+                                "like_count": before["like_count"],
+                                "like_delta": None,
+                                "view_count": before["view_count"],
+                                "view_delta": None,
+                                "post_count": before["post_count"],
+                                "post_delta": None,
+                            }
+                            _refresh_all_atomic_progress(failed=True, last_error=str(detail or ""))
+                            _persist_refresh_all_run_item(
+                                account.id,
+                                status="error",
+                                worker=None,
+                                detail=str(detail or "")[:800],
                             )
+                        acc_mono_end = time.monotonic()
+                        acc_wall_end = timezone.now()
+                        if row is not None:
+                            row["refresh_duration_sec"] = round(acc_mono_end - acc_mono_start, 3)
+                            row["refresh_started_local"] = _refresh_all_local_dt_str(acc_wall_start)
+                            row["refresh_finished_local"] = _refresh_all_local_dt_str(acc_wall_end)
+                            if row.get("status") not in ("ошибка", "не выполнено"):
+                                row["account_db_updated_local"] = _refresh_all_local_dt_str(account.updated_at)
+                            else:
+                                row["account_db_updated_local"] = ""
+                    finally:
+                        if attempted_network:
+                            account_queue.set_platform_cooldown(
+                                account.platform,
+                                _refresh_all_delay_seconds(account),
+                            )
+                        if stop_requested.is_set() and row is None:
+                            account_queue.abandon(idx, account.platform)
+                        else:
+                            account_queue.finish(idx, account.platform)
 
-                with report_lock:
-                    report_by_index[idx] = row
+                    with report_lock:
+                        report_by_index[idx] = row
 
-        run_wall_start = timezone.now()
-        run_mono_start = time.monotonic()
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(_worker) for _ in range(worker_count)]
-            for f in futures:
-                f.result()
+            run_wall_start = timezone.now()
+            run_mono_start = time.monotonic()
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [executor.submit(_worker) for _ in range(worker_count)]
+                for f in futures:
+                    f.result()
 
-        _finalize_refresh_all_run_detail_stale()
+            _finalize_refresh_all_run_detail_stale()
 
-        report_rows: list[dict] = []
-        for i, row in enumerate(report_by_index):
-            if row is not None:
-                report_rows.append(row)
-                continue
-            acc_nf = accounts[i]
-            acc_nf.refresh_from_db()
-            fb = int(acc_nf.follower_count or 0)
-            lb = int(acc_nf.like_count or 0)
-            vb = int(acc_nf.view_count or 0)
-            pb = int(acc_nf.post_count or 0)
-            report_rows.append({
-                "id": acc_nf.id,
-                "platform": acc_nf.platform,
-                "username": acc_nf.username,
-                "status": "не выполнено",
-                "follower_count": fb,
-                "follower_delta": 0,
-                "like_count": lb,
-                "like_delta": 0,
-                "view_count": vb,
-                "view_delta": 0,
-                "post_count": pb,
-                "post_delta": 0,
-                "error": "остановка до обработки этого аккаунта",
-                "refresh_duration_sec": "",
-                "refresh_started_local": "",
-                "refresh_finished_local": "",
-                "account_db_updated_local": "",
-            })
+            report_rows: list[dict] = []
+            for i, row in enumerate(report_by_index):
+                if row is not None:
+                    report_rows.append(row)
+                    continue
+                acc_nf = accounts[i]
+                acc_nf.refresh_from_db()
+                fb = int(acc_nf.follower_count or 0)
+                lb = int(acc_nf.like_count or 0)
+                vb = int(acc_nf.view_count or 0)
+                pb = int(acc_nf.post_count or 0)
+                report_rows.append({
+                    "id": acc_nf.id,
+                    "platform": acc_nf.platform,
+                    "username": acc_nf.username,
+                    "status": "не выполнено",
+                    "follower_count": fb,
+                    "follower_delta": 0,
+                    "like_count": lb,
+                    "like_delta": 0,
+                    "view_count": vb,
+                    "view_delta": 0,
+                    "post_count": pb,
+                    "post_delta": 0,
+                    "error": "остановка до обработки этого аккаунта",
+                    "refresh_duration_sec": "",
+                    "refresh_started_local": "",
+                    "refresh_finished_local": "",
+                    "account_db_updated_local": "",
+                })
 
-        _refresh_all_apply_completion_summary(report_rows)
+            _refresh_all_apply_completion_summary(report_rows)
 
-        run_wall_end = timezone.now()
-        run_mono_end = time.monotonic()
-        run_duration_mono = max(0.0, run_mono_end - run_mono_start)
-        st_counts = (
-            RefreshAllState.objects.filter(pk=1)
-            .values("processed_accounts", "success_accounts", "failed_accounts")
-            .first()
-            or {}
-        )
-        _refresh_all_save_report_csv(
-            report_rows=report_rows,
-            run_wall_start=run_wall_start,
-            run_wall_end=run_wall_end,
-            run_duration_mono_sec=run_duration_mono,
-            worker_count=worker_count,
-            processed_db=int(st_counts.get("processed_accounts") or 0),
-            success_db=int(st_counts.get("success_accounts") or 0),
-            failed_db=int(st_counts.get("failed_accounts") or 0),
-        )
+            run_wall_end = timezone.now()
+            run_mono_end = time.monotonic()
+            run_duration_mono = max(0.0, run_mono_end - run_mono_start)
+            st_counts = (
+                RefreshAllState.objects.filter(pk=1)
+                .values("processed_accounts", "success_accounts", "failed_accounts")
+                .first()
+                or {}
+            )
+            _refresh_all_save_report_csv(
+                report_rows=report_rows,
+                run_wall_start=run_wall_start,
+                run_wall_end=run_wall_end,
+                run_duration_mono_sec=run_duration_mono,
+                worker_count=worker_count,
+                processed_db=int(st_counts.get("processed_accounts") or 0),
+                success_db=int(st_counts.get("success_accounts") or 0),
+                failed_db=int(st_counts.get("failed_accounts") or 0),
+            )
 
     except Exception as exc:
         logger.exception("refresh_all.background_failed")
@@ -1007,6 +1168,22 @@ def _run_refresh_all_background(
         except Exception:
             pass
     finally:
+        try:
+            from platforms.worker_pool import shutdown_playwright_pool_aggressive
+
+            shutdown_playwright_pool_aggressive()
+        except Exception as e:
+            print(f"[refresh_all] post-run browser cleanup failed: {e}", file=sys.stderr)
+        if _prev_worker_autoclose is None:
+            os.environ.pop("WORKER_AUTOCLOSE_BROWSER_ON_EXIT", None)
+        else:
+            os.environ["WORKER_AUTOCLOSE_BROWSER_ON_EXIT"] = _prev_worker_autoclose
+        try:
+            from integrations.links_sync import clear_refresh_all_links
+
+            clear_refresh_all_links()
+        except Exception:
+            pass
         close_old_connections()
         try:
             fin = RefreshAllState.get()
@@ -1024,6 +1201,17 @@ def _run_refresh_all_background(
 
 
 def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
+    account.refresh_from_db()
+    preserved_updated_at = account.updated_at
+    try:
+        return _apply_refresh_inner(account, scraped=scraped)
+    except Exception:
+        _restore_account_updated_at(account.pk, preserved_updated_at)
+        account.updated_at = preserved_updated_at
+        raise
+
+
+def _apply_refresh_inner(account: Account, scraped: dict | None = None) -> Account:
     snap, _ = account.take_snapshot_if_needed()
     logger.info(
         "refresh.snapshot_before",
@@ -1068,10 +1256,15 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
                 continue
             setattr(account, field, value)
 
+    seen_post_external_ids: set[str] = set()
     with transaction.atomic():
         if has_posts_key and (posts_authoritative or posts):
             try:
-                _sync_posts(account, posts)
+                seen_post_external_ids = _sync_posts(
+                    account,
+                    posts,
+                    mark_unseen_missing=False,
+                )
                 logger.info(
                     "refresh.posts_synced",
                     extra={
@@ -1082,7 +1275,7 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
                         "posts_authoritative": posts_authoritative,
                     },
                 )
-            except Exception as e:
+            except Exception:
                 logger.exception(
                     "refresh.posts_sync_failed",
                     extra={"account_id": account.id, "platform": account.platform, "username": account.username},
@@ -1093,43 +1286,7 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
                 "empty non-authoritative list from scraper",
             )
 
-        # Aggregate view_count from posts for most platforms.
-        # For YouTube and Telegram the like_count is also post-derived
-        # (the platform page doesn't expose a channel-level like counter).
-        agg = account.posts.aggregate(
-            total_views=Sum("view_count"),
-            total_likes=Sum("like_count"),
-        )
-        new_views = int(agg["total_views"] or 0)
-        # Facebook: уровня профиля нет стабильного счётчика просмотров — сумма по постам (Reels и т.д.).
-        # max с предыдущим — чтобы не «ронять» метрику при неполном списке постов в одном парсе.
-        if account.platform == Platform.FACEBOOK:
-            prev_total = int(stats_before.get("view_count", 0) or 0)
-            account.view_count = max(prev_total, new_views)
-        # Rumble: на /about есть свой cumulative views — значение со скрапа уже в account.view_count.
-        elif account.platform == Platform.RUMBLE:
-            pass
-        else:
-            # Instagram / Threads: сумма просмотров по постам не должна «падать» из‑за
-            # неполного парсинга или смены набора полей в DOM — иначе отрицательные дельты в UI.
-            if account.platform in (Platform.INSTAGRAM, Platform.THREADS):
-                prev_total = int(stats_before.get("view_count", 0) or 0)
-                account.view_count = max(prev_total, new_views)
-            else:
-                account.view_count = new_views
-        # For platforms that don't expose a channel-level like counter,
-        # aggregate from post likes instead.
-        if account.platform in (
-            Platform.YOUTUBE, Platform.TELEGRAM, Platform.INSTAGRAM,
-            Platform.X, Platform.THREADS, Platform.RUMBLE, Platform.REDDIT,
-            Platform.FACEBOOK,
-        ):
-            account.like_count = agg["total_likes"] or 0
-        # If the scraper didn't return a post_count (returned 0/None), fall back to
-        # the number of posts we actually have stored — better than showing a dash.
-        stored_post_count = account.posts.count()
-        if not account.post_count and stored_post_count:
-            account.post_count = stored_post_count
+        _apply_post_aggregates_to_account(account, stats_before)
 
         if not _refresh_stats_trustworthy(account, stats_before):
             raise ValueError(
@@ -1137,8 +1294,21 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
                 "или профиль помечен недоступным. Обновление не применено."
             )
 
+        if has_posts_key and posts_authoritative:
+            _mark_unseen_posts_missing(account, seen_post_external_ids)
+
+        try:
+            from integrations.links_sync import sync_link_clicks_for_account
+
+            account.link_click_count = sync_link_clicks_for_account(account)
+        except Exception as exc:
+            logger.warning(
+                "refresh.links_sync_failed",
+                extra={"account_id": account.id, "error": str(exc)},
+            )
+
         account.updated_at = timezone.now()
-        account.save()
+        account.save(update_fields=list(_ACCOUNT_REFRESH_SAVE_FIELDS))
 
         # Keep today's snapshot up-to-date with the freshly-scraped/aggregated values.
         # This is the baseline used by tomorrow's delta calculation.
@@ -1146,8 +1316,9 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
         snap.like_count = account.like_count
         snap.view_count = account.view_count
         snap.post_count = account.post_count
+        snap.link_click_count = account.link_click_count
         snap.save(update_fields=[
-            "follower_count", "like_count", "view_count", "post_count",
+            "follower_count", "like_count", "view_count", "post_count", "link_click_count",
         ])
         logger.info(
             "refresh.snapshot_after",
@@ -1175,6 +1346,7 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
             like_count=account.like_count,
             view_count=account.view_count,
             post_count=account.post_count,
+            link_click_count=account.link_click_count,
         )
 
         # Fix snapshots where view_count is still 0 — these are snapshots created
@@ -1292,11 +1464,17 @@ class AccountViewSet(viewsets.ModelViewSet):
                 Value(0),
                 output_field=IntegerField(),
             ),
+            _prev_link_click_count=Coalesce(
+                Subquery(prev_snapshots.values("link_click_count")[:1]),
+                Value(0),
+                output_field=BigIntegerField(),
+            ),
         ).annotate(
             _raw_view_delta=F("view_count") - F("_prev_view_count"),
             _follower_delta=F("follower_count") - F("_prev_follower_count"),
             _like_delta=F("like_count") - F("_prev_like_count"),
             _post_delta=F("post_count") - F("_prev_post_count"),
+            _link_click_delta=F("link_click_count") - F("_prev_link_click_count"),
         ).annotate(
             _view_delta=Case(
                 When(
@@ -1381,6 +1559,18 @@ class AccountViewSet(viewsets.ModelViewSet):
                 {"detail": "Сейчас уже выполняется другое автообновление/обновление."},
                 status=status.HTTP_409_CONFLICT,
             )
+        skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
+        run_items = [
+            {
+                "account_id": a.id,
+                "platform": a.platform,
+                "username": a.username,
+                "status": "queued",
+                "worker": None,
+                "detail": "",
+            }
+            for a in ordered
+        ]
         state.is_running = True
         state.source = "bulk_refresh"
         state.cancel_requested = False
@@ -1392,7 +1582,7 @@ class AccountViewSet(viewsets.ModelViewSet):
         state.last_error = ""
         state.started_at = timezone.now()
         state.finished_at = None
-        state.run_detail = {}
+        state.run_detail = {"items": run_items, "worker_count": 1}
         state.save(update_fields=[
             "is_running", "source", "cancel_requested", "total_accounts",
             "processed_accounts", "success_accounts", "failed_accounts",
@@ -1400,85 +1590,122 @@ class AccountViewSet(viewsets.ModelViewSet):
             "run_detail", "updated_at",
         ])
 
+        from .refresh_priority import account_refresh_priority_session
+
         try:
-            _prewarm_workers(ordered)
-
-            ig_accounts = [a for a in ordered if a.platform == Platform.INSTAGRAM]
-            preload: dict[str, dict] = {}
-            if len(ig_accounts) > 1:
+            with account_refresh_priority_session():
                 try:
-                    from platforms.instagram.scraper import fetch_instagram_profiles_bulk
+                    from platforms.worker_pool import shutdown_all_workers
 
-                    preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
-                except Exception as e:
-                    print(f"[bulk_refresh] instagram bulk prefetch failed: {e}", file=sys.stderr)
-                    preload = {}
+                    shutdown_all_workers()
+                except Exception:
+                    pass
 
-            accounts_out: list[dict] = []
-            errors_out: list[dict] = []
-            stop_requested = threading.Event()
-            state_lock = threading.Lock()
+                _prewarm_workers(ordered)
 
-            for a in ordered:
-                if stop_requested.is_set():
-                    break
-                with state_lock:
-                    state.refresh_from_db(fields=["cancel_requested"])
-                    if state.cancel_requested:
-                        stop_requested.set()
-                        state.last_error = "Обновление остановлено пользователем."
-                        state.save(update_fields=["last_error", "updated_at"])
+                ig_accounts = [a for a in ordered if a.platform == Platform.INSTAGRAM]
+                preload: dict[str, dict] = {}
+                if len(ig_accounts) > 1:
+                    try:
+                        from platforms.instagram.scraper import fetch_instagram_profiles_bulk
+
+                        preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
+                    except Exception as e:
+                        print(f"[bulk_refresh] instagram bulk prefetch failed: {e}", file=sys.stderr)
+                        preload = {}
+
+                accounts_out: list[dict] = []
+                errors_out: list[dict] = []
+                stop_requested = threading.Event()
+                state_lock = threading.Lock()
+
+                for a in ordered:
+                    if stop_requested.is_set():
                         break
-                    state.current_account = f"{a.platform}/@{a.username}"
-                    state.save(update_fields=["current_account", "updated_at"])
+                    with state_lock:
+                        state.refresh_from_db(fields=["cancel_requested"])
+                        if state.cancel_requested:
+                            stop_requested.set()
+                            state.last_error = "Обновление остановлено пользователем."
+                            state.save(update_fields=["last_error", "updated_at"])
+                            break
+                        state.current_account = f"{a.platform}/@{a.username}"
+                        state.save(update_fields=["current_account", "updated_at"])
 
-                with _account_refresh_mutex(a.id):
-                    key = _normalize_instagram_username_key(a.username)
-                    scraped = None
-                    if (
-                        a.platform == Platform.INSTAGRAM
-                        and len(ig_accounts) > 1
-                        and key in preload
-                    ):
-                        scraped = preload[key]
-                    account, detail, _ = _refresh_account_for_api(a, scraped=scraped)
+                    _persist_auto_refresh_run_item(a.id, status="running", worker=0)
+
+                    if cutoff is not None and a.updated_at and a.updated_at >= cutoff:
+                        skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
+                        _persist_auto_refresh_run_item(
+                            a.id,
+                            status="skipped",
+                            worker=None,
+                            detail=skip_detail,
+                        )
+                        with state_lock:
+                            state.processed_accounts += 1
+                            state.success_accounts += 1
+                            state.save(update_fields=[
+                                "processed_accounts", "success_accounts", "updated_at",
+                            ])
+                        continue
+
+                    with _account_refresh_mutex(a.id):
+                        Account.objects.filter(pk=a.pk).update(profile_unavailable=False)
+                        a.profile_unavailable = False
+                        key = _normalize_instagram_username_key(a.username)
+                        scraped = None
+                        if (
+                            a.platform == Platform.INSTAGRAM
+                            and len(ig_accounts) > 1
+                            and key in preload
+                        ):
+                            scraped = preload[key]
+                        account, detail, _ = _refresh_account_for_api(a, scraped=scraped)
+
+                    with state_lock:
+                        state.processed_accounts += 1
+                        if account is not None:
+                            state.success_accounts += 1
+                            _persist_auto_refresh_run_item(a.id, status="done", worker=None, detail="")
+                        else:
+                            state.failed_accounts += 1
+                            state.last_error = str(detail or "")
+                            _persist_auto_refresh_run_item(
+                                a.id,
+                                status="error",
+                                worker=None,
+                                detail=str(detail or "")[:800],
+                            )
+                        state.save(update_fields=[
+                            "processed_accounts", "success_accounts", "failed_accounts",
+                            "last_error", "updated_at",
+                        ])
+
+                    if account is not None:
+                        accounts_out.append(AccountSerializer(account, context=self.get_serializer_context()).data)
+                    else:
+                        errors_out.append({"id": a.id, "detail": detail})
 
                 with state_lock:
-                    state.processed_accounts += 1
-                    if account is not None:
-                        state.success_accounts += 1
-                    else:
-                        state.failed_accounts += 1
-                        state.last_error = str(detail or "")
-                    state.save(update_fields=[
-                        "processed_accounts", "success_accounts", "failed_accounts",
-                        "last_error", "updated_at",
-                    ])
+                    state.refresh_from_db()
+                    if errors_out:
+                        last = errors_out[-1]
+                        prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
+                        state.last_error = (
+                            f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
+                            f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
+                        )[:4000]
+                        state.save(update_fields=["last_error", "updated_at"])
+                    elif not stop_requested.is_set():
+                        state.last_error = ""
+                        state.save(update_fields=["last_error", "updated_at"])
 
-                if account is not None:
-                    accounts_out.append(AccountSerializer(account, context=self.get_serializer_context()).data)
-                else:
-                    errors_out.append({"id": a.id, "detail": detail})
-
-            with state_lock:
-                state.refresh_from_db()
-                if errors_out:
-                    last = errors_out[-1]
-                    prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
-                    state.last_error = (
-                        f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
-                        f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
-                    )[:4000]
-                    state.save(update_fields=["last_error", "updated_at"])
-                elif not stop_requested.is_set():
-                    state.last_error = ""
-                    state.save(update_fields=["last_error", "updated_at"])
-
-            return Response({
-                "accounts": accounts_out,
-                "errors": errors_out,
-                "cancelled": bool(stop_requested.is_set()),
-            })
+                return Response({
+                    "accounts": accounts_out,
+                    "errors": errors_out,
+                    "cancelled": bool(stop_requested.is_set()),
+                })
         finally:
             finished = timezone.now()
             state.refresh_from_db()
@@ -1486,11 +1713,49 @@ class AccountViewSet(viewsets.ModelViewSet):
             state.cancel_requested = False
             state.current_account = ""
             state.finished_at = finished
-            state.run_detail = {}
             state.save(update_fields=[
                 "is_running", "cancel_requested", "current_account",
-                "finished_at", "run_detail", "updated_at",
+                "finished_at", "updated_at",
             ])
+
+    @action(detail=False, methods=["post"], url_path="refresh-link-clicks")
+    def refresh_link_clicks(self, request):
+        """Обновить переходы (Links) для выбранных аккаунтов без scrape платформ."""
+        ids = request.data.get("ids")
+        if not isinstance(ids, list) or not ids:
+            return Response(
+                {"detail": "Передайте массив ids"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        id_ints: list[int] = []
+        for raw in ids:
+            try:
+                id_ints.append(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not id_ints:
+            return Response(
+                {"detail": "В ids должны быть числовые идентификаторы аккаунтов"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        by_id = {a.id: a for a in Account.objects.filter(id__in=id_ints)}
+        ordered = [by_id[i] for i in id_ints if i in by_id]
+        if not ordered:
+            return Response({"detail": "Аккаунты не найдены"}, status=status.HTTP_404_NOT_FOUND)
+
+        from integrations.links_client import LinksApiError, links_api_configured
+        from integrations.links_sync import refresh_link_clicks_batch
+
+        if not links_api_configured():
+            return Response(
+                {"detail": "Links API не настроен (LINKS_API_URL / LINKS_API_TOKEN в .env)"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        try:
+            result = refresh_link_clicks_batch(ordered)
+        except LinksApiError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result)
 
     @action(detail=False, methods=["get"], url_path="export-snapshot")
     def export_snapshot(self, request):
@@ -1614,12 +1879,19 @@ class AccountViewSet(viewsets.ModelViewSet):
         ser_ctx["parent_account_platform"] = account.platform
         return Response(PostSerializer(qs, many=True, context=ser_ctx).data)
 
+    @action(detail=True, methods=["delete"], url_path=r"posts/(?P<post_id>[0-9]+)")
+    def delete_post(self, request, pk=None, post_id=None):
+        account = self.get_object()
+        post = get_object_or_404(Post, pk=post_id, account=account)
+        post.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
     @action(detail=True, methods=["get"], url_path="audience")
     def audience_list(self, request, pk=None):
         account = self.get_object()
-        if account.platform not in (Platform.TIKTOK, Platform.INSTAGRAM):
+        if account.platform not in AUDIENCE_SYNC_SUPPORTED_PLATFORMS:
             return Response(
-                {"detail": "Аудитория доступна только для TikTok и Instagram."},
+                {"detail": "Аудитория доступна только для TikTok, Instagram, X и Threads."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from .audience import audience_members_queryset_for_account
@@ -1654,9 +1926,9 @@ class AccountViewSet(viewsets.ModelViewSet):
     )
     def audience_member_detail(self, request, pk=None, audience_member_id=None):
         account = self.get_object()
-        if account.platform not in (Platform.TIKTOK, Platform.INSTAGRAM):
+        if account.platform not in AUDIENCE_SYNC_SUPPORTED_PLATFORMS:
             return Response(
-                {"detail": "Аудитория доступна только для TikTok и Instagram."},
+                {"detail": "Аудитория доступна только для TikTok, Instagram, X и Threads."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from .audience import audience_members_queryset_for_account
@@ -1695,22 +1967,39 @@ class AccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"], url_path="audience/refresh")
     def audience_refresh(self, request, pk=None):
         account = self.get_object()
-        if account.platform not in (Platform.TIKTOK, Platform.INSTAGRAM):
+        if account.platform not in AUDIENCE_SYNC_SUPPORTED_PLATFORMS:
             return Response(
-                {"detail": "Съём аудитории поддерживается только для TikTok и Instagram."},
+                {"detail": "Съём аудитории поддерживается только для TikTok, Instagram, X и Threads."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        from .audience import refresh_audience_for_account
+        from .refresh_priority import PRIORITY_BLOCK_MESSAGE, account_refresh_priority_active
+
+        if account_refresh_priority_active():
+            return Response(
+                {"detail": PRIORITY_BLOCK_MESSAGE},
+                status=status.HTTP_409_CONFLICT,
+            )
+        from .audience import normalize_audience_mode, refresh_audience_for_account
+
+        from .audience import _normalize_enrich_usernames
 
         skip = False
+        mode = "full"
+        enrich_usernames = None
         body = getattr(request, "data", None)
         if isinstance(body, dict):
             skip = bool(body.get("skip_existing_member_profiles"))
+            if body.get("audience_mode") is not None:
+                mode = normalize_audience_mode(body.get("audience_mode"))
+            if body.get("enrich_usernames") is not None:
+                enrich_usernames = _normalize_enrich_usernames(body.get("enrich_usernames"))
 
         try:
             result = refresh_audience_for_account(
                 account,
+                audience_mode=mode,
                 skip_existing_member_profiles=skip,
+                enrich_usernames=enrich_usernames,
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1843,8 +2132,20 @@ def summary(request):
     )
     accounts = list(qs)
 
-    total = {"follower_count": 0, "like_count": 0, "view_count": 0, "post_count": 0}
-    snap_total = {"follower_count": 0, "like_count": 0, "view_count": 0, "post_count": 0}
+    total = {
+        "follower_count": 0,
+        "like_count": 0,
+        "view_count": 0,
+        "post_count": 0,
+        "link_click_count": 0,
+    }
+    snap_total = {
+        "follower_count": 0,
+        "like_count": 0,
+        "view_count": 0,
+        "post_count": 0,
+        "link_click_count": 0,
+    }
     by_platform: dict[str, dict] = {}
 
     period_days = _effective_account_delta_period_days(request)
@@ -1860,6 +2161,7 @@ def summary(request):
             snap_total["like_count"] += snap.like_count
             snap_total["view_count"] += snap.view_count
             snap_total["post_count"] += snap.post_count
+            snap_total["link_click_count"] += snap.link_click_count
             dv = int(acc.view_count or 0) - int(snap.view_count or 0)
             if acc.platform in (Platform.INSTAGRAM, Platform.THREADS):
                 dv = max(0, dv)
@@ -1879,9 +2181,10 @@ def summary(request):
                 "like_count": 0,
                 "view_count": 0,
                 "post_count": 0,
+                "link_click_count": 0,
             }
         by_platform[p]["account_count"] += 1
-        for key in ("follower_count", "like_count", "view_count", "post_count"):
+        for key in ("follower_count", "like_count", "view_count", "post_count", "link_click_count"):
             by_platform[p][key] += getattr(acc, key)
 
     account_ids = [int(a.pk) for a in accounts]
@@ -1895,10 +2198,12 @@ def summary(request):
         "like_count": total["like_count"],
         "view_count": total["view_count"],
         "post_count": total["post_count"],
+        "link_click_count": total["link_click_count"],
         "follower_delta": total["follower_count"] - snap_total["follower_count"] if accounts else None,
         "like_delta": total["like_count"] - snap_total["like_count"] if accounts else None,
         "view_delta": view_delta_sum if accounts else None,
         "post_delta": total["post_count"] - snap_total["post_count"] if accounts else None,
+        "link_click_delta": total["link_click_count"] - snap_total["link_click_count"] if accounts else None,
         "yesterday_follower_delta": y_follow,
         "yesterday_like_delta": y_like,
         "yesterday_view_delta": y_view,
@@ -2043,7 +2348,7 @@ def _apply_visibility_filters(
 @api_view(["GET", "POST"])
 def refresh_schedule(request):
     """Get or update the auto-refresh schedule config."""
-    from .apps import get_scheduler, apply_schedule_config
+    from .apps import get_scheduler, sync_schedule_from_db
 
     try:
         config = RefreshScheduleConfig.get()
@@ -2087,9 +2392,8 @@ def refresh_schedule(request):
             )
         config.save()
 
-        sched = get_scheduler()
-        if sched:
-            apply_schedule_config(config, sched)
+        if get_scheduler():
+            sync_schedule_from_db(force=True)
 
         return Response(_schedule_to_dict(config))
     except (ProgrammingError, OperationalError) as exc:
@@ -2190,7 +2494,12 @@ def auto_refresh_series(request):
 
 @api_view(["GET"])
 def auto_refresh_status(request):
-    """Current/last auto-refresh run status for UI progress widget."""
+    """
+    Статус фонового обновления для виджета прогресса: запланированное автообновление
+    (``AutoRefreshState``) и ручной «собрать всех» (``RefreshAllState``). Раньше сюда попадало
+    только авто — при ``POST …/refresh_all/`` лампочка и модалка показывали «не идёт», хотя
+    воркеры уже крутятся.
+    """
     try:
         sched = RefreshScheduleConfig.get()
         try:
@@ -2198,17 +2507,40 @@ def auto_refresh_status(request):
         except Exception:
             pass
         skip_cfg = max(0, int(getattr(sched, "skip_recent_hours", 0) or 0))
-        state = AutoRefreshState.get()
+        auto = AutoRefreshState.get()
+        rr = RefreshAllState.get()
+
+        def _coerce_rd(obj) -> dict:
+            raw = getattr(obj, "run_detail", None) or {}
+            return raw if isinstance(raw, dict) else {}
+
+        if auto.is_running:
+            state = auto
+            auto_src = (getattr(auto, "source", None) or "").strip()
+            pipeline = "bulk_refresh" if auto_src == "bulk_refresh" else "scheduled_auto"
+        elif rr.is_running:
+            state = rr
+            pipeline = "refresh_all"
+        else:
+            state = auto
+            pipeline = None
+
         total = max(0, int(state.total_accounts or 0))
         done = max(0, int(state.processed_accounts or 0))
         progress = 0 if total <= 0 else min(100, int(round((done / total) * 100)))
-        report_csv = (getattr(state, "last_report_csv", None) or "").strip()
-        rd = getattr(state, "run_detail", None) or {}
-        if not isinstance(rd, dict):
-            rd = {}
+        report_csv = (getattr(auto, "last_report_csv", None) or "").strip()
+        rd = _coerce_rd(state) if pipeline else _coerce_rd(auto)
+        resp_src = (getattr(state, "source", None) or "").strip()
+        if pipeline == "refresh_all" and not resp_src:
+            resp_src = "refresh_all"
+        from .apps import peek_pending_scheduled_refresh_count
+
+        pending = peek_pending_scheduled_refresh_count()
         return Response({
-            "is_running": bool(state.is_running),
-            "source": state.source,
+            "is_running": bool(auto.is_running or rr.is_running),
+            "pending_scheduled_runs": pending,
+            "active_pipeline": pipeline,
+            "source": resp_src or (auto.source or "").strip(),
             "cancel_requested": bool(state.cancel_requested),
             "total_accounts": total,
             "processed_accounts": done,
@@ -2221,7 +2553,7 @@ def auto_refresh_status(request):
             "last_error": state.last_error or None,
             "updated_at": state.updated_at,
             "has_csv_report": bool(report_csv),
-            "report_generated_at": state.last_report_generated_at,
+            "report_generated_at": auto.last_report_generated_at,
             "run_detail": rd,
             "skip_recent_hours_config": skip_cfg,
         })
@@ -2292,6 +2624,31 @@ def auto_refresh_report_download(request):
 
 
 @api_view(["GET"])
+def auto_refresh_last_error_ids(request):
+    """ID аккаунтов со статусом «ошибка» в последнем завершённом автообновлении по расписанию."""
+    try:
+        from .auto_refresh_csv import extract_error_account_ids_from_saved_auto_refresh_csv
+
+        state = AutoRefreshState.get()
+        raw = getattr(state, "last_auto_refresh_error_account_ids", None) or []
+        ids: list[int] = []
+        if isinstance(raw, list):
+            for x in raw:
+                try:
+                    ids.append(int(x))
+                except (TypeError, ValueError):
+                    continue
+        ids = sorted(set(ids))
+        if not ids:
+            csv_body = (getattr(state, "last_report_csv", None) or "").strip()
+            if csv_body:
+                ids = extract_error_account_ids_from_saved_auto_refresh_csv(csv_body)
+        return Response({"ids": ids, "count": len(ids)})
+    except (ProgrammingError, OperationalError) as exc:
+        return _schedule_db_error_response(exc)
+
+
+@api_view(["GET"])
 def refresh_all_status(request):
     """Статус фонового POST /api/accounts/refresh_all/ (очередь, слоты воркеров)."""
     try:
@@ -2347,6 +2704,25 @@ def refresh_all_stop(request):
         return Response({"stopped": True})
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)
+
+
+@api_view(["POST"])
+def audience_scrape_stop(_request):
+    """
+    Прервать текущий съём аудитории Playwright (одиночный POST audience/refresh или запрос из subs).
+    Закрывает демоны worker и Chromium профиля AccountsStats.
+    """
+    try:
+        from platforms.worker_pool import shutdown_playwright_pool_aggressive
+
+        shutdown_playwright_pool_aggressive()
+        return Response({"stopped": True})
+    except Exception as exc:
+        logger.exception("audience_scrape_stop failed")
+        return Response(
+            {"detail": f"Не удалось остановить съём аудитории: {exc}"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(["GET"])

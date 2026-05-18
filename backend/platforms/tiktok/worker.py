@@ -6,9 +6,12 @@ Server mode  (BROWSER_HEADLESS=true):
   Run `python manage.py setup_tiktok_auth` once to log in and export the file.
 
 Local dev mode (BROWSER_HEADLESS=false or not set):
-  Uses a persistent Chromium profile at BROWSER_PROFILE_DIR
-  (auto-detected cross-platform default if not set).
-  Shows browser window so you can log in manually once.
+    Uses a persistent Chromium profile at BROWSER_PROFILE_DIR
+    (auto-detected cross-platform default if not set).
+    Shows browser window so you can log in manually once.
+
+Демон (``--daemon``): по умолчанию окно не закрывается при окончании stdin — см.
+``WORKER_AUTOCLOSE_BROWSER_ON_EXIT`` в ``platforms/worker_utils.py``.
 """
 import asyncio
 import json
@@ -142,6 +145,9 @@ async def _run_with_context(
                 max_posts_per_follower=mpp,
                 skip_existing_member_profiles=bool(data.get("skip_existing_member_profiles")),
                 audience_account_id=audience_account_id,
+                list_only=bool(data.get("list_only")),
+                enrich_only=bool(data.get("enrich_only")),
+                enrich_usernames=data.get("enrich_usernames"),
             )
         finally:
             if own_page:
@@ -815,21 +821,24 @@ async def _create_tiktok_context(pw, _wu):
     return context, browser, state_path
 
 
-async def run_once(data: dict) -> dict:
+async def run_once(data: dict) -> None:
     from playwright.async_api import async_playwright
+    from platforms.worker_utils import finish_cli_session_keep_browser_by_default
+
     _wu = _load_worker_utils()
 
     async with async_playwright() as pw:
         context, _browser, state_path = await _create_tiktok_context(pw, _wu)
         try:
-            return await _run_with_context(data, context, _wu, state_path)
-        finally:
-            await context.close()
-            if _browser is not None:
-                try:
-                    await _browser.close()
-                except Exception:
-                    pass
+            out = await _run_with_context(data, context, _wu, state_path)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            _write_response({"error": f"Ошибка worker: {exc}"})
+            await finish_cli_session_keep_browser_by_default("tiktok_worker", context, _browser)
+            return
+        _write_response(out)
+        await finish_cli_session_keep_browser_by_default("tiktok_worker", context, _browser)
 
 
 def _write_response(payload) -> None:
@@ -841,11 +850,17 @@ def _write_response(payload) -> None:
 def _run_daemon() -> None:
     async def daemon_main():
         from playwright.async_api import async_playwright
+        from platforms.worker_utils import (
+            daemon_idle_keep_browser_open,
+            worker_autoclose_browser_on_daemon_exit,
+        )
+
         _wu = _load_worker_utils()
         async with async_playwright() as pw:
             context, _browser, state_path = await _create_tiktok_context(pw, _wu)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
+                await _wu.warm_playwright_page_home(page, "tiktok")
                 for line in sys.stdin:
                     line = line.strip()
                     if not line:
@@ -865,12 +880,15 @@ def _run_daemon() -> None:
                         result = {"error": f"Ошибка worker: {exc}"}
                     _write_response(result)
             finally:
-                await context.close()
-                if _browser is not None:
-                    try:
-                        await _browser.close()
-                    except Exception:
-                        pass
+                if worker_autoclose_browser_on_daemon_exit():
+                    await context.close()
+                    if _browser is not None:
+                        try:
+                            await _browser.close()
+                        except Exception:
+                            pass
+                else:
+                    await daemon_idle_keep_browser_open("tiktok_worker", page, platform="tiktok")
 
     asyncio.run(daemon_main())
 
@@ -887,4 +905,4 @@ if __name__ == "__main__":
         except Exception:
             _write_response({"error": "Невалидный JSON payload"})
             sys.exit(1)
-        _write_response(asyncio.run(run_once(one_payload)))
+        asyncio.run(run_once(one_payload))

@@ -1,10 +1,11 @@
 """
 Съём списка подписчиков TikTok (Playwright, та же сессия, что и основной worker).
 
-Сценарий как в живом TikTok: открыть профиль /@user → клик по подписи «Followers» / «Подписчики»
-в блоке статистики (приоритет), иначе data-e2e="followers" / Playwright по тексту → модалка
-follow-info-popup → прокрутка списка и сбор ссылок /@handle.
-Затем по очереди открываются страницы подписчиков для постов (как для обычного профиля).
+Сценарий: профиль владельца → модалка «Подписчики» → список. Затем для каждого
+подписчика — заход на его профиль (пауза 2–5 с) и съём био/ник/счётчиков без
+открытия модалки «подписчики подписчика». Поле ``follower_network`` остаётся
+пустым. При ``max_posts_per_follower`` > 0 дополнительно собираются посты с
+профиля подписчика.
 
 Ожидается авторизованный браузер (storage_state / профиль), иначе список часто пуст.
 """
@@ -18,8 +19,12 @@ import sys
 import time
 from typing import Any
 
+from platforms.tiktok.service import _parse_short_count
+
 # Пауза между визитами на профиль подписчика при съёме постов (сек, случайно в диапазоне).
 _TT_MEMBER_PROFILE_GAP_SEC = (3.0, 5.0)
+# После захода на профиль подписчика — ждём отрисовку (сек).
+_TT_FOLLOWER_PROFILE_DWELL_SEC = (2.0, 5.0)
 
 
 def _is_item_list_url(url: str) -> bool:
@@ -57,6 +62,245 @@ async def _tiktok_try_get_owner_sec_uid_from_page(page) -> str:
         return str(sec or "").strip()
     except Exception:
         return ""
+
+
+async def _tiktok_try_detect_zero_followers_on_profile(page) -> bool:
+    """
+    True — на странице профиля явно 0 подписчиков (можно не открывать модалку).
+    False — иначе (нет данных или >0): открываем модалку как раньше.
+    """
+    try:
+        v = await page.evaluate(
+            r"""() => {
+                try {
+                    const el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                    if (el && el.textContent) {
+                        const d = JSON.parse(el.textContent);
+                        const ud = ((d || {}).__DEFAULT_SCOPE__ || {})['webapp.user-detail'];
+                        const stats = ud && ud.userInfo && ud.userInfo.stats;
+                        if (stats) {
+                            const fc = stats.followerCount ?? stats.follower_count;
+                            if (typeof fc === 'number' && fc === 0) return true;
+                            if (typeof fc === 'string') {
+                                const t = fc.trim().replace(/,/g, '');
+                                if (t === '0') return true;
+                            }
+                        }
+                    }
+                } catch (_) {}
+                try {
+                    const stats = document.querySelector('[data-e2e="user-stats"]');
+                    if (stats) {
+                        const txt = (stats.innerText || '').replace(/\u200b/g, ' ');
+                        if (/\b0\s+(followers|подписчики|fans|subscribers)\b/i.test(txt)) return true;
+                    }
+                } catch (_) {}
+                return false;
+            }""",
+        )
+        return bool(v)
+    except Exception:
+        return False
+
+
+def _tiktok_coerce_stat_to_int(raw: Any) -> int:
+    if raw is None:
+        return 0
+    if isinstance(raw, bool):
+        return 0
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    s = str(raw).strip().replace(",", "")
+    return _parse_short_count(s) if s else 0
+
+
+async def _tiktok_profile_meta_raw_from_page(page) -> dict[str, Any]:
+    """Сырые поля с открытой страницы профиля (SSR + подстраховка по DOM)."""
+    try:
+        raw = await page.evaluate(
+            r"""() => {
+                const out = {
+                    display_name: "",
+                    bio: "",
+                    fc_raw: null,
+                    fg_raw: null,
+                    heart_raw: null,
+                    follower_text: "",
+                    following_text: "",
+                    like_text: "",
+                    avatar_url: "",
+                    private_account: false,
+                };
+                try {
+                    const el = document.getElementById("__UNIVERSAL_DATA_FOR_REHYDRATION__");
+                    if (el && el.textContent) {
+                        const d = JSON.parse(el.textContent);
+                        const ud = ((d || {}).__DEFAULT_SCOPE__ || {})["webapp.user-detail"] || {};
+                        const ui = ud.userInfo || {};
+                        const user = ui.user || {};
+                        const stats = ui.stats || {};
+                        out.display_name = String(user.nickname || "").trim();
+                        out.bio = String(user.signature || "").trim();
+                        out.private_account = !!(user.privateAccount || user.secret);
+                        out.fc_raw = stats.followerCount ?? stats.follower_count ?? null;
+                        out.fg_raw = stats.followingCount ?? stats.following_count ?? null;
+                        out.heart_raw = stats.heartCount ?? stats.heart ?? stats.diggCount ?? null;
+                        const s2 = (stats && stats.statsV2) || ui.statsV2 || {};
+                        if (out.fc_raw == null || out.fc_raw === "") {
+                            out.fc_raw = s2.followerCount ?? s2.follower_count ?? out.fc_raw;
+                        }
+                        if (out.fg_raw == null || out.fg_raw === "") {
+                            out.fg_raw = s2.followingCount ?? s2.following_count ?? out.fg_raw;
+                        }
+                        if (out.heart_raw == null || out.heart_raw === "") {
+                            out.heart_raw = s2.heartCount ?? s2.heart ?? s2.diggCount ?? out.heart_raw;
+                        }
+                    }
+                } catch (_) {}
+                try {
+                    const bioEl = document.querySelector('[data-e2e="user-bio"]');
+                    if (bioEl) {
+                        const b = (bioEl.textContent || "").trim();
+                        if (b && !out.bio) out.bio = b;
+                    }
+                } catch (_) {}
+                try {
+                    const title =
+                        document.querySelector('[data-e2e="user-title"]') ||
+                        document.querySelector("h1");
+                    if (title) {
+                        const t = (title.textContent || "").split("\n")[0].trim();
+                        if (t && !out.display_name) out.display_name = t;
+                    }
+                } catch (_) {}
+                try {
+                    const stats = document.querySelector('[data-e2e="user-stats"]');
+                    if (stats) {
+                        const blocks = Array.from(stats.querySelectorAll("h3 > div, div strong"));
+                        for (const block of blocks) {
+                            const strong = block.querySelector("strong");
+                            if (!strong) continue;
+                            const value = (strong.textContent || "").trim();
+                            if (!value) continue;
+                            const labelText = (block.textContent || "")
+                                .replace(value, "")
+                                .trim()
+                                .toLowerCase();
+                            if (!out.follower_text && /(followers?|подписчики|fans|subscribers)/i.test(labelText)) {
+                                out.follower_text = value;
+                                continue;
+                            }
+                            if (!out.following_text && /(following|подписки|subscriptions)/i.test(labelText)) {
+                                out.following_text = value;
+                                continue;
+                            }
+                            if (!out.like_text && /(likes?|лайки)/i.test(labelText)) {
+                                out.like_text = value;
+                            }
+                        }
+                    }
+                } catch (_) {}
+                try {
+                    if (!out.avatar_url) {
+                        const img =
+                            document.querySelector('[data-e2e="user-avatar"] img[src]') ||
+                            document.querySelector('span[data-e2e="user-avatar"] img[src]') ||
+                            document.querySelector("#main-content-others_homepage img[src]") ||
+                            document.querySelector('img[src*="tiktokcdn"]') ||
+                            document.querySelector('img[src*="muscdn"]');
+                        const src = (img?.getAttribute("src") || "").trim();
+                        if (src) out.avatar_url = src;
+                    }
+                } catch (_) {}
+                return out;
+            }""",
+        )
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def _tiktok_flatten_profile_meta_raw(raw: dict[str, Any]) -> dict[str, Any]:
+    fc = _tiktok_coerce_stat_to_int(raw.get("fc_raw"))
+    fg = _tiktok_coerce_stat_to_int(raw.get("fg_raw"))
+    lk = _tiktok_coerce_stat_to_int(raw.get("heart_raw"))
+    if fc == 0 and raw.get("follower_text"):
+        fc = _parse_short_count(str(raw["follower_text"]).strip())
+    if fg == 0 and raw.get("following_text"):
+        fg = _parse_short_count(str(raw["following_text"]).strip())
+    if lk == 0 and raw.get("like_text"):
+        lk = _parse_short_count(str(raw["like_text"]).strip())
+    return {
+        "display_name": str(raw.get("display_name") or "").strip()[:255],
+        "bio": str(raw.get("bio") or "").strip()[:2000],
+        "avatar_url": str(raw.get("avatar_url") or "").strip()[:2048],
+        "follower_count": fc,
+        "following_count": fg,
+        "like_count": lk,
+        "is_private": bool(raw.get("private_account")),
+    }
+
+
+def _tiktok_merge_flat_profile_into_row(row: dict, flat: dict[str, Any]) -> None:
+    if not flat:
+        return
+    for key, lim in (("bio", 2000), ("display_name", 255), ("avatar_url", 2048)):
+        v = str(flat.get(key) or "").strip()
+        if not v:
+            continue
+        cur = str(row.get(key) or "").strip()
+        if not cur or len(v) > len(cur):
+            row[key] = v[:lim]
+    if flat.get("is_private"):
+        row["is_private"] = True
+    for ck in ("follower_count", "following_count", "like_count"):
+        nv = int(flat.get(ck) or 0)
+        ov = int(row.get(ck) or 0)
+        if nv > 0 or ov == 0:
+            row[ck] = nv
+
+
+async def _tiktok_enrich_follower_profile_playwright(page, _wu, row: dict) -> None:
+    """
+    Заход на профиль подписчика, пауза 2–5 с, съём био/ника/счётчиков.
+    Модалку «подписчики подписчика» не открываем; ``follower_network`` — пустой список.
+    """
+    member_username = _norm_user(str(row.get("username") or ""))
+    row["follower_network"] = []
+    if not member_username:
+        return
+    profile_url = f"https://www.tiktok.com/@{member_username}"
+    print(f"[audience] tiktok enrich: открываем @{member_username}", file=sys.stderr)
+    try:
+        landed = await _tiktok_goto_profile_with_redirect_recovery(
+            page, member_username, profile_url, _wu, rounds=4, dwell_s=8.0,
+        )
+        if not landed:
+            print(
+                f"[audience] tiktok enrich: не удалось удержать профиль @{member_username}",
+                file=sys.stderr,
+            )
+            row["_enrich_ok"] = False
+            row["_enrich_note"] = "Не удалось открыть профиль"
+            return
+        lo, hi = _TT_FOLLOWER_PROFILE_DWELL_SEC
+        await asyncio.sleep(lo + random.random() * (hi - lo))
+        raw = await _tiktok_profile_meta_raw_from_page(page)
+        flat = _tiktok_flatten_profile_meta_raw(raw)
+        _tiktok_merge_flat_profile_into_row(row, flat)
+        row["_enrich_ok"] = bool(
+            str(row.get("display_name") or "").strip()
+            or int(row.get("follower_count") or 0) > 0
+            or len(str(row.get("bio") or "").strip()) > 2
+        )
+        row["_enrich_note"] = "" if row["_enrich_ok"] else "Мало данных на странице"
+    except Exception as exc:
+        print(
+            f"[audience] tiktok enrich @{member_username}: {exc}",
+            file=sys.stderr,
+        )
+        row["_enrich_ok"] = False
+        row["_enrich_note"] = str(exc)[:200]
 
 
 def _tiktok_profile_url_regex(owner: str) -> re.Pattern[str]:
@@ -718,12 +962,12 @@ async def _tiktok_scroll_followers_modal(
         await asyncio.sleep(0.28 + (i % 8) * 0.04)
 
 
-async def _tiktok_open_followers_modal_from_profile(page, _wu, owner_username: str) -> bool:
-    profile_url = f"https://www.tiktok.com/@{owner_username}"
-    if not await _tiktok_goto_profile_with_redirect_recovery(page, owner_username, profile_url, _wu):
-        return False
+async def _tiktok_open_followers_modal_core(page, _wu, owner_username: str) -> bool:
+    """
+    Профиль целевого @handle уже открыт в адресной строке: клик по счётчику подписчиков,
+    ожидание модалки, переключение на вкладку «Подписчики» (не suggested).
+    """
     await asyncio.sleep(0.45)
-
     if not await _tiktok_click_followers_stat_scoped(page, owner_username):
         print("[audience] tiktok: не удалось кликнуть по блоку подписчиков на профиле", file=sys.stderr)
         return False
@@ -735,6 +979,14 @@ async def _tiktok_open_followers_modal_from_profile(page, _wu, owner_username: s
     return True
 
 
+async def _tiktok_open_followers_modal_from_profile(page, _wu, owner_username: str) -> bool:
+    """Полный путь: переход на /@user, затем открытие модалки (для fallback и единичного retry)."""
+    profile_url = f"https://www.tiktok.com/@{owner_username}"
+    if not await _tiktok_goto_profile_with_redirect_recovery(page, owner_username, profile_url, _wu):
+        return False
+    return await _tiktok_open_followers_modal_core(page, _wu, owner_username)
+
+
 async def _tiktok_fallback_retry_followers_modal(
     page,
     _wu,
@@ -743,7 +995,10 @@ async def _tiktok_fallback_retry_followers_modal(
     limit: int,
 ) -> None:
     """
-    Повторный заход на /@user и открытие модалки подписчиков.
+    Повторный заход на /@user и открытие модалки подписчиков (только из основного съёма,
+    если модалку не удалось открыть или список остался пустым — не вызывать при
+    уже частично заполненном ``seen``, иначе модалка открывается второй раз).
+
     Прямой URL /@user/followers в веб-клиенте TikTok не используем — редирект на For You.
     """
     profile_url = f"https://www.tiktok.com/@{owner_username}"
@@ -757,20 +1012,12 @@ async def _tiktok_fallback_retry_followers_modal(
                 await asyncio.sleep(0.5 + attempt * 0.15)
                 continue
             await asyncio.sleep(0.45 + attempt * 0.12)
-            if not await _tiktok_click_followers_stat_scoped(page, owner_username):
+            if not await _tiktok_open_followers_modal_core(page, _wu, owner_username):
                 print(
-                    f"[audience] tiktok fallback modal: клик подписчиков не удался (попытка {attempt + 1}/4)",
+                    f"[audience] tiktok fallback modal: клик/модалка не удались (попытка {attempt + 1}/4)",
                     file=sys.stderr,
                 )
                 continue
-            await asyncio.sleep(0.45)
-            if not await _tiktok_wait_followers_modal(page):
-                print(
-                    f"[audience] tiktok fallback modal: попап не открылся (попытка {attempt + 1}/4)",
-                    file=sys.stderr,
-                )
-                continue
-            await _tiktok_followers_modal_switch_off_suggested_tab(page)
             await _tiktok_scroll_followers_modal(page, owner_username, seen, limit)
             await _tiktok_close_followers_modal(page)
             return
@@ -787,6 +1034,9 @@ async def scrape_tiktok_audience_followers(
     max_posts_per_follower: int = 35,
     skip_existing_member_profiles: bool = False,
     audience_account_id: int | None = None,
+    list_only: bool = False,
+    enrich_only: bool = False,
+    enrich_usernames: list[str] | None = None,
 ) -> dict:
     owner_username = _norm_user(owner_username)
     if not owner_username:
@@ -795,6 +1045,19 @@ async def scrape_tiktok_audience_followers(
     limit = max(1, min(int(limit or 100), 500))
     seen: dict[str, dict] = {}
     owner_sec_ref: list[str] = [""]
+
+    if enrich_only and not audience_account_id:
+        return {"error": "Режим enrich требует audience_account_id."}
+
+    if not enrich_only:
+        # Одна вкладка на демон-воркер: закрываем модалку прошлого съёма, иначе в DOM
+        # могут остаться подписчики предыдущего @handle.
+        try:
+            await _tiktok_close_followers_modal(page)
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
 
     async def on_response(response):
         try:
@@ -842,46 +1105,121 @@ async def scrape_tiktok_audience_followers(
         except Exception as exc:
             print(f"[audience] tiktok on_response: {exc}", file=sys.stderr)
 
-    page.on("response", on_response)
-    try:
-        profile_url = f"https://www.tiktok.com/@{owner_username}"
-        if await _tiktok_goto_profile_with_redirect_recovery(
-            page, owner_username, profile_url, _wu, rounds=2, dwell_s=5.0,
-        ):
-            owner_sec_ref[0] = (await _tiktok_try_get_owner_sec_uid_from_page(page) or "").strip()
-        if not owner_sec_ref[0]:
-            print(
-                "[audience] tiktok: secUid владельца не найден — XHR подписчиков отключён, только DOM модалки",
-                file=sys.stderr,
-            )
+    followers: list[dict]
+    if enrich_only:
+        from platforms.audience_skip import (
+            existing_audience_member_rows_for_dashboard_account,
+            filter_audience_followers_by_usernames,
+        )
 
-        modal_ok = await _tiktok_open_followers_modal_from_profile(page, _wu, owner_username)
-        if modal_ok:
-            await _tiktok_scroll_followers_modal(page, owner_username, seen, limit)
-            await _tiktok_close_followers_modal(page)
-
-        if len(seen) < limit:
-            await _tiktok_fallback_retry_followers_modal(page, _wu, owner_username, seen, limit)
-    finally:
+        followers = await asyncio.to_thread(
+            existing_audience_member_rows_for_dashboard_account,
+            int(audience_account_id),
+            limit=limit,
+        )
+        followers = filter_audience_followers_by_usernames(followers, enrich_usernames)
+        if not followers:
+            return {"error": "Нет подписчиков в БД для обогащения."}
         try:
-            page.remove_listener("response", on_response)
-        except Exception:
-            pass
+            await page.goto(
+                "https://www.tiktok.com/",
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
+            if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
+                await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
+            await page.wait_for_timeout(800)
+        except Exception as exc:
+            print(f"[audience] tiktok enrich warm: {exc}", file=sys.stderr)
+    else:
+        page.on("response", on_response)
+        try:
+            profile_url = f"https://www.tiktok.com/@{owner_username}"
+            landed = await _tiktok_goto_profile_with_redirect_recovery(
+                page, owner_username, profile_url, _wu, rounds=2, dwell_s=5.0,
+            )
+            if landed:
+                owner_sec_ref[0] = (await _tiktok_try_get_owner_sec_uid_from_page(page) or "").strip()
+            if not owner_sec_ref[0]:
+                print(
+                    "[audience] tiktok: secUid владельца не найден — XHR подписчиков отключён, только DOM модалки",
+                    file=sys.stderr,
+                )
 
-    followers = list(seen.values())[:limit]
+            on_profile = bool(
+                landed
+                and await _wait_tiktok_on_profile_url(page, owner_username, timeout_ms=12_000),
+            )
+            skip_followers_modal = False
+            if on_profile:
+                skip_followers_modal = await _tiktok_try_detect_zero_followers_on_profile(page)
+                if skip_followers_modal:
+                    print(
+                        "[audience] tiktok: на профиле 0 подписчиков — модалку не открываем",
+                        file=sys.stderr,
+                    )
+
+            modal_ok = False
+            if skip_followers_modal:
+                modal_ok = True
+            elif on_profile:
+                modal_ok = await _tiktok_open_followers_modal_core(page, _wu, owner_username)
+            if not modal_ok and not skip_followers_modal:
+                try:
+                    await _tiktok_close_followers_modal(page)
+                except Exception:
+                    pass
+                modal_ok = await _tiktok_open_followers_modal_from_profile(page, _wu, owner_username)
+            if modal_ok and not skip_followers_modal:
+                await _tiktok_scroll_followers_modal(page, owner_username, seen, limit)
+                await _tiktok_close_followers_modal(page)
+
+            need_followers_fallback = not skip_followers_modal and (
+                not modal_ok or (modal_ok and len(seen) == 0)
+            )
+            if need_followers_fallback:
+                await _tiktok_fallback_retry_followers_modal(page, _wu, owner_username, seen, limit)
+        finally:
+            try:
+                page.remove_listener("response", on_response)
+            except Exception:
+                pass
+        followers = list(seen.values())[:limit]
+
+    if list_only:
+        for row in followers:
+            row["posts"] = []
+            row.setdefault("follower_network", [])
+        return {
+            "followers": followers,
+            "owner_username": owner_username,
+            "audience_mode": "list",
+        }
 
     skip_usernames: set[str] = set()
-    if skip_existing_member_profiles and audience_account_id:
+    if skip_existing_member_profiles and audience_account_id and not enrich_only:
         try:
             from platforms.audience_skip import existing_audience_usernames_for_dashboard_account
 
-            # ORM только из sync-контекста (иначе Django 5 — SynchronousOnlyOperation, сет пустой).
             skip_usernames = await asyncio.to_thread(
                 existing_audience_usernames_for_dashboard_account,
                 int(audience_account_id),
             )
         except Exception as exc:
             print(f"[audience] tiktok skip_existing: не удалось прочитать БД: {exc}", file=sys.stderr)
+
+    for row in followers:
+        u_n = _norm_user(str(row.get("username") or ""))
+        if not u_n:
+            continue
+        if skip_existing_member_profiles and skip_usernames and u_n in skip_usernames:
+            continue
+        try:
+            await _tiktok_enrich_follower_profile_playwright(page, _wu, row)
+        except Exception as exc:
+            print(f"[audience] tiktok enrich (внешний) @{u_n}: {exc}", file=sys.stderr)
+            row.setdefault("follower_network", [])
+        await asyncio.sleep(0.6 + random.random() * 0.9)
 
     _mpp = max_posts_per_follower if max_posts_per_follower is not None else 35
     max_posts = max(0, min(int(_mpp), 80))
@@ -907,7 +1245,8 @@ async def scrape_tiktok_audience_followers(
             if v and not (row.get(k) or "").strip():
                 row[k] = v
 
-    return {"followers": followers, "owner_username": owner_username}
+    out_mode = "enrich" if enrich_only else "full"
+    return {"followers": followers, "owner_username": owner_username, "audience_mode": out_mode}
 
 
 async def _scrape_tiktok_member_posts_short(
