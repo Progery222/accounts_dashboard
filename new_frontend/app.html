@@ -3,6 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
 <title>AccountsStats — Atomic</title>
 <script>
   (function () {
@@ -660,6 +662,7 @@ let TREND_24H = new Array(24).fill(0);
 let TREND_7D = new Array(7).fill(0);
 let AUTO_REFRESH_SERIES = [];
 let AUTH_SESSIONS = [];
+/** @type {Array<Array<{id:string,name:string,state:string,hasSession:boolean,warn:boolean,account:string|null,expires:string|null,meta:string|null,updated:string|null}>>>} */
 let ALL_PLATFORMS = [];
 let TV_AUTO_SCHEDULE_LABEL = '—';
 let TV_AUTO_IS_RUNNING = false;
@@ -1276,7 +1279,18 @@ async function uiPrompt(label, initialValue = '', title = 'Ввод') {
 }
 
 function _hasDelta(v) {
-  return Number(v || 0) !== 0;
+  if (v === null || v === undefined) return false;
+  const n = Number(v);
+  return Number.isFinite(n) && Math.abs(n) >= 1e-6;
+}
+
+/** Подпись дельты для UI; null — не показывать (в т.ч. 0 и «+0»). */
+function _deltaLabel(v) {
+  if (!_hasDelta(v)) return null;
+  const n = Number(v);
+  const text = (n > 0 ? '+' : '') + fmt(n);
+  if (text === '0' || text === '+0' || text === '-0') return null;
+  return text;
 }
 
 function _deltaColor(v) {
@@ -1990,8 +2004,8 @@ async function loadDashboardData() {
       ['rumble', 'Rumble'],
       ['reddit', 'Reddit'],
     ];
-    AUTH_SESSIONS = states.map(([id, name]) => {
-      const s = authResp[id] || {};
+    const _authSessionsFromBlock = (block) => states.map(([id, name]) => {
+      const s = (block && block[id]) || {};
       const hasSession = !!s.has_session;
       const expires = id === 'tiktok' ? (s.min_expires || null) : null;
       const days = _daysUntil(expires);
@@ -2008,6 +2022,7 @@ async function loadDashboardData() {
         hasSession,
       };
     });
+    AUTH_SESSIONS = _authSessionsFromBlock(authResp);
   }
   if (!hadAnySuccess) {
     const parts = [
@@ -3431,8 +3446,8 @@ function SceneTop({ accent }) {
               const barW = parts ? Math.min(100, (parts.total / maxPlatformClicks) * 100) : 0;
               const basePct = parts && parts.total > 0 ? (parts.base / parts.total) * 100 : 100;
               const growthPct = parts && parts.total > 0 ? (parts.growth / parts.total) * 100 : 0;
-              const deltaNum = Number(p.dClicks || 0);
-              const deltaColor = deltaNum < 0 ? '#f87171' : p.color;
+              const deltaLabel = _deltaLabel(p.dClicks);
+              const deltaColor = Number(p.dClicks || 0) < 0 ? '#f87171' : p.color;
               return (
                 <div key={`clicks-${p.id}`} style={{ display: 'grid', gridTemplateColumns: '120px 1fr 72px', alignItems: 'center', gap: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -3447,17 +3462,19 @@ function SceneTop({ accent }) {
                         minWidth: parts.growth > 0 && parts.base > 0 ? 4 : 0,
                       }}>
                         {parts.base > 0 && (
-                          <div style={{ flex: `0 0 ${basePct}%`, background: p.color, opacity: 0.38, minWidth: parts.growth > 0 ? 2 : 0 }} />
+                          <div style={{ flex: `0 0 ${basePct}%`, background: p.color, opacity: parts.growth > 0 ? 0.45 : 0.88, minWidth: parts.growth > 0 ? 2 : 0 }} />
                         )}
                         {parts.growth > 0 && (
-                          <div style={{ flex: `0 0 ${growthPct}%`, background: p.color, opacity: 0.92, minWidth: 2 }} />
+                          <div style={{ flex: `0 0 ${growthPct}%`, background: p.color, opacity: 0.95, minWidth: 2 }} />
                         )}
                       </div>
                     )}
                   </div>
                   <div className="mono tnum" style={{ fontSize: 13, color: 'rgba(255,255,255,0.75)', textAlign: 'right', lineHeight: 1.25 }}>
                     <div>{fmt(p.clicks)}</div>
-                    <div style={{ fontSize: 11, color: deltaColor }}>{_hasDelta(deltaNum) ? `${deltaNum >= 0 ? '+' : ''}${fmt(deltaNum)}` : '+0'}</div>
+                    {deltaLabel && (
+                      <div style={{ fontSize: 11, color: deltaColor }}>{deltaLabel}</div>
+                    )}
                   </div>
                 </div>
               );
@@ -5972,10 +5989,9 @@ function SettingsScreen({ tweaks, onBack, onDataChanged, onOpenGlobalModal }) {
             <div style={{ fontSize: isMobile ? 22 : 26, fontWeight: 600, marginTop: 2, letterSpacing: '-0.01em' }}>Настройки авторизации</div>
           </div>
         </div>
-        <p style={{ color: 'var(--ink-dim)', fontSize: 14, lineHeight: 1.6, marginBottom: isMobile ? 16 : 24, maxWidth: 720 }}>
+        <p style={{ color: 'var(--ink-dim)', fontSize: 14, lineHeight: 1.6, marginBottom: isMobile ? 12 : 16, maxWidth: 720 }}>
           Для сбора данных приложение использует авторизованные сессии в браузере. Нажмите кнопку — откроется окно, войдите в аккаунт, и данные будут обновляться автоматически.
         </p>
-
         {/* Summary tile */}
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr 1fr' : '1fr 1fr 1fr', gap: isMobile ? 8 : 14, marginBottom: isMobile ? 16 : 28 }}>
           <SummaryTile label="АКТИВНЫХ" value={String(activeCount)} color="#4ade80" />

@@ -506,6 +506,27 @@ def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -
         return None, detail, code
 
 
+def _refresh_link_clicks_for_accounts(accounts: list[Account], *, log_prefix: str = "refresh") -> dict | None:
+    """
+    То же, что POST /api/accounts/refresh-link-clicks/ — батч из Links API
+    + кэш индекса для sync_link_clicks_for_account в _apply_refresh.
+    """
+    from integrations.links_client import links_api_configured
+    from integrations.links_sync import begin_refresh_all_links, refresh_link_clicks_batch
+
+    if not links_api_configured() or not accounts:
+        return None
+    result = refresh_link_clicks_batch(accounts)
+    begin_refresh_all_links(accounts)
+    print(
+        f"[{log_prefix}] link clicks: updated={result.get('updated', 0)} "
+        f"changed={result.get('changed', 0)} skipped={result.get('skipped', 0)} "
+        f"errors={len(result.get('errors') or [])}",
+        file=sys.stderr,
+    )
+    return result
+
+
 def _prewarm_workers(accounts: list[Account]) -> None:
     """
     Start daemon workers upfront for platforms present in refresh_all batch.
@@ -1744,7 +1765,6 @@ class AccountViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Аккаунты не найдены"}, status=status.HTTP_404_NOT_FOUND)
 
         from integrations.links_client import LinksApiError, links_api_configured
-        from integrations.links_sync import refresh_link_clicks_batch
 
         if not links_api_configured():
             return Response(
@@ -1752,7 +1772,11 @@ class AccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         try:
-            result = refresh_link_clicks_batch(ordered)
+            result = _refresh_link_clicks_for_accounts(ordered, log_prefix="refresh_link_clicks")
+            if result is None:
+                return Response(
+                    {"updated": 0, "changed": 0, "skipped": 0, "total": 0, "items": [], "errors": []},
+                )
         except LinksApiError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response(result)

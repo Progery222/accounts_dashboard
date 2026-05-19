@@ -31,7 +31,6 @@ urlpatterns = [
     path("healthz/ready/", healthz_ready),
     path("admin/", admin.site.urls),
     path("api/accounts/", include("accounts.urls")),
-    path("api/subscribers/", include("subscribers.urls")),
     path("api/tiktok/", include("tiktok_app.urls")),
     # Avatar proxy (bypasses CDN expiry / hotlink issues)
     path("api/accounts/<int:pk>/avatar/", account_avatar),

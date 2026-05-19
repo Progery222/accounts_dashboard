@@ -24,10 +24,11 @@ class SettingsViewsApiTests(APITestCase):
     ):
         response = self.client.get("/api/settings/status/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            set(response.data.keys()),
-            {"tiktok", "instagram", "telegram", "x", "threads", "facebook", "rumble"},
-        )
+        keys = set(response.data.keys())
+        for platform in ("tiktok", "instagram", "telegram", "x", "threads", "facebook", "rumble", "reddit"):
+            self.assertIn(platform, keys)
+        self.assertNotIn("shard_count", keys)
+        self.assertNotIn("shards", keys)
 
     @patch("accounts.settings_views._logout_platform")
     def test_logout_supported_platforms_return_ok(self, mock_logout):

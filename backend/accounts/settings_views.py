@@ -23,6 +23,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status as drf_status
 
+from .models import Account
 from .chromium_cookie_store import open_cookie_store
 
 # ── Job registry ──────────────────────────────────────────────────────────────
@@ -56,20 +57,17 @@ def _cleanup_chrome_artifacts(profile_dir: str) -> None:
 
 
 def _get_profile_dir() -> str:
-    """Каталог профиля Chromium — тот же, что у worker_pool (ACCOUNTS_BROWSER_*)."""
+    """Каталог профиля Chromium (как у Playwright-воркеров)."""
     try:
-        from django.conf import settings
-
-        accounts_prof = getattr(settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
-        if accounts_prof is not None:
-            p = Path(accounts_prof)
-            p.mkdir(parents=True, exist_ok=True)
-            return str(p)
-        legacy = (getattr(settings, "BROWSER_PROFILE_DIR", "") or "").strip()
-        if legacy:
-            return legacy
+        from django.conf import settings as dj_settings
+        prof = getattr(dj_settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
+        if prof:
+            return str(prof)
     except Exception:
         pass
+    raw = (os.environ.get("BROWSER_PROFILE_DIR") or "").strip()
+    if raw:
+        return raw
     return _default_profile_dir()
 
 
@@ -223,13 +221,11 @@ def _telegram_status() -> dict:
 
 
 def _instagram_status() -> dict:
-    session_file = _get_setting("INSTAGRAM_SESSION_FILE", "instagram.session")
     username = _get_setting("INSTAGRAM_USERNAME", "")
-
+    session_file = _get_setting("INSTAGRAM_SESSION_FILE", "instagram.session")
     session_path = Path(session_file)
     if not session_path.is_absolute():
         session_path = Path(__file__).parent.parent / session_path
-
     if session_path.exists():
         mtime = datetime.fromtimestamp(session_path.stat().st_mtime, tz=timezone.utc)
         return {
@@ -237,7 +233,16 @@ def _instagram_status() -> dict:
             "username": username,
             "last_updated": mtime.strftime("%Y-%m-%d %H:%M UTC"),
         }
-    return {"has_session": False, "username": username, "last_updated": None}
+    ig_state = Path(_get_profile_dir()) / "instagram_state.json"
+    if ig_state.exists():
+        mtime = datetime.fromtimestamp(ig_state.stat().st_mtime, tz=timezone.utc)
+        return {
+            "has_session": _check_cookie_in_profile(["instagram.com"], ["sessionid"]),
+            "username": username,
+            "last_updated": mtime.strftime("%Y-%m-%d %H:%M UTC"),
+        }
+    has = _check_cookie_in_profile(["instagram.com"], ["sessionid"])
+    return {"has_session": has, "username": username, "last_updated": None}
 
 
 def _facebook_has_session() -> bool:
@@ -292,18 +297,22 @@ def _reddit_status() -> dict:
     return {"has_session": _reddit_has_session()}
 
 
+def _auth_status_payload() -> dict:
+    return {
+        "tiktok": _tiktok_status(),
+        "instagram": _instagram_status(),
+        "telegram": _telegram_status(),
+        "x": _x_status(),
+        "threads": _threads_status(),
+        "facebook": _facebook_status(),
+        "rumble": _rumble_status(),
+        "reddit": _reddit_status(),
+    }
+
+
 @api_view(["GET"])
 def auth_status(request):
-    return Response({
-        "tiktok":    _tiktok_status(),
-        "instagram": _instagram_status(),
-        "telegram":  _telegram_status(),
-        "x":         _x_status(),
-        "threads":   _threads_status(),
-        "facebook":  _facebook_status(),
-        "rumble":    _rumble_status(),
-        "reddit":    _reddit_status(),
-    })
+    return Response(_auth_status_payload())
 
 
 _LOGOUT_COOKIE_HOST_NEEDLES: dict[str, list[str]] = {
@@ -379,7 +388,11 @@ def _logout_platform(platform: str) -> None:
     _unlink_if_exists(state_json)
 
     if platform == "instagram":
-        _unlink_if_exists(_instagram_session_path())
+        session_file = _get_setting("INSTAGRAM_SESSION_FILE", "instagram.session")
+        session_path = Path(session_file)
+        if not session_path.is_absolute():
+            session_path = Path(__file__).parent.parent / session_path
+        _unlink_if_exists(session_path)
 
     if platform == "telegram":
         _clear_telegram_indexeddb()
@@ -695,7 +708,7 @@ def _run_tiktok_auth(job_id: str) -> None:
 @api_view(["POST"])
 def tiktok_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_tiktok_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_tiktok_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1086,7 +1099,6 @@ def _run_instagram_auth(job_id: str) -> None:
     username = _get_setting("INSTAGRAM_USERNAME")
     password = _get_setting("INSTAGRAM_PASSWORD")
     session_file = _get_setting("INSTAGRAM_SESSION_FILE", "instagram.session")
-
     session_path = Path(session_file)
     if not session_path.is_absolute():
         session_path = Path(__file__).parent.parent / session_path
@@ -1191,7 +1203,7 @@ def _run_instagram_auth(job_id: str) -> None:
 @api_view(["POST"])
 def instagram_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_instagram_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_instagram_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1283,7 +1295,7 @@ def _run_telegram_auth(job_id: str) -> None:
 @api_view(["POST"])
 def telegram_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_telegram_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_telegram_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1359,7 +1371,7 @@ def _run_x_auth(job_id: str) -> None:
 @api_view(["POST"])
 def x_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_x_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_x_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1449,7 +1461,7 @@ def _run_threads_auth(job_id: str) -> None:
 @api_view(["POST"])
 def threads_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_threads_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_threads_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1570,7 +1582,7 @@ def _run_facebook_auth(job_id: str) -> None:
 @api_view(["POST"])
 def facebook_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_facebook_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_facebook_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1666,7 +1678,7 @@ def _run_rumble_auth(job_id: str) -> None:
 @api_view(["POST"])
 def rumble_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_rumble_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_rumble_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1758,7 +1770,7 @@ def _run_reddit_auth(job_id: str) -> None:
 @api_view(["POST"])
 def reddit_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_reddit_auth, args=(job_id,), daemon=True)
+    t = threading.Thread(target=_run_reddit_auth, args=(job_id), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 

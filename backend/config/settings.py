@@ -5,13 +5,6 @@ from dotenv import load_dotenv
 from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-# Раздел «Подписчики»: код приложения `subscribers` в `subs/backend/subscribers` (тот же репозиторий).
-# Добавляем путь после `BASE_DIR`, чтобы пакет `config` брался из backend/config, а не из subs/backend/config.
-_subs_backend = BASE_DIR.parent / "subs" / "backend"
-if _subs_backend.is_dir():
-    _subs_root = str(_subs_backend)
-    if _subs_root not in sys.path:
-        sys.path.append(_subs_root)
 # .env используется как локальный fallback и не должен перетирать реальные
 # переменные окружения (Railway/K8s/CI), иначе можно случайно подключиться к
 # localhost вместо DATABASE_URL провайдера.
@@ -62,7 +55,6 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "accounts",
-    "subscribers",
     "tiktok_app",
 ]
 
@@ -191,10 +183,6 @@ if not DEBUG:
     STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-# База URL основного API дашборда: HTTP из subscribers.dashboard_sync к /api/accounts/…
-# По умолчанию http://127.0.0.1:8000. Меняйте только если дашборд на другом хосте/порту.
-DASHBOARD_API_URL = os.getenv("DASHBOARD_API_URL", "http://127.0.0.1:8000").rstrip("/")
-
 # Links (короткие ссылки / клики из bio) — см. docs/API.md в репозитории links
 LINKS_API_URL = os.getenv("LINKS_API_URL", "").strip().rstrip("/")
 LINKS_API_TOKEN = os.getenv("LINKS_API_TOKEN", "").strip()
@@ -217,9 +205,9 @@ def _optional_env_abs_path(name: str) -> Path | None:
     return Path(raw).expanduser().resolve()
 
 
-# Playwright: один пул демонов для дашборда (refresh, AccountsStats) и съёма аудитории (в т.ч. из Subs).
+# Playwright: пул демонов для дашборда (refresh, AccountsStats, съём аудитории по API accounts).
 # Профиль и headless — ACCOUNTS_BROWSER_* (файл backend/config/worker_accounts.env).
-# Отдельный worker_subs.env — только для настроек, не связанных с профилем браузера (см. *.example).
+# Приложение «Подписчики» — отдельный репозиторий ../subs (свой Django на :8010).
 ACCOUNTS_BROWSER_PROFILE_DIR = _optional_env_abs_path("ACCOUNTS_BROWSER_PROFILE_DIR")
 ACCOUNTS_BROWSER_HEADLESS = _optional_env_bool("ACCOUNTS_BROWSER_HEADLESS")
 

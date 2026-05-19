@@ -156,11 +156,25 @@ def apply_schedule_config(config, sched):
 
 _TRUE = frozenset({"1", "true", "yes", "on", "y"})
 _FALSE = frozenset({"0", "false", "no", "off", "n"})
+_COMPANION_API_PORT = 8010
+
+
+def _runserver_bind_port() -> int | None:
+    if "runserver" not in sys.argv:
+        return None
+    for arg in sys.argv[1:]:
+        a = str(arg).strip()
+        if ":" in a:
+            try:
+                return int(a.rsplit(":", 1)[-1])
+            except ValueError:
+                continue
+        if a.isdigit():
+            return int(a)
+    return 8000
 
 
 def _apply_runserver_scheduler_default() -> None:
-    if os.environ.get("RUN_SCHEDULER") is not None:
-        return
     if "runserver" not in sys.argv:
         return
     for arg in sys.argv[1:]:
@@ -207,6 +221,8 @@ class AccountsConfig(AppConfig):
     name = "accounts"
 
     def ready(self):
+        from . import signals  # noqa: F401
+
         if "runserver" in sys.argv and os.environ.get("RUN_MAIN") != "true":
             return
         # При management-командах (migrate, makemigrations, test, ...) scheduler
@@ -292,6 +308,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         _mark_profile_unavailable_if_applicable,
         _prewarm_workers,
         _refresh_all_delay_seconds,
+        _refresh_link_clicks_for_accounts,
     )
 
     if not _auto_refresh_lock.acquire(blocking=False):
@@ -303,7 +320,20 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             _queued_refresh_fast_start = bool(_queued_refresh_fast_start or fast_start)
         return
 
+    bind_port = _runserver_bind_port()
+    if bind_port == _COMPANION_API_PORT:
+        _auto_refresh_lock.release()
+        print(
+            "[scheduled_refresh] skip: этот процесс runserver на :8010 "
+            "(автообновление только на :8000)",
+            file=sys.stderr,
+        )
+        return
     try:
+        if AutoRefreshState.get().is_running:
+            _auto_refresh_lock.release()
+            print("[scheduled_refresh] skip: уже идёт автообновление", file=sys.stderr)
+            return
         if RefreshAllState.get().is_running:
             _auto_refresh_lock.release()
             return
@@ -379,13 +409,20 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
     from .refresh_priority import account_refresh_priority_session
 
     with account_refresh_priority_session():
-            # Как в refresh_all: заранее поднять daemon Playwright по каждой платформе в батче.
-        # Иначе Instagram с Instaloader bulk часто не открывает Chromium до поздних шагов,
-        # а пользователь видит только первое окно (часто TikTok).
         try:
-            _prewarm_workers(accounts)
+            _refresh_link_clicks_for_accounts(accounts, log_prefix="scheduled_refresh")
         except Exception as e:
-            print(f"[scheduled_refresh] prewarm workers failed: {e}")
+            print(f"[scheduled_refresh] link clicks at start failed: {e}", file=sys.stderr)
+
+        # Предзапуск демонов — только если явно включён ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT
+        # (иначе по одному окну на платформу при первом реальном запросе, без «шторма» окон).
+        from django.conf import settings as dj_settings
+
+        if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
+            try:
+                _prewarm_workers(accounts)
+            except Exception as e:
+                print(f"[scheduled_refresh] prewarm workers failed: {e}")
 
         report_rows: list[dict] = []
         state = AutoRefreshState.get()
