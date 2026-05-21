@@ -231,7 +231,10 @@ async def _run_with_context(
                         file=sys.stderr,
                     )
             else:
-                await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                if _wu is not None and hasattr(_wu, "tiktok_goto_with_403_recovery"):
+                    await _wu.tiktok_goto_with_403_recovery(page, url, timeout_ms=30_000)
+                else:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
                     await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
 
@@ -420,6 +423,9 @@ async def _run_with_context(
                     f"{PROFILE_UNAVAILABLE_MARK}TikTok @{profile_username or 'unknown'}: "
                     "профиль не найден или недоступен на площадке."
                 )
+
+            if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
+                await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
 
             # Wait for videos to load — poll until we have items or timeout.
             # TikTok renders server-side HTML first, then fires the XHR.
@@ -682,6 +688,8 @@ async def _run_with_context(
 
             # TikTok подгружает следующие страницы item_list только при скролле.
             if items_captured:
+                if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
+                    await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
                 u0 = _uniq_items_count(items_captured)
                 print(
                     f"[worker] expanding feed by scroll: unique={u0}, "
@@ -777,47 +785,74 @@ def _load_worker_utils():
     return _wu
 
 
-async def _create_tiktok_context(pw, _wu):
+async def _create_tiktok_context(
+    pw,
+    _wu,
+    *,
+    state_path: Path | None = None,
+    headless: bool | None = None,
+):
     # Incognito mode: always launch a regular browser + ephemeral context.
     # If state file exists, load cookies/session into this context.
-    profile_base = Path(PROFILE_DIR)
-    if _wu is not None:
-        state_path = _wu.state_file_path("tiktok", profile_base)
+    if _wu is not None and hasattr(_wu, "default_profile_dir"):
+        profile_base = _wu.default_profile_dir()
     else:
-        state_path = Path(STATE_FILE) if STATE_FILE else profile_base / "tiktok_state.json"
+        profile_base = Path(PROFILE_DIR)
+    if state_path is not None:
+        sp = Path(state_path)
+    elif _wu is not None:
+        sp = _wu.state_file_path("tiktok", profile_base)
+    else:
+        sp = Path(STATE_FILE) if STATE_FILE else profile_base / "tiktok_state.json"
+    state_path = sp
 
-    # headless читается из BROWSER_HEADLESS / TIKTOK_HEADLESS (см. resolve_headless).
-    if _wu is not None and hasattr(_wu, "resolve_headless"):
-        headless = _wu.resolve_headless(platform="tiktok")
-    else:
-        headless = (os.environ.get("BROWSER_HEADLESS", "false").strip().lower()
-                    in {"1", "true", "yes", "on", "y"})
+    # headless: None → BROWSER_HEADLESS / TIKTOK_HEADLESS; False — окно входа в Settings.
+    if headless is None:
+        if _wu is not None and hasattr(_wu, "resolve_headless"):
+            headless = _wu.resolve_headless(platform="tiktok")
+        else:
+            headless = (os.environ.get("BROWSER_HEADLESS", "false").strip().lower()
+                        in {"1", "true", "yes", "on", "y"})
 
     # channel="chrome" требует системный Google Chrome — на сервере без него.
     # На Windows/macOS (локалка) по умолчанию используем системный Chrome — это
     # историческое поведение и оно лучше проходит детект TikTok. На Linux/сервере
     # дефолт — встроенный Chromium Playwright. Переопределить через
     # TIKTOK_BROWSER_CHANNEL=chrome|chromium|""(пусто = bundled).
+    from platforms.tiktok.browser_profile import (
+        build_stealth_script,
+        context_options,
+        launch_args,
+        load_profile,
+    )
+
+    bp = load_profile()
     _default_channel = "chrome" if sys.platform != "linux" else ""
     channel = os.environ.get("TIKTOK_BROWSER_CHANNEL", _default_channel).strip()
     launch_kwargs = {
         "headless": headless,
-        "args": ["--disable-blink-features=AutomationControlled"],
+        "args": launch_args(bp),
     }
     if channel:
         launch_kwargs["channel"] = channel
     browser = await pw.chromium.launch(**launch_kwargs)
+    ctx_kwargs = dict(context_options(bp))
+    print(
+        f"[tiktok_worker] profile={profile_base} state={state_path}",
+        file=sys.stderr,
+    )
     if state_path.exists():
-        context = await browser.new_context(
-            storage_state=str(state_path),
-            locale="en-US",
-            viewport={"width": 1280, "height": 900},
-        )
+        ctx_kwargs["storage_state"] = str(state_path)
+        print(f"[tiktok_worker] loading state from {state_path}", file=sys.stderr)
     else:
-        context = await browser.new_context(
-            locale="en-US",
-            viewport={"width": 1280, "height": 900},
+        print(
+            "[tiktok_worker] state file missing — браузер без cookies; "
+            "импортируйте TikTok в Настройках или setup_tiktok_auth",
+            file=sys.stderr,
         )
+    context = await browser.new_context(**ctx_kwargs)
+    if bp.get("stealth_enabled", True):
+        await context.add_init_script(build_stealth_script(bp.get("languages") or []))
     return context, browser, state_path
 
 

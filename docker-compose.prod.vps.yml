@@ -1,0 +1,17 @@
+# VPS overlay: свободный порт 9080 (8080 занят agentmusic, 80/443 — nginx-proxy).
+# Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.vps.yml up -d --build
+
+services:
+  postgres:
+    # Без публикации на хост — не конфликтует с shared-postgres :5432
+    ports: []
+
+  backend:
+    environment:
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS}"
+      CSRF_EXTRA_ORIGINS: "${CSRF_EXTRA_ORIGINS}"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/nginx-atomic/Dockerfile

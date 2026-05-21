@@ -60,6 +60,10 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from platforms.facebook.profile_meta import (
+    is_usable_facebook_avatar_url,
+    sanitize_facebook_display_name,
+)
 from platforms.facebook.profile_url import normalize_facebook_profile_input
 
 NAV_TIMEOUT         = 35_000
@@ -674,6 +678,55 @@ _STATE_JS = """
     }
 """
 
+_FACEBOOK_RATE_LIMIT_JS = """
+    () => {
+        const title = (document.title || '').toLowerCase();
+        const markers = [
+            'временно заблокирован',
+            'temporarily blocked',
+            'слишком часто использовали',
+            'using this feature too often',
+            'we temporarily blocked',
+            "you're temporarily blocked",
+            'you are temporarily blocked',
+        ];
+        const roots = [];
+        for (const sel of ['[role="dialog"]', '[role="alert"]', 'div[aria-modal="true"]']) {
+            document.querySelectorAll(sel).forEach(el => roots.push(el));
+        }
+        const main = document.querySelector('[role="main"]');
+        if (main) roots.push(main);
+        if (!roots.length && document.body) roots.push(document.body);
+        for (const root of roots) {
+            const text = ((root && root.innerText) || '').toLowerCase();
+            for (const m of markers) {
+                if (text.includes(m) || title.includes(m)) {
+                    return { blocked: true, marker: m };
+                }
+            }
+        }
+        return { blocked: false, marker: '' };
+    }
+"""
+
+
+async def _facebook_raise_if_rate_limited(page, *, stage: str) -> None:
+    from platforms.facebook.rate_limit import FACEBOOK_RATE_LIMIT_PREFIX
+
+    try:
+        data = await page.evaluate(_FACEBOOK_RATE_LIMIT_JS)
+    except Exception:
+        return
+    if not isinstance(data, dict) or not data.get("blocked"):
+        return
+    marker = str(data.get("marker") or "").strip()
+    hint = f" ({marker})" if marker else ""
+    raise ValueError(
+        f"{FACEBOOK_RATE_LIMIT_PREFIX} ({stage}){hint}. "
+        "Подождите 15–60 мин, не жмите «Обновить» в цикле."
+    )
+
+
 # ── Profile extraction JS ─────────────────────────────────────────────────────
 # Single arrow-function — Playwright clearly calls it with (username).
 
@@ -705,22 +758,24 @@ _PROFILE_JS = """(username) => {
     };
     const ogTitle = document.querySelector('meta[property="og:title"]');
     if (ogTitle) {
-        displayName = (ogTitle.getAttribute('content') || '').trim()
+        const ogName = (ogTitle.getAttribute('content') || '').trim()
             .replace(/\\s*\\|\\s*Facebook.*$/i, '')
             .replace(/\\s*[-\\u2013]\\s*Facebook.*$/i, '')
             .trim();
+        if (!badDisplay(ogName)) displayName = ogName;
     }
     if (!displayName) {
         for (const h of document.querySelectorAll('[data-pagelet] h1,[role="main"] h1,h1')) {
             const t = (h.textContent || '').trim();
-            if (t && t.length < 120) { displayName = t; break; }
+            if (t && !badDisplay(t)) { displayName = t; break; }
         }
     }
     if (!displayName) {
-        displayName = document.title
+        const titleName = document.title
             .replace(/\\s*\\|\\s*Facebook.*$/i, '')
             .replace(/\\s*[-\\u2013]\\s*Facebook.*$/i, '')
             .trim();
+        if (!badDisplay(titleName)) displayName = titleName;
     }
 
     function svgImageHref(el) {
@@ -1011,6 +1066,8 @@ _PROFILE_JS = """(username) => {
             nravLines.push('L' + i + ': ' + JSON.stringify(lines.slice(Math.max(0,i-1), i+3).join('|')));
         }
     }
+
+    if (badDisplay(displayName)) displayName = '';
 
     return {
         displayName,
@@ -1629,8 +1686,8 @@ def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
     pl_p = _parse_count(str(p.get("pageLikes") or ""))
     merged_likes = (p.get("pageLikes") or "").strip() if pl_p > pl_t else (t.get("pageLikes") or "").strip()
 
-    dn_t = (t.get("displayName") or "").strip()
-    dn_p = (p.get("displayName") or "").strip()
+    dn_t = sanitize_facebook_display_name(t.get("displayName"))
+    dn_p = sanitize_facebook_display_name(p.get("displayName"))
     merged_name = dn_p or dn_t
 
     av_t = (t.get("avatar") or "").strip()
@@ -1646,6 +1703,10 @@ def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
             sc += 20
         return sc
 
+    if not is_usable_facebook_avatar_url(av_p):
+        av_p = ""
+    if not is_usable_facebook_avatar_url(av_t):
+        av_t = ""
     merged_avatar = av_p if av_score(av_p) >= av_score(av_t) else av_t
 
     bio_t = (t.get("bio") or "").strip()
@@ -2149,6 +2210,7 @@ async def _run_with_page_core(
         timeout=NAV_TIMEOUT,
     )
     await _wu.wait_for_anti_bot_clear(page, platform="facebook")
+    await _facebook_raise_if_rate_limited(page, stage="профиль")
 
     # ── 2. Auth check ─────────────────────────────────────────────
     try:
@@ -2193,6 +2255,7 @@ async def _run_with_page_core(
         timeout=NAV_TIMEOUT,
     )
     await _wu.wait_for_anti_bot_clear(page, platform="facebook")
+    await _facebook_raise_if_rate_limited(page, stage="reels")
     await page.wait_for_timeout(2000)
     on_reels_sk = _facebook_page_on_reels_sk(page.url)
     if not on_reels_sk and _facebook_reels_ui_click_fallback_enabled():
@@ -2230,10 +2293,13 @@ async def _run_with_page_core(
 
     # ── 4. Profile data (уже в info) ───────────────────────────────
 
-    display_name   = (info.get("displayName") or "").strip() or username_raw
+    dn_raw = sanitize_facebook_display_name(info.get("displayName"))
+    display_name   = dn_raw or username_raw
     follower_count = _parse_count(info.get("followers") or "")
     like_count_val = _parse_count(info.get("pageLikes") or "")
     avatar_url     = info.get("avatar") or ""
+    if not is_usable_facebook_avatar_url(avatar_url):
+        avatar_url = ""
     bio            = info.get("bio") or ""
     print(
         f"[facebook_worker] name={display_name!r} "

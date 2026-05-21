@@ -124,6 +124,19 @@ def _read_tiktok_cookies() -> list[dict]:
     return result
 
 
+async def _tiktok_context_has_session(context) -> bool:
+    """sessionid в контексте Playwright (тот же способ, что у worker после входа)."""
+    try:
+        for c in await context.cookies():
+            name = str(c.get("name") or "")
+            domain = str(c.get("domain") or "").lower()
+            if name in {"sessionid", "sessionid_ss"} and "tiktok" in domain:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _tiktok_has_session() -> bool:
     """Return True if TikTok auth session cookie exists in profile."""
     profile_dir = _get_profile_dir()
@@ -382,6 +395,31 @@ def _clear_telegram_indexeddb() -> None:
             shutil.rmtree(item, ignore_errors=True)
 
 
+def _clear_tiktok_site_storage() -> None:
+    """IndexedDB / Local Storage / Session Storage / Cache для tiktok.com в профиле Chromium."""
+    profile = Path(_get_profile_dir())
+    default_dir = profile / "Default"
+    if not default_dir.is_dir():
+        return
+    for sub in ("IndexedDB", "Local Storage", "Session Storage", "Service Worker"):
+        base = default_dir / sub
+        if not base.is_dir():
+            continue
+        for item in list(base.iterdir()):
+            name_lower = item.name.lower()
+            if "tiktok" not in name_lower:
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            elif item.is_file():
+                _unlink_if_exists(item)
+    cache_dir = default_dir / "Cache" / "Cache_Data"
+    if cache_dir.is_dir():
+        for item in list(cache_dir.iterdir()):
+            if item.is_file() and "tiktok" in item.name.lower():
+                _unlink_if_exists(item)
+
+
 def _logout_platform(platform: str) -> None:
     profile = Path(_get_profile_dir())
     state_json = profile / f"{platform}_state.json"
@@ -396,6 +434,9 @@ def _logout_platform(platform: str) -> None:
 
     if platform == "telegram":
         _clear_telegram_indexeddb()
+
+    if platform == "tiktok":
+        _clear_tiktok_site_storage()
 
     needles = _LOGOUT_COOKIE_HOST_NEEDLES.get(platform, [])
     if needles:
@@ -569,6 +610,7 @@ async def _launch_persistent_context(
     *,
     headless: bool = False,
     locale: str = "ru-RU",
+    platform: str | None = None,
 ):
     """Запуск Chromium с профилем; повтор при артефактах lock/CHROME_DELETE."""
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -578,11 +620,32 @@ async def _launch_persistent_context(
         "args": ["--disable-blink-features=AutomationControlled"],
         "locale": locale,
     }
-    if not headless:
+    init_script = None
+    if platform == "facebook":
+        from platforms.facebook.browser_profile import (
+            build_stealth_script,
+            context_options,
+            launch_args,
+            load_profile,
+        )
+
+        bp = load_profile()
+        co = context_options(bp)
+        kwargs["locale"] = co.get("locale", locale)
+        kwargs["args"] = list(kwargs["args"]) + list(launch_args(bp))
+        kwargs["user_agent"] = co.get("user_agent")
+        if not headless:
+            kwargs["viewport"] = co.get("viewport") or {"width": 1366, "height": 900}
+        if bp.get("stealth_enabled", True):
+            init_script = build_stealth_script(bp.get("languages") or [])
+    elif not headless:
         kwargs["viewport"] = {"width": 1280, "height": 900}
     for attempt in range(2):
         try:
-            return await pw.chromium.launch_persistent_context(profile_dir, **kwargs)
+            ctx = await pw.chromium.launch_persistent_context(profile_dir, **kwargs)
+            if init_script:
+                await ctx.add_init_script(init_script)
+            return ctx
         except Exception as exc:
             last_exc = exc
             if attempt == 0:
@@ -596,24 +659,33 @@ def _run_tiktok_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
     username = _get_setting("TIKTOK_USERNAME")
     password = _get_setting("TIKTOK_PASSWORD")
-    # По умолчанию: автозаполнение, если в .env заданы и логин, и пароль.
-    # TIKTOK_AUTH_AUTOFILL=false — никогда не подставлять; true — подставлять при наличии пары.
-    raw_af = (_get_setting("TIKTOK_AUTH_AUTOFILL", "") or "").strip().lower()
-    if raw_af in {"0", "false", "no", "off", "n"}:
-        autofill_enabled = False
-    elif raw_af in {"1", "true", "yes", "on", "y"}:
-        autofill_enabled = True
-    else:
+    # По умолчанию — только ручной ввод в окне браузера.
+    # TIKTOK_AUTH_AUTOFILL=true — подставлять при наличии TIKTOK_USERNAME и TIKTOK_PASSWORD.
+    raw_af = (_get_setting("TIKTOK_AUTH_AUTOFILL", "false") or "").strip().lower()
+    if raw_af in {"1", "true", "yes", "on", "y"}:
         autofill_enabled = bool(username and password)
+    else:
+        autofill_enabled = False
 
     async def _async():
         from playwright.async_api import async_playwright
 
         from platforms.tiktok.auth_browser import try_fill_tiktok_login_credentials
+        from platforms.tiktok.worker import _create_tiktok_context, _load_worker_utils
+        from platforms.worker_pool import sync_accounts_browser_env
 
-        _set_job(job_id, "pending", "Запускаю браузер…")
+        sync_accounts_browser_env()
+        _wu = _load_worker_utils()
+        if _wu is None:
+            _set_job(job_id, "error", "worker_utils недоступен")
+            return
+
+        _set_job(job_id, "pending", "Запускаю браузер (системный Chrome, как при обновлении)…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
+        state_path = Path(profile_dir) / "tiktok_state.json"
         xvfb_proc = None
+        ctx = None
+        browser = None
 
         try:
             xvfb_proc = _start_xvfb_if_needed()
@@ -621,11 +693,15 @@ def _run_tiktok_auth(job_id: str) -> None:
                 _set_job(job_id, "pending", "Запущен Xvfb, открываю TikTok…")
 
             async with async_playwright() as pw:
-                ctx = await _launch_persistent_context(
-                    pw, profile_dir, headless=False, locale="en-US",
+                ctx, browser, state_path = await _create_tiktok_context(
+                    pw, _wu, state_path=state_path, headless=False,
                 )
                 try:
                     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    try:
+                        await page.bring_to_front()
+                    except Exception:
+                        pass
 
                     _set_job(job_id, "pending", "Открываю TikTok…")
                     if autofill_enabled and username and password:
@@ -668,23 +744,34 @@ def _run_tiktok_auth(job_id: str) -> None:
                             "Войдите в TikTok в открытом окне браузера (лучше через QR/2FA)…",
                         )
 
-                    # Poll until sessionid cookie appears in the profile DB (up to 3 min)
                     for _ in range(180):
                         await asyncio.sleep(1)
-                        if _tiktok_has_session():
+                        if await _tiktok_context_has_session(ctx):
                             break
                     else:
                         raise TimeoutError("Время ожидания входа истекло (3 мин).")
 
-                    # Export state so the worker can use a non-persistent context
-                    state_path = Path(profile_dir) / "tiktok_state.json"
                     await ctx.storage_state(path=str(state_path))
                     _set_job(job_id, "done", "Вход в TikTok выполнен успешно!")
+                    try:
+                        from platforms.worker_pool import shutdown_all_workers
+
+                        shutdown_all_workers()
+                    except Exception:
+                        pass
                 except Exception as e:
                     _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
                 finally:
                     if ctx is not None:
-                        await ctx.close()
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+                    if browser is not None:
+                        try:
+                            await browser.close()
+                        except Exception:
+                            pass
         except FileNotFoundError:
             _set_job(job_id, "error", "Xvfb не установлен на сервере. Установите пакет xvfb.")
         except Exception as e:
@@ -708,9 +795,45 @@ def _run_tiktok_auth(job_id: str) -> None:
 @api_view(["POST"])
 def tiktok_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_tiktok_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_tiktok_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
+
+
+@api_view(["GET", "PATCH"])
+def tiktok_browser_profile(request):
+    """
+    Параметры браузера TikTok (UA, viewport, locale, stealth) для воркера и входа.
+    PATCH сохраняет в config/tiktok_browser_profile.json и перезапускает демоны.
+    """
+    from platforms.tiktok.browser_profile import (
+        load_profile,
+        normalize_patch,
+        profile_for_api,
+        save_profile,
+    )
+
+    if request.method == "GET":
+        return Response(profile_for_api())
+
+    try:
+        data = normalize_patch(request.data if isinstance(request.data, dict) else {})
+    except ValueError as e:
+        return Response({"error": str(e)}, status=drf_status.HTTP_400_BAD_REQUEST)
+
+    path = save_profile(data)
+    try:
+        from platforms.worker_pool import shutdown_all_workers
+
+        shutdown_all_workers()
+    except Exception:
+        pass
+    return Response({
+        "ok": True,
+        "message": "Параметры браузера TikTok сохранены. Новое окно откроется с этими настройками.",
+        "config_path": str(path),
+        "profile": profile_for_api(),
+    })
 
 
 # ── Generic cookie import helpers ────────────────────────────────────────────
@@ -844,7 +967,14 @@ def _run_platform_cookie_import(
                 ctx = await _launch_persistent_context(pw, profile_dir, headless=True)
                 try:
                     await ctx.add_cookies(pw_cookies)
-                    _set_job(job_id, "pending", "Куки добавлены, сохраняю профиль…")
+                    _set_job(job_id, "pending", "Куки добавлены, проверяю на tiktok.com…")
+                    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                    await page.goto(
+                        "https://www.tiktok.com",
+                        wait_until="domcontentloaded",
+                        timeout=_auth_nav_timeout_ms(),
+                    )
+                    await page.wait_for_timeout(1500)
                     # Export per-platform state BEFORE post_import_fn / close so that
                     # workers can use an ephemeral context and the profile stays intact.
                     if state_export_path:
@@ -860,6 +990,13 @@ def _run_platform_cookie_import(
 
             if has_session_fn():
                 _set_job(job_id, "done", success_msg)
+                # Демон TikTok держит старый контекст без куков — пересоздать при следующем refresh.
+                try:
+                    from platforms.worker_pool import shutdown_all_workers
+
+                    shutdown_all_workers()
+                except Exception:
+                    pass
             else:
                 _set_job(job_id, "error", fail_msg)
         except Exception as e:
@@ -875,37 +1012,51 @@ def _run_platform_cookie_import(
 
 # ── TikTok cookie import ──────────────────────────────────────────────────────
 
+def _normalize_tiktok_session_paste(raw: str) -> str:
+    """Одна строка sessionid: убрать кавычки, префикс sessionid=."""
+    s = (raw or "").strip().strip('"').strip("'")
+    if "=" in s and "sessionid" in s.split("=", 1)[0].lower():
+        s = s.split("=", 1)[1].strip().strip('"').strip("'")
+    return s
+
+
+def _tiktok_cookies_from_paste(raw: str) -> list[dict]:
+    """
+    JSON (Cookie-Editor / DevTools) — все куки *.tiktok.com.
+    Одна строка — только sessionid (часто недостаточно для входа в другом Chrome).
+    """
+    raw = (raw or "").strip()
+    if raw.startswith("["):
+        cookies = _parse_cookies_generic(raw, ["tiktok"], "sessionid", ".tiktok.com")
+        if not any(c.get("name") == "sessionid" for c in cookies):
+            raise ValueError(
+                "В JSON нет cookie sessionid для .tiktok.com. "
+                "Экспортируйте все куки сайта (Cookie-Editor → Export), не одно поле."
+            )
+        return cookies
+    value = _normalize_tiktok_session_paste(raw)
+    if len(value) < 16:
+        raise ValueError("Слишком короткое значение sessionid — скопируйте из DevTools → Application → Cookies → .tiktok.com → sessionid")
+    return [
+        {
+            "name": "sessionid",
+            "value": value,
+            "domain": ".tiktok.com",
+            "path": "/",
+            "secure": True,
+            "httpOnly": True,
+            "sameSite": "None",
+        },
+    ]
+
+
 @api_view(["POST"])
 def tiktok_import_cookies(request):
     raw = (request.data.get("cookies") or "").strip()
     if not raw:
         return Response({"error": "Поле cookies обязательно"}, status=400)
-    is_probably_json = raw.startswith("[")
     try:
-        if is_probably_json:
-            pw_cookies = _parse_cookies_generic(raw, ["tiktok"], "sessionid", ".tiktok.com")
-        else:
-            # Raw value fallback: try both commonly seen TikTok session cookie names.
-            pw_cookies = [
-                {
-                    "name": "sessionid",
-                    "value": raw,
-                    "domain": ".tiktok.com",
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True,
-                    "sameSite": "None",
-                },
-                {
-                    "name": "sessionid_ss",
-                    "value": raw,
-                    "domain": ".tiktok.com",
-                    "path": "/",
-                    "secure": True,
-                    "httpOnly": True,
-                    "sameSite": "None",
-                },
-            ]
+        pw_cookies = _tiktok_cookies_from_paste(raw)
     except ValueError as e:
         return Response({"error": str(e)}, status=400)
     if not pw_cookies:
@@ -917,9 +1068,11 @@ def tiktok_import_cookies(request):
         target=_run_platform_cookie_import,
         args=(
             job_id, pw_cookies, _tiktok_has_session,
-            f"Готово! Импортировано {len(pw_cookies)} кук(ов). Авторизация TikTok активна.",
-            "Не найдена TikTok-сессия после импорта (ожидались sessionid/sessionid_ss). "
-            "Скопируйте куки с tiktok.com в залогиненном состоянии.",
+            f"Готово! Импортировано {len(pw_cookies)} кук(ов) в профиль и tiktok_state.json. "
+            "Перезапустите съём (воркер подхватит сессию). Лучше тот же VPN, что в браузере с куками.",
+            "Не найдена TikTok-сессия после импорта (нужен sessionid в профиле). "
+            "Вставьте JSON всех куков .tiktok.com (Cookie-Editor), не только sessionid. "
+            "Если на tiktok.com «слишком много попыток» — подождите 12–24 ч.",
         ),
         kwargs={"state_export_path": state_path},
         daemon=True,
@@ -1203,7 +1356,7 @@ def _run_instagram_auth(job_id: str) -> None:
 @api_view(["POST"])
 def instagram_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_instagram_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_instagram_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1295,7 +1448,7 @@ def _run_telegram_auth(job_id: str) -> None:
 @api_view(["POST"])
 def telegram_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_telegram_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_telegram_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1371,7 +1524,7 @@ def _run_x_auth(job_id: str) -> None:
 @api_view(["POST"])
 def x_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_x_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_x_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1461,7 +1614,7 @@ def _run_threads_auth(job_id: str) -> None:
 @api_view(["POST"])
 def threads_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_threads_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_threads_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1480,7 +1633,9 @@ def _run_facebook_auth(job_id: str) -> None:
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
 
         async with async_playwright() as pw:
-            ctx = await _launch_persistent_context(pw, profile_dir, headless=False, locale="ru-RU")
+            ctx = await _launch_persistent_context(
+                pw, profile_dir, headless=False, locale="ru-RU", platform="facebook",
+            )
             try:
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
@@ -1582,9 +1737,52 @@ def _run_facebook_auth(job_id: str) -> None:
 @api_view(["POST"])
 def facebook_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_facebook_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_facebook_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
+
+
+@api_view(["GET", "PATCH"])
+def facebook_browser_profile(request):
+    """
+    Параметры браузера Facebook (UA, viewport, locale, stealth) для воркера и входа.
+    PATCH сохраняет в config/facebook_browser_profile.json и перезапускает демоны.
+    """
+    from platforms.facebook.browser_profile import (
+        load_profile,
+        normalize_patch,
+        profile_for_api,
+        save_profile,
+    )
+
+    if request.method == "GET":
+        return Response(profile_for_api())
+
+    try:
+        data = normalize_patch(request.data if isinstance(request.data, dict) else {})
+    except ValueError as e:
+        return Response({"error": str(e)}, status=drf_status.HTTP_400_BAD_REQUEST)
+
+    path = save_profile(data)
+    try:
+        from platforms.worker_pool import shutdown_worker
+        from pathlib import Path as _Path
+
+        fb_worker = _Path(__file__).resolve().parents[1] / "platforms" / "facebook" / "worker.py"
+        shutdown_worker(fb_worker)
+    except Exception:
+        try:
+            from platforms.worker_pool import shutdown_all_workers
+
+            shutdown_all_workers()
+        except Exception:
+            pass
+    return Response({
+        "ok": True,
+        "message": "Параметры браузера Facebook сохранены. Новое окно откроется с этими настройками.",
+        "config_path": str(path),
+        "profile": profile_for_api(),
+    })
 
 
 # ── Facebook cookie import ────────────────────────────────────────────────────
@@ -1678,7 +1876,7 @@ def _run_rumble_auth(job_id: str) -> None:
 @api_view(["POST"])
 def rumble_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_rumble_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_rumble_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 
@@ -1770,7 +1968,7 @@ def _run_reddit_auth(job_id: str) -> None:
 @api_view(["POST"])
 def reddit_start_auth(request):
     job_id = _new_job()
-    t = threading.Thread(target=_run_reddit_auth, args=(job_id), daemon=True)
+    t = threading.Thread(target=_run_reddit_auth, args=(job_id,), daemon=True)
     t.start()
     return Response({"job_id": job_id})
 

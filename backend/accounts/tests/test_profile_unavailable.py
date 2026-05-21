@@ -19,6 +19,14 @@ class ProfileUnavailableDetectionTests(SimpleTestCase):
     def test_ignores_non_unavailable_errors(self):
         self.assertFalse(is_profile_unavailable_error("Timeout while waiting for selector"))
 
+    def test_facebook_temporary_block_not_profile_gone(self):
+        msg = (
+            "Facebook временно ограничил доступ (профиль) (временно заблокирован). "
+            "Подождите 15–60 мин, не жмите «Обновить» в цикле."
+        )
+        self.assertFalse(is_profile_unavailable_error(msg))
+        self.assertFalse(is_profile_unavailable_error("Вы временно заблокированы"))
+
     def test_trustworthy_rejection_message_not_profile_gone(self):
         from accounts.views import _is_refresh_stats_rejection
 

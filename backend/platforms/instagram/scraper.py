@@ -337,7 +337,7 @@ def fetch_instagram_profiles_bulk(usernames: list[str]) -> dict[str, dict]:
 
     batch_labels = [u.lstrip("@") for u in usernames if norm(u) in pending]
 
-    if len(batch_labels) > 1:
+    if len(batch_labels) >= 1:
         try:
             data = _call_instagram_worker(
                 {"usernames": batch_labels, "reels_views_only": True},
@@ -358,12 +358,12 @@ def fetch_instagram_profiles_bulk(usernames: list[str]) -> dict[str, dict]:
                 summary = dict(summary)
                 summary["_posts"] = _merge_posts_with_reels_grid_scraper(posts or [], rows)
                 complete[key] = summary
-    else:
-        for key, (summary, posts) in pending.items():
-            u_for_merge = next(x for x in usernames if norm(x) == key)
-            summary = dict(summary)
-            summary["_posts"] = _merge_reels_views_into_posts(u_for_merge, posts)
-            complete[key] = summary
+    elif len(pending) == 1:
+        key, (summary, posts) = next(iter(pending.items()))
+        u_for_merge = next(x for x in usernames if norm(x) == key)
+        summary = dict(summary)
+        summary["_posts"] = _merge_reels_views_into_posts(u_for_merge, posts)
+        complete[key] = summary
 
     return complete
 
@@ -488,13 +488,6 @@ def _fetch_instagram_instaloader(username: str, insta_user: str, insta_pass: str
         out["following_count"] = int(public_counts["following_count"])
     if int(public_counts.get("post_count") or 0) > 0:
         out["post_count"] = int(public_counts["post_count"])
-    worker_counts = _fetch_instagram_counts_via_worker(username)
-    if int(worker_counts.get("follower_count") or 0) > 0:
-        out["follower_count"] = int(worker_counts["follower_count"])
-    if int(worker_counts.get("following_count") or 0) > 0:
-        out["following_count"] = int(worker_counts["following_count"])
-    if int(worker_counts.get("post_count") or 0) > 0:
-        out["post_count"] = int(worker_counts["post_count"])
     # Instaloader иногда отдает "пустой" профиль (все ключевые счётчики = 0)
     # без явной ошибки. В таком случае пробуем Playwright, чтобы получить
     # актуальные данные в том же refresh-запросе.

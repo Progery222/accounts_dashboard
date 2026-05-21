@@ -348,7 +348,10 @@ async def _tiktok_goto_profile_with_redirect_recovery(
         return False
     pat = _tiktok_profile_url_regex(owner_username)
     for r in range(rounds):
-        await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
+        if _wu is not None and hasattr(_wu, "tiktok_goto_with_403_recovery"):
+            await _wu.tiktok_goto_with_403_recovery(page, target_url, timeout_ms=45_000)
+        else:
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
         if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
             await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
         deadline = time.monotonic() + dwell_s

@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import threading
 import time
@@ -446,7 +446,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
         ig_preload: dict[str, dict] = {}
         ig_accounts = [a for a in accounts if a.platform == "instagram"]
-        if (not fast_start) and len(ig_accounts) > 1:
+        if ig_accounts:
             try:
                 from platforms.instagram.scraper import fetch_instagram_profiles_bulk
 
@@ -506,19 +506,32 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "detail": detail,
             }
 
+        has_facebook = any(a.platform == "facebook" for a in accounts)
+        fb_batch_guard = None
+        if has_facebook:
+            from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
+
+            fb_batch_guard = FacebookRefreshBatchGuard()
+
+        if ig_accounts:
+            try:
+                from accounts.views import _PLATFORM_WORKERS
+                from platforms.worker_pool import ensure_worker
+
+                ig_worker = _PLATFORM_WORKERS.get("instagram")
+                if ig_worker and ig_worker.exists():
+                    ensure_worker(ig_worker)
+            except Exception as e:
+                print(f"[scheduled_refresh] instagram worker prewarm failed: {e}", file=sys.stderr)
+
         try:
-            queue_lock = threading.Lock()
+            from .parallel_account_queue import ParallelAccountQueue
+
             state_lock = threading.Lock()
-            cooldown_lock = threading.Lock()
             stop_requested = threading.Event()
-            next_idx = 0
             report_by_index: list[dict | None] = [None] * len(accounts)
             platform_limits = _platform_limits()
-            platform_semaphores = {
-                p: threading.BoundedSemaphore(value=max(1, int(v)))
-                for p, v in platform_limits.items()
-            }
-            platform_next_allowed_at = {p: 0.0 for p in platform_limits.keys()}
+            account_queue = ParallelAccountQueue(len(accounts), platform_limits)
             worker_count = _int_env("AUTO_REFRESH_WORKERS", 4, min_v=1, max_v=16)
 
             thread_slot_map: dict[int, int] = {}
@@ -586,15 +599,6 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 except Exception as e:
                     print(f"[scheduled_refresh] run_detail finalize failed: {e}")
 
-            def _claim_index() -> int | None:
-                nonlocal next_idx
-                with queue_lock:
-                    if next_idx >= len(accounts):
-                        return None
-                    idx = next_idx
-                    next_idx += 1
-                    return idx
-
             def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
                 with state_lock:
                     state.processed_accounts += 1
@@ -610,51 +614,29 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
             def _worker() -> None:
                 while True:
-                    idx = _claim_index()
-                    if idx is None:
-                        return
-                    account = accounts[idx]
-                    row_started = time.perf_counter()
-
                     if stop_requested.is_set():
-                        # Hard-stop mode: do not continue queued accounts.
                         return
-
                     with state_lock:
                         state.refresh_from_db(fields=["cancel_requested"])
-                        cancelled = bool(state.cancel_requested)
-                        if cancelled:
+                        if bool(state.cancel_requested):
                             state.last_error = "Автообновление остановлено пользователем."
                             state.save(update_fields=["last_error", "updated_at"])
-                    if cancelled:
-                        stop_requested.set()
-                        # Hard-stop mode: stop worker immediately.
+                            stop_requested.set()
+                            return
+
+                    idx = account_queue.claim(
+                        lambda i: accounts[i].platform,
+                        stop_event=stop_requested,
+                    )
+                    if idx is None:
                         return
 
-                    platform_sem = platform_semaphores.get(account.platform)
+                    account = accounts[idx]
+                    row_started = time.perf_counter()
                     attempted_network = False
-                    if platform_sem is None:
-                        platform_sem = threading.BoundedSemaphore(value=1)
-                        platform_semaphores[account.platform] = platform_sem
-                        with cooldown_lock:
-                            platform_next_allowed_at.setdefault(account.platform, 0.0)
-
-                    with platform_sem:
-                        while True:
-                            if stop_requested.is_set():
-                                return
-                            with state_lock:
-                                state.refresh_from_db(fields=["cancel_requested"])
-                                if bool(state.cancel_requested):
-                                    state.last_error = "Автообновление остановлено пользователем."
-                                    state.save(update_fields=["last_error", "updated_at"])
-                                    stop_requested.set()
-                                    return
-                            with cooldown_lock:
-                                wait_sec = platform_next_allowed_at.get(account.platform, 0.0) - time.monotonic()
-                            if wait_sec <= 0:
-                                break
-                            time.sleep(min(0.2, wait_sec))
+                    try:
+                        if stop_requested.is_set():
+                            return
 
                         slot = _worker_slot()
                         with state_lock:
@@ -695,50 +677,95 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     worker=None,
                                     detail=f"недавно обновлён (≤ {skip_recent_hours} ч)",
                                 )
-                                continue
-
-                            account.refresh_from_db()
-                            before = (
-                                int(account.follower_count or 0),
-                                int(account.like_count or 0),
-                                int(account.view_count or 0),
-                                int(account.post_count or 0),
-                            )
-                            scraped = None
-                            if account.platform == "instagram" and ig_preload:
-                                key = (account.username or "").lstrip("@").strip().lower()
-                                scraped = ig_preload.get(key)
-                            attempted_network = True
-                            _apply_refresh(account, scraped=scraped)
-                            account.refresh_from_db()
-                            after = (
-                                int(account.follower_count or 0),
-                                int(account.like_count or 0),
-                                int(account.view_count or 0),
-                                int(account.post_count or 0),
-                            )
-                            unchanged = before == after
-                            report_by_index[idx] = {
-                                "platform": account.platform,
-                                "username": account.username,
-                                "profile_name": _profile_name(account),
-                                "status": (
-                                    "успешно (данные без изменений)" if unchanged else "успешно"
-                                ),
-                                "follower_before": before[0],
-                                "follower_after": after[0],
-                                "like_before": before[1],
-                                "like_after": after[1],
-                                "view_before": before[2],
-                                "view_after": after[2],
-                                "post_before": before[3],
-                                "post_after": after[3],
-                                "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
-                                "detail": "",
-                            }
-                            _mark_progress(success=True, failed=False)
-                            _persist_run_item(account.id, status="done", worker=None, detail="")
+                            elif (
+                                account.platform == "facebook"
+                                and fb_batch_guard is not None
+                                and fb_batch_guard.is_tripped()
+                            ):
+                                account.refresh_from_db()
+                                fb = int(account.follower_count or 0)
+                                lb = int(account.like_count or 0)
+                                vb = int(account.view_count or 0)
+                                pb = int(account.post_count or 0)
+                                skip_detail = fb_batch_guard.skip_detail()
+                                report_by_index[idx] = {
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "profile_name": _profile_name(account),
+                                    "status": "пропущен",
+                                    "follower_before": fb,
+                                    "follower_after": fb,
+                                    "like_before": lb,
+                                    "like_after": lb,
+                                    "view_before": vb,
+                                    "view_after": vb,
+                                    "post_before": pb,
+                                    "post_after": pb,
+                                    "elapsed_sec": round(
+                                        max(0.0, time.perf_counter() - row_started), 3
+                                    ),
+                                    "detail": skip_detail,
+                                }
+                                _mark_progress(success=True, failed=False)
+                                _persist_run_item(
+                                    account.id,
+                                    status="skipped",
+                                    worker=None,
+                                    detail=skip_detail,
+                                )
+                            else:
+                                account.refresh_from_db()
+                                before = (
+                                    int(account.follower_count or 0),
+                                    int(account.like_count or 0),
+                                    int(account.view_count or 0),
+                                    int(account.post_count or 0),
+                                )
+                                scraped = None
+                                if account.platform == "instagram" and ig_preload:
+                                    key = (account.username or "").lstrip("@").strip().lower()
+                                    scraped = ig_preload.get(key)
+                                attempted_network = True
+                                _apply_refresh(account, scraped=scraped)
+                                account.refresh_from_db()
+                                after = (
+                                    int(account.follower_count or 0),
+                                    int(account.like_count or 0),
+                                    int(account.view_count or 0),
+                                    int(account.post_count or 0),
+                                )
+                                unchanged = before == after
+                                report_by_index[idx] = {
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "profile_name": _profile_name(account),
+                                    "status": (
+                                        "успешно (данные без изменений)" if unchanged else "успешно"
+                                    ),
+                                    "follower_before": before[0],
+                                    "follower_after": after[0],
+                                    "like_before": before[1],
+                                    "like_after": after[1],
+                                    "view_before": before[2],
+                                    "view_after": after[2],
+                                    "post_before": before[3],
+                                    "post_after": after[3],
+                                    "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
+                                    "detail": "",
+                                }
+                                _mark_progress(success=True, failed=False)
+                                _persist_run_item(account.id, status="done", worker=None, detail="")
                         except Exception as e:
+                            if account.platform == "facebook":
+                                from platforms.facebook.rate_limit import (
+                                    is_facebook_rate_limited_error,
+                                    shutdown_facebook_worker,
+                                )
+
+                                if is_facebook_rate_limited_error(e):
+                                    shutdown_facebook_worker()
+                                    if fb_batch_guard is not None:
+                                        fb_batch_guard.trip(str(e))
                             _mark_profile_unavailable_if_applicable(account, e)
                             detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
                             if len(detail) > 800:
@@ -772,15 +799,15 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             print(f"[scheduled_refresh] {account.platform}/@{account.username}: {e}")
                         finally:
                             if attempted_network:
-                                pause_sec = _refresh_all_delay_seconds(account)
-                                if pause_sec > 0:
-                                    with cooldown_lock:
-                                        platform_next_allowed_at[account.platform] = (
-                                            max(
-                                                platform_next_allowed_at.get(account.platform, 0.0),
-                                                time.monotonic() + pause_sec,
-                                            )
-                                        )
+                                account_queue.set_platform_cooldown(
+                                    account.platform,
+                                    _refresh_all_delay_seconds(account),
+                                )
+                    finally:
+                        if report_by_index[idx] is None:
+                            account_queue.abandon(idx, account.platform)
+                        else:
+                            account_queue.finish(idx, account.platform)
 
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 futures = [executor.submit(_worker) for _ in range(worker_count)]

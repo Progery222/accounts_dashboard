@@ -76,6 +76,14 @@ def _is_refresh_stats_rejection(exc: BaseException) -> bool:
 def _mark_profile_unavailable_if_applicable(account: Account, exc: BaseException) -> None:
     if _is_refresh_stats_rejection(exc):
         return
+    if getattr(account, "platform", None) == Platform.FACEBOOK:
+        try:
+            from platforms.facebook.rate_limit import is_facebook_rate_limited_error
+
+            if is_facebook_rate_limited_error(exc):
+                return
+        except Exception:
+            pass
     if not is_profile_unavailable_error(str(exc)):
         return
     Account.objects.filter(pk=account.pk).update(profile_unavailable=True)
@@ -441,15 +449,15 @@ def _refresh_all_delay_seconds(account: Account) -> float:
 
     Instagram is already preloaded in batch and generally doesn't need extra delay.
     Other platforms keep a short jitter to reduce burst traffic / anti-bot friction.
-    Facebook: longer pause — Playwright + антибот чувствительны к частым запросам.
+    Facebook: 3–6 мин между аккаунтами (секунды в коде) — Playwright + антибот.
     YouTube: пауза 5–10 с между аккаунтами — снижает риск квот/блокировок при серии запросов.
     """
     platform_defaults: dict[str, tuple[float, float]] = {
         Platform.INSTAGRAM: (0.0, 0.0),
-        Platform.TIKTOK: (0.8, 1.6),
+        Platform.TIKTOK: (50.0, 200.0),
         Platform.X: (0.8, 1.6),
         Platform.THREADS: (2.0, 4.0),
-        Platform.FACEBOOK: (5.0, 10.0),
+        Platform.FACEBOOK: (180.0, 360.0),
         Platform.YOUTUBE: (5.0, 10.0),
         Platform.TELEGRAM: (0.3, 0.8),
         Platform.RUMBLE: (0.5, 1.0),
@@ -919,6 +927,33 @@ def _run_refresh_all_background(
 
         skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
 
+        ig_preload: dict[str, dict] = {}
+        ig_accounts = [a for a in accounts if a.platform == Platform.INSTAGRAM]
+        if ig_accounts:
+            try:
+                from platforms.instagram.scraper import fetch_instagram_profiles_bulk
+
+                ig_preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
+            except Exception as e:
+                print(f"[refresh_all] instagram bulk preload failed: {e}", file=sys.stderr)
+
+        has_facebook = any(a.platform == Platform.FACEBOOK for a in accounts)
+        fb_batch_guard = None
+        if has_facebook:
+            from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
+
+            fb_batch_guard = FacebookRefreshBatchGuard()
+
+        if ig_accounts:
+            try:
+                ig_worker = _PLATFORM_WORKERS.get("instagram")
+                if ig_worker and ig_worker.exists():
+                    from platforms.worker_pool import ensure_worker
+
+                    ensure_worker(ig_worker)
+            except Exception as e:
+                print(f"[refresh_all] instagram worker prewarm failed: {e}", file=sys.stderr)
+
         from .refresh_priority import account_refresh_priority_session
 
         with account_refresh_priority_session():
@@ -1031,10 +1066,42 @@ def _run_refresh_all_background(
                                     worker=None,
                                     detail=skip_detail,
                                 )
+                            elif (
+                                account.platform == Platform.FACEBOOK
+                                and fb_batch_guard is not None
+                                and fb_batch_guard.is_tripped()
+                            ):
+                                skip_detail = fb_batch_guard.skip_detail()
+                                row = {
+                                    "id": account.id,
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "status": "пропущен",
+                                    "follower_count": before["follower_count"],
+                                    "follower_delta": 0,
+                                    "like_count": before["like_count"],
+                                    "like_delta": 0,
+                                    "view_count": before["view_count"],
+                                    "view_delta": 0,
+                                    "post_count": before["post_count"],
+                                    "post_delta": 0,
+                                    "detail": skip_detail,
+                                }
+                                _refresh_all_atomic_progress(failed=False)
+                                _persist_refresh_all_run_item(
+                                    account.id,
+                                    status="skipped",
+                                    worker=None,
+                                    detail=skip_detail,
+                                )
                             else:
+                                scraped = None
+                                if account.platform == Platform.INSTAGRAM and ig_preload:
+                                    key = (account.username or "").lstrip("@").strip().lower()
+                                    scraped = ig_preload.get(key)
                                 attempted_network = True
                                 with _account_refresh_mutex(account.id):
-                                    _refresh_with_retry(account)
+                                    _refresh_with_retry(account, scraped=scraped)
                                 account.refresh_from_db(
                                     fields=[
                                         "follower_count",
@@ -1071,6 +1138,16 @@ def _run_refresh_all_background(
                                 _refresh_all_atomic_progress(failed=False)
                                 _persist_refresh_all_run_item(account.id, status="done", worker=None, detail="")
                         except Exception as e:
+                            if account.platform == Platform.FACEBOOK:
+                                from platforms.facebook.rate_limit import (
+                                    is_facebook_rate_limited_error,
+                                    shutdown_facebook_worker,
+                                )
+
+                                if is_facebook_rate_limited_error(e):
+                                    shutdown_facebook_worker()
+                                    if fb_batch_guard is not None:
+                                        fb_batch_guard.trip(str(e))
                             detail, _ = _format_refresh_error(account, e)
                             row = {
                                 "id": account.id,
@@ -1275,6 +1352,17 @@ def _apply_refresh_inner(account: Account, scraped: dict | None = None) -> Accou
         if value is not None:
             if field in _SKIP_EMPTY_STR_UPDATE and isinstance(value, str) and not value.strip():
                 continue
+            if account.platform == Platform.FACEBOOK and isinstance(value, str):
+                if field == "display_name":
+                    from platforms.facebook.profile_meta import is_junk_facebook_display_name
+
+                    if is_junk_facebook_display_name(value):
+                        continue
+                if field == "avatar_url":
+                    from platforms.facebook.profile_meta import is_usable_facebook_avatar_url
+
+                    if not is_usable_facebook_avatar_url(value):
+                        continue
             setattr(account, field, value)
 
     seen_post_external_ids: set[str] = set()
@@ -1626,7 +1714,7 @@ class AccountViewSet(viewsets.ModelViewSet):
 
                 ig_accounts = [a for a in ordered if a.platform == Platform.INSTAGRAM]
                 preload: dict[str, dict] = {}
-                if len(ig_accounts) > 1:
+                if ig_accounts:
                     try:
                         from platforms.instagram.scraper import fetch_instagram_profiles_bulk
 
@@ -1676,11 +1764,7 @@ class AccountViewSet(viewsets.ModelViewSet):
                         a.profile_unavailable = False
                         key = _normalize_instagram_username_key(a.username)
                         scraped = None
-                        if (
-                            a.platform == Platform.INSTAGRAM
-                            and len(ig_accounts) > 1
-                            and key in preload
-                        ):
+                        if a.platform == Platform.INSTAGRAM and key in preload:
                             scraped = preload[key]
                         account, detail, _ = _refresh_account_for_api(a, scraped=scraped)
 

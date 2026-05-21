@@ -244,3 +244,59 @@ class RefreshApiTests(APITestCase):
         self.assertFalse(acc.profile_unavailable)
         self.assertEqual(acc.like_count, 0)
         self.assertGreaterEqual(acc.view_count, 114)
+
+    @patch("accounts.views._scrape")
+    def test_x_refresh_empty_posts_clears_unavailable(self, mock_scrape):
+        """Регрессия: пустая лента X и follower_count=0 не должны залипать в profile_unavailable."""
+        acc = Account.objects.create(
+            username="bob_spanch5411",
+            platform=Platform.X,
+            follower_count=1200,
+            like_count=0,
+            view_count=0,
+            post_count=0,
+            profile_unavailable=True,
+        )
+        mock_scrape.return_value = {
+            "display_name": "Evelyn Brooks",
+            "follower_count": 0,
+            "avatar_url": "",
+            "bio": "",
+            "like_count": 0,
+            "post_count": 0,
+            "_posts": [],
+        }
+        response = self.client.post(f"/api/accounts/{acc.id}/refresh/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        acc.refresh_from_db()
+        self.assertFalse(acc.profile_unavailable)
+        self.assertEqual(acc.follower_count, 0)
+        self.assertEqual(acc.post_count, 0)
+
+    @patch("accounts.views._scrape")
+    def test_x_refresh_empty_posts_does_not_mark_existing_posts_missing(self, mock_scrape):
+        acc = Account.objects.create(
+            username="zoepark_sec",
+            platform=Platform.X,
+            follower_count=100,
+            post_count=1,
+        )
+        post = Post.objects.create(
+            account=acc,
+            external_id="old_tweet",
+            description="legacy",
+            view_count=50,
+        )
+        mock_scrape.return_value = {
+            "display_name": "Zoe Park",
+            "follower_count": 100,
+            "avatar_url": "",
+            "bio": "",
+            "like_count": 0,
+            "post_count": 1,
+            "_posts": [],
+        }
+        response = self.client.post(f"/api/accounts/{acc.id}/refresh/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        post.refresh_from_db()
+        self.assertIsNone(post.missing_from_scrape_at)

@@ -50,7 +50,7 @@ services:
       # IP сервера + опционально домен. Можно переопределить в .env.
       ALLOWED_HOSTS: "${ALLOWED_HOSTS:-146.103.120.54,localhost,127.0.0.1}"
       # Чтобы Django принимал POST с публичного origin без CSRF-ошибок.
-      CSRF_EXTRA_ORIGINS: "${CSRF_EXTRA_ORIGINS:-http://146.103.120.54:8080}"
+      CSRF_EXTRA_ORIGINS: "${CSRF_EXTRA_ORIGINS:-http://146.103.120.54:9080}"
       DB_HOST: postgres
       DB_PORT: "5432"
       BROWSER_HEADLESS: "true"
@@ -79,7 +79,7 @@ services:
       PORT: "80"
       BACKEND_UPSTREAM: "backend:8000"
     ports:
-      - "8080:80"
+      - "${DASHBOARD_HTTP_PORT:-9080}:80"
     depends_on:
       - backend
     restart: unless-stopped

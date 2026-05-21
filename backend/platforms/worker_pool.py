@@ -44,6 +44,32 @@ def _worker_subprocess_env(backend_root: str) -> dict:
     return env
 
 
+def sync_accounts_browser_env() -> dict[str, str]:
+    """
+    Проставить BROWSER_PROFILE_DIR / BROWSER_HEADLESS из ACCOUNTS_BROWSER_* Django
+    в os.environ текущего процесса (manage.py warm_tiktok_session, shell и т.п.).
+    """
+    applied: dict[str, str] = {}
+    try:
+        from django.conf import settings as dj_settings
+    except Exception:
+        return applied
+
+    prof = getattr(dj_settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
+    if prof is not None:
+        p = Path(prof)
+        p.mkdir(parents=True, exist_ok=True)
+        s = str(p)
+        os.environ["BROWSER_PROFILE_DIR"] = s
+        applied["BROWSER_PROFILE_DIR"] = s
+    hl = getattr(dj_settings, "ACCOUNTS_BROWSER_HEADLESS", None)
+    if hl is not None:
+        s = "true" if hl else "false"
+        os.environ["BROWSER_HEADLESS"] = s
+        applied["BROWSER_HEADLESS"] = s
+    return applied
+
+
 def _compose_worker_env(backend_root: str) -> dict:
     """
     Env дочернего воркера: каталог профиля / headless как у дашборда (AccountsStats,
@@ -51,19 +77,10 @@ def _compose_worker_env(backend_root: str) -> dict:
     backend/config/worker_accounts.env.
     """
     env = _worker_subprocess_env(backend_root)
-    try:
-        from django.conf import settings as dj_settings
-    except Exception:
-        return env
-
-    prof = getattr(dj_settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
-    if prof is not None:
-        p = Path(prof)
-        p.mkdir(parents=True, exist_ok=True)
-        env["BROWSER_PROFILE_DIR"] = str(p)
-    hl = getattr(dj_settings, "ACCOUNTS_BROWSER_HEADLESS", None)
-    if hl is not None:
-        env["BROWSER_HEADLESS"] = "true" if hl else "false"
+    sync_accounts_browser_env()
+    for key in ("BROWSER_PROFILE_DIR", "BROWSER_HEADLESS"):
+        if key in os.environ:
+            env[key] = os.environ[key]
     threads_nav = (os.environ.get("THREADS_NAV_TIMEOUT_MS") or "").strip()
     if not threads_nav:
         threads_nav = "60000"
@@ -210,6 +227,72 @@ def _is_recoverable_playwright_error(message: str) -> bool:
     return any(m in msg for m in markers)
 
 
+def release_worker(worker_path: Path) -> None:
+    """Снять демон из пула (перед subs one-shot TikTok, чтобы не держать тот же Chrome)."""
+    key = pool_storage_key(worker_path)
+    with _GLOBAL_LOCK:
+        handle = _HANDLES.pop(key, None)
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        _kill_orphan_chromium_after_worker()
+        time.sleep(0.45)
+
+
+def call_worker_oneshot(
+    worker_path: Path,
+    payload: dict,
+    *,
+    timeout_sec: float | None = 3600.0,
+    extra_env: dict[str, str] | None = None,
+) -> dict:
+    """
+    Один процесс worker.py <json> без демона — для клиента subs (TikTok enrich с окном).
+    AccountsStats по-прежнему использует call_worker / ensure_worker.
+    """
+    backend_root = str(_backend_dir_for_worker(worker_path))
+    env = _compose_worker_env(backend_root)
+    if extra_env:
+        env.update(extra_env)
+    cmd = [sys.executable, str(worker_path.resolve()), json.dumps(payload, ensure_ascii=False)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_sec,
+            cwd=backend_root,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            f"Таймаут one-shot worker ({int(timeout_sec or 0)}с). Попробуйте ещё раз."
+        ) from exc
+    if proc.stderr:
+        for line in proc.stderr.splitlines():
+            if line.strip():
+                print(line, file=sys.stderr)
+    if proc.returncode not in (0, None) and not (proc.stdout or "").strip():
+        raise ValueError(
+            f"Worker завершился с кодом {proc.returncode}: "
+            f"{(proc.stderr or proc.stdout or '')[:500]}"
+        )
+    lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("Worker не вернул ответ (пустой stdout)")
+    try:
+        data = json.loads(lines[-1].strip())
+    except Exception as exc:
+        raise ValueError("Ошибка парсинга ответа worker") from exc
+    if isinstance(data, dict) and "error" in data:
+        raise ValueError(data["error"])
+    return data
+
+
 def call_worker(
     worker_path: Path,
     payload: dict,
@@ -306,6 +389,22 @@ def shutdown_all_workers() -> None:
                 pass
         _HANDLES.clear()
     _kill_orphan_chromium_after_worker()
+
+
+def shutdown_worker(worker_path: Path) -> bool:
+    """Закрыть один демон Playwright (например, только Facebook)."""
+    key = pool_storage_key(worker_path)
+    handle = None
+    with _GLOBAL_LOCK:
+        handle = _HANDLES.pop(key, None)
+    if handle is None:
+        return False
+    try:
+        handle.close()
+    except Exception:
+        pass
+    _kill_orphan_chromium_after_worker()
+    return True
 
 
 def shutdown_playwright_pool_aggressive(*, sleep_sec: float = 0.55) -> None:

@@ -12,10 +12,33 @@ import os
 import socketserver
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("NEW_FRONTEND_PORT", "5174") or "5174")
 ROOT = Path(__file__).resolve().parent
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class AtomicHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+    """Корень «/» и SPA-маршруты отдают app.html (иначе после F5 — только index-редирект)."""
+
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path.rstrip("/") or "/"
+        if path in ("/", "/settings", "/analytics", "/profiles", "/tv"):
+            self.path = "/app.html"
+        return super().do_GET()
+
+    def end_headers(self) -> None:
+        # app.html компилируется Babel в браузере — не кэшировать агрессивно
+        if self.path.startswith("/app.html"):
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+        super().end_headers()
 
 
 def main() -> None:
@@ -32,8 +55,8 @@ def main() -> None:
         print("Ошибка: рядом с run_server.py должен лежать app.html (каталог new_frontend).", file=sys.stderr)
         sys.exit(1)
     os.chdir(ROOT)
-    handler = http.server.SimpleHTTPRequestHandler
-    with socketserver.TCPServer((HOST, PORT), handler) as httpd:
+    socketserver.TCPServer.allow_reuse_address = True
+    with ThreadingHTTPServer((HOST, PORT), AtomicHTTPRequestHandler) as httpd:
         print(f"new_frontend: http://{HOST}:{PORT}/  (корень {ROOT})")
         print("Это Atomic (app.html), не Vite ../frontend (5173).")
         print(

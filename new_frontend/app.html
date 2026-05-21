@@ -57,12 +57,60 @@
 </style>
 </head>
 <body>
-<div id="root"></div>
-
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-<script type="text/babel">
+<div id="root">
+  <div id="nf-boot" style="min-height:100vh;display:grid;place-items:center;color:#8a93a8;font-family:system-ui,sans-serif;text-align:center;padding:24px">
+    <div>
+      <div id="nf-boot-title" style="margin-bottom:8px">Загрузка интерфейса…</div>
+      <div id="nf-boot-hint" style="font-size:13px;color:#525a70">скрипты и компиляция (первый запуск 20–90 с)</div>
+    </div>
+  </div>
+</div>
+<script>
+  window.__nfSetBoot = function (title, hint) {
+    var t = document.getElementById('nf-boot-title');
+    var h = document.getElementById('nf-boot-hint');
+    if (t && title) t.textContent = title;
+    if (h && hint != null) h.textContent = hint;
+  };
+  window.__nfBootError = function (msg) {
+    var el = document.getElementById('root');
+    if (!el) return;
+    el.innerHTML = '<div style="min-height:100vh;padding:24px;color:#f87171;font-family:system-ui,sans-serif;max-width:720px;line-height:1.5">'
+      + '<div style="font-weight:600;margin-bottom:8px">Не удалось запустить интерфейс</div>'
+      + '<div style="color:#8a93a8;font-size:14px;white-space:pre-wrap">' + String(msg || 'неизвестная ошибка') + '</div>'
+      + '<div style="margin-top:16px;color:#6aa9ff;font-size:13px">Проверьте Django на :8000 и вкладку Console (F12)</div></div>';
+  };
+  window.addEventListener('error', function (e) {
+    if (e && e.target && e.target.tagName === 'SCRIPT') {
+      window.__nfBootError('Скрипт не загрузился: ' + (e.target.src || ''));
+    }
+  }, true);
+  setTimeout(function () {
+    if (typeof React === 'undefined') {
+      window.__nfSetBoot('Долго нет React…', 'обновите Ctrl+Shift+R или проверьте /vendor/*.js');
+    }
+  }, 12000);
+  setTimeout(function () {
+    if (typeof React !== 'undefined' && typeof Babel !== 'undefined' && !window.__nfAppMounted) {
+      window.__nfSetBoot('Компиляция интерфейса…', 'Babel обрабатывает app.html — подождите');
+    }
+  }, 15000);
+  setTimeout(function () {
+    if (!window.__nfAppMounted) {
+      window.__nfBootError('Таймаут запуска (3 мин).\nОткройте F12 → Console и пришлите ошибки.');
+    }
+  }, 180000);
+</script>
+<script src="/vendor/react.development.js"></script>
+<script src="/vendor/react-dom.development.js"></script>
+<script>
+  window.__nfSetBoot('Компиляция интерфейса…', 'загрузка Babel…');
+</script>
+<script src="/vendor/babel.min.js"></script>
+<script>
+  window.__nfSetBoot('Компиляция интерфейса…', 'обработка app.html (20–90 с при первом открытии)');
+</script>
+<script type="text/babel" data-presets="react">
 
 // ===== tweaks-panel.jsx =====
 
@@ -1082,24 +1130,6 @@ async function _postJson(url, payload) {
   throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to post ${url}`)));
 }
 
-async function _delete(url) {
-  const candidates = _apiBaseCandidates();
-  let lastErr = null;
-  for (const base of candidates) {
-    try {
-      const res = await fetch(`${base}${url}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const fb = `HTTP ${res.status} for ${base}${url}`;
-        throw new Error(await _errorMessageFromResponse(res, fb));
-      }
-      return;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to delete ${url}`)));
-}
-
 async function _patchJson(url, payload) {
   const candidates = _apiBaseCandidates();
   let lastErr = null;
@@ -1120,6 +1150,24 @@ async function _patchJson(url, payload) {
     }
   }
   throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to patch ${url}`)));
+}
+
+async function _delete(url) {
+  const candidates = _apiBaseCandidates();
+  let lastErr = null;
+  for (const base of candidates) {
+    try {
+      const res = await fetch(`${base}${url}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const fb = `HTTP ${res.status} for ${base}${url}`;
+        throw new Error(await _errorMessageFromResponse(res, fb));
+      }
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to delete ${url}`)));
 }
 
 /** GET → Blob: перебирает базы API (как _fetchJson), если same-origin не проксирует /api/. */
@@ -5957,9 +6005,234 @@ async function _pollAuthJob(jobId, { maxMs = 240000, intervalMs = 700 } = {}) {
   );
 }
 
+const BROWSER_PROFILE_PLATFORMS = {
+  tiktok: { label: 'TikTok', apiPath: '/api/settings/tiktok/browser-profile/', hint: 'Используются при входе, обновлении и прогреве.' },
+  facebook: { label: 'Facebook', apiPath: '/api/settings/facebook/browser-profile/', hint: 'Используются при входе, обновлении страниц и Reels. Для RU-аккаунтов оставьте locale ru-RU.' },
+};
+
+/** Параметры окна/движка, в котором открыт этот интерфейс (не Playwright). */
+function _draftFromCurrentBrowserWindow() {
+  const langs = (typeof navigator !== 'undefined' && navigator.languages?.length)
+    ? [...navigator.languages].map((l) => String(l).trim()).filter(Boolean)
+    : [];
+  const locale = (typeof navigator !== 'undefined' && navigator.language)
+    ? String(navigator.language).trim()
+    : 'en-US';
+  const clamp = (n, lo, hi, fallback) => {
+    const v = Math.round(Number(n) || fallback);
+    return Math.max(lo, Math.min(hi, v));
+  };
+  return {
+    user_agent: typeof navigator !== 'undefined' ? String(navigator.userAgent || '') : '',
+    viewport_width: clamp(window.innerWidth, 320, 7680, 1280),
+    viewport_height: clamp(window.innerHeight, 240, 4320, 900),
+    locale: locale || 'en-US',
+    languages: langs.length ? langs.join(', ') : (locale || 'en-US'),
+  };
+}
+
+function PlatformBrowserProfileModal({ platform, accent, onClose }) {
+  const meta = BROWSER_PROFILE_PLATFORMS[platform] || BROWSER_PROFILE_PLATFORMS.tiktok;
+  const [loading, setLoading] = useStateMd(true);
+  const [saving, setSaving] = useStateMd(false);
+  const [draft, setDraft] = useStateMd(null);
+  const [error, setError] = useStateMd('');
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const data = await _fetchJson(meta.apiPath);
+        if (cancelled) return;
+        const langs = Array.isArray(data?.languages) ? data.languages.join(', ') : String(data?.languages || '');
+        setDraft({
+          user_agent: String(data?.user_agent || ''),
+          viewport_width: Number(data?.viewport_width) || 1280,
+          viewport_height: Number(data?.viewport_height) || 900,
+          locale: String(data?.locale || 'en-US'),
+          languages: langs,
+          stealth_enabled: data?.stealth_enabled !== false,
+          hide_automation_flags: data?.hide_automation_flags !== false,
+        });
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [platform]);
+
+  const setField = (key, value) => setDraft((d) => (d ? { ...d, [key]: value } : d));
+
+  const applyCurrentBrowserParams = () => {
+    const cur = _draftFromCurrentBrowserWindow();
+    setDraft((d) => (d ? { ...d, ...cur } : { ...cur, stealth_enabled: true, hide_automation_flags: true }));
+    setError('');
+  };
+
+  const save = async (resetDefaults = false) => {
+    setSaving(true);
+    setError('');
+    try {
+      const body = resetDefaults
+        ? { reset_defaults: true }
+        : {
+            user_agent: draft?.user_agent,
+            viewport_width: Number(draft?.viewport_width),
+            viewport_height: Number(draft?.viewport_height),
+            locale: draft?.locale,
+            languages: draft?.languages,
+            stealth_enabled: !!draft?.stealth_enabled,
+            hide_automation_flags: !!draft?.hide_automation_flags,
+          };
+      const res = await _patchJson(meta.apiPath, body);
+      await uiAlert(String(res?.message || 'Сохранено.'), 'Параметры браузера');
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const inputStyle = {
+    width: '100%',
+    padding: '8px 10px',
+    borderRadius: 8,
+    border: '1px solid var(--line)',
+    background: 'rgba(255,255,255,0.03)',
+    color: 'var(--ink)',
+    fontSize: 12,
+    fontFamily: 'JetBrains Mono, monospace',
+  };
+
+  return (
+    <div
+      style={{
+        position: 'fixed', inset: 0, zIndex: 110,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(0,0,0,0.72)', padding: 16,
+      }}
+      onClick={(e) => { if (e.target === e.currentTarget && !saving) onClose(); }}
+    >
+      <div
+        role="dialog"
+        aria-modal
+        aria-labelledby="platform-browser-profile-title"
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: '100%', maxWidth: 520, maxHeight: '90vh', overflow: 'auto',
+          borderRadius: 16, border: '1px solid var(--line)',
+          background: 'rgba(18,20,28,0.98)', padding: 20,
+          boxShadow: '0 24px 56px rgba(0,0,0,0.65)',
+        }}
+      >
+        <h3 id="platform-browser-profile-title" style={{ margin: '0 0 6px', fontSize: 17, color: '#fff' }}>
+          Параметры браузера {meta.label}
+        </h3>
+        <p style={{ margin: '0 0 10px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.45 }}>
+          {meta.hint} После сохранения демон {meta.label} перезапускается.
+        </p>
+        <button
+            type="button"
+            disabled={saving || loading || !draft}
+            onClick={applyCurrentBrowserParams}
+            title="User-Agent, размер окна и языки из браузера, где открыт дашборд"
+            style={{
+              width: '100%',
+              marginBottom: 14,
+              padding: '10px 14px',
+              borderRadius: 10,
+              border: `1px solid ${accent || '#6aa9ff'}55`,
+              background: `${accent || '#6aa9ff'}18`,
+              color: 'var(--ink)',
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: saving ? 'not-allowed' : 'pointer',
+              opacity: saving ? 0.6 : 1,
+            }}
+          >
+            Использовать текущие параметры (этот браузер)
+          </button>
+        {loading && <div style={{ color: 'var(--ink-dim)', fontSize: 13, marginBottom: 10 }}>Загрузка…</div>}
+        {error && (
+          <div style={{ marginBottom: 12, padding: 10, borderRadius: 8, background: '#ef444418', border: '1px solid #ef444440', color: '#fca5a5', fontSize: 12 }}>
+            {error}
+          </div>
+        )}
+        {!loading && draft && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <label style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+              User-Agent
+              <textarea
+                value={draft.user_agent}
+                onChange={(e) => setField('user_agent', e.target.value)}
+                rows={3}
+                style={{ ...inputStyle, marginTop: 4, resize: 'vertical', minHeight: 64 }}
+              />
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <label style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+                Ширина окна
+                <input type="number" min={320} max={7680} value={draft.viewport_width}
+                  onChange={(e) => setField('viewport_width', e.target.value)}
+                  style={{ ...inputStyle, marginTop: 4 }} />
+              </label>
+              <label style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+                Высота окна
+                <input type="number" min={240} max={4320} value={draft.viewport_height}
+                  onChange={(e) => setField('viewport_height', e.target.value)}
+                  style={{ ...inputStyle, marginTop: 4 }} />
+              </label>
+            </div>
+            <label style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+              Locale (язык интерфейса Playwright)
+              <input type="text" value={draft.locale} onChange={(e) => setField('locale', e.target.value)}
+                placeholder="en-US" style={{ ...inputStyle, marginTop: 4 }} />
+            </label>
+            <label style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+              navigator.languages (через запятую)
+              <input type="text" value={draft.languages} onChange={(e) => setField('languages', e.target.value)}
+                placeholder="en-US, en" style={{ ...inputStyle, marginTop: 4 }} />
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--ink-dim)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={draft.stealth_enabled}
+                onChange={(e) => setField('stealth_enabled', e.target.checked)} />
+              Маскировка automation (webdriver, plugins, languages)
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--ink-dim)', cursor: 'pointer' }}>
+              <input type="checkbox" checked={draft.hide_automation_flags}
+                onChange={(e) => setField('hide_automation_flags', e.target.checked)} />
+              Флаг --disable-blink-features=AutomationControlled
+            </label>
+          </div>
+        )}
+        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 18 }}>
+          <button type="button" disabled={saving || loading} onClick={() => save(true)}
+            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-dim)', fontSize: 12, cursor: 'pointer' }}>
+            Сбросить по умолчанию
+          </button>
+          <button type="button" disabled={saving} onClick={onClose}
+            style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid var(--line)', background: 'transparent', color: 'var(--ink-dim)', fontSize: 12, cursor: 'pointer' }}>
+            Отмена
+          </button>
+          <button type="button" disabled={saving || loading || !draft} onClick={() => save(false)}
+            style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: accent || '#6aa9ff', color: '#000', fontSize: 12, fontWeight: 600, cursor: 'pointer', opacity: (saving || loading) ? 0.6 : 1 }}>
+            {saving ? 'Сохранение…' : 'Сохранить'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SettingsScreen({ tweaks, onBack, onDataChanged, onOpenGlobalModal }) {
   const isMobile = useIsMobile(980);
   const accent = tweaks.accent || '#6aa9ff';
+  const [browserProfilePlatform, setBrowserProfilePlatform] = useStateMd(null);
   const fallbackPlatforms = [
     { id: 'tiktok',    name: 'TikTok',    state: 'active', expires: '5 дн.', meta: 'perf_feed_cache', warn: true,  account: null },
     { id: 'instagram', name: 'Instagram', state: 'active', updated: '2026-05-04 08:47 UTC', warn: false, account: '@asti22297' },
@@ -5992,6 +6265,13 @@ function SettingsScreen({ tweaks, onBack, onDataChanged, onOpenGlobalModal }) {
         <p style={{ color: 'var(--ink-dim)', fontSize: 14, lineHeight: 1.6, marginBottom: isMobile ? 12 : 16, maxWidth: 720 }}>
           Для сбора данных приложение использует авторизованные сессии в браузере. Нажмите кнопку — откроется окно, войдите в аккаунт, и данные будут обновляться автоматически.
         </p>
+        {browserProfilePlatform && (
+          <PlatformBrowserProfileModal
+            platform={browserProfilePlatform}
+            accent={accent}
+            onClose={() => setBrowserProfilePlatform(null)}
+          />
+        )}
         {/* Summary tile */}
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr 1fr' : '1fr 1fr 1fr', gap: isMobile ? 8 : 14, marginBottom: isMobile ? 16 : 28 }}>
           <SummaryTile label="АКТИВНЫХ" value={String(activeCount)} color="#4ade80" />
@@ -6000,7 +6280,19 @@ function SettingsScreen({ tweaks, onBack, onDataChanged, onOpenGlobalModal }) {
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 14 }}>
-          {platforms.map(p => <SessionCard key={p.id} p={p} accent={accent} onDataChanged={onDataChanged} />)}
+          {platforms.map(p => (
+            <SessionCard
+              key={p.id}
+              p={p}
+              accent={accent}
+              onDataChanged={onDataChanged}
+              onOpenBrowserProfile={
+                (p.id === 'tiktok' || p.id === 'facebook')
+                  ? () => setBrowserProfilePlatform(p.id)
+                  : undefined
+              }
+            />
+          ))}
         </div>
       </main>
     </div>
@@ -6018,7 +6310,7 @@ function SummaryTile({ label, value, color, warn }) {
   );
 }
 
-function SessionCard({ p, accent, onDataChanged }) {
+function SessionCard({ p, accent, onDataChanged, onOpenBrowserProfile }) {
   const isMobile = useIsMobile(980);
   const meta = PLATFORM_META[p.id];
   const stateColor = p.state === 'active' || p.state === 'detected' ? '#4ade80' : p.state === 'expired' ? '#ef4444' : '#f59e0b';
@@ -6141,14 +6433,34 @@ function SessionCard({ p, accent, onDataChanged }) {
             Импорт cookies
           </button>
         )}
+        {onOpenBrowserProfile && (
+          <button
+            type="button"
+            onClick={onOpenBrowserProfile}
+            style={{ width: isMobile ? '100%' : 'auto', minHeight: isMobile ? 42 : undefined, padding: '8px 14px', borderRadius: 10, background: 'transparent', border: '1px solid var(--line)', color: 'var(--ink-dim)', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}
+          >
+            Параметры браузера
+          </button>
+        )}
       </div>
       {showImport && importEndpoint && (
         <div style={{ marginTop: 12, border: '1px solid var(--line)', borderRadius: 10, padding: 10 }}>
-          <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', marginBottom: 6 }}>JSON cookies для {p.name}</div>
+          <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', marginBottom: 6 }}>
+            {p.id === 'tiktok' ? 'Куки для Playwright-воркера (отдельный Chrome)' : `JSON cookies для ${p.name}`}
+          </div>
+          {p.id === 'tiktok' && (
+            <p style={{ margin: '0 0 8px', fontSize: 11, color: 'var(--ink-dim)', lineHeight: 1.45 }}>
+              Окно воркера ≠ ваш браузер. После «Импортировать» дождитесь «Готово», затем снова откройте съём.
+              Лучше вставить <strong style={{ color: 'var(--ink)' }}>JSON всех куков</strong> .tiktok.com (расширение Cookie-Editor → Export).
+              Одного sessionid из DevTools часто мало; тот же VPN, что при входе. «Слишком много попыток» — пауза 12–24 ч.
+            </p>
+          )}
           <textarea
             value={cookiesRaw}
             onChange={(e) => setCookiesRaw(e.target.value)}
-            placeholder='[{"domain":".example.com","name":"sessionid","value":"..."}]'
+            placeholder={p.id === 'tiktok'
+              ? '[{"domain":".tiktok.com","name":"sessionid","value":"..."}, … все куки tiktok.com]'
+              : '[{"domain":".example.com","name":"sessionid","value":"..."}]'}
             style={{ width: '100%', minHeight: 100, resize: 'vertical', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--line)', borderRadius: 8, color: 'var(--ink)', fontSize: 12, fontFamily: 'JetBrains Mono, monospace', padding: 8 }}
           />
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
@@ -8054,7 +8366,16 @@ function RouteFloater({ route, setRoute, routes, accent }) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+try {
+  if (typeof React === 'undefined' || typeof ReactDOM === 'undefined' || typeof Babel === 'undefined') {
+    throw new Error('React / ReactDOM / Babel не загрузились (папка new_frontend/vendor/)');
+  }
+  window.__nfAppMounted = true;
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+} catch (bootErr) {
+  window.__nfBootError(bootErr && bootErr.message ? bootErr.message : String(bootErr));
+  console.error('[new_frontend] boot failed', bootErr);
+}
 
 
 </script>

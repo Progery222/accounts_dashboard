@@ -11,7 +11,15 @@ def _run_worker(worker_path: Path, payload: dict, platform_name: str) -> dict:
         )
     data = call_worker(worker_path, payload)
     if "error" in data:
-        raise ValueError(data["error"])
+        err = data["error"]
+        from platforms.facebook.rate_limit import (
+            is_facebook_rate_limited_error,
+            shutdown_facebook_worker,
+        )
+
+        if is_facebook_rate_limited_error(ValueError(err)):
+            shutdown_facebook_worker()
+        raise ValueError(err)
     if "_posts" not in data:
         data["_posts"] = []
     return data

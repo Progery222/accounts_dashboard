@@ -1,5 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from .subs_api import subs_tiktok_audience_bulk
 from .views import (
     AccountViewSet, ProfileViewSet, platforms, summary, refresh_schedule,
     auto_refresh_status, auto_refresh_series, auto_refresh_run_now, auto_refresh_stop,
@@ -31,6 +32,7 @@ urlpatterns = [
     path("refresh-all-status/", refresh_all_status),
     path("refresh-all-stop/", refresh_all_stop),
     path("audience-scrape-stop/", audience_scrape_stop),
+    path("subs/tiktok-audience/bulk/", subs_tiktok_audience_bulk),
     path("refresh-all-report/", refresh_all_report_download),
     path("analytics/top-posts/", top_posts),
     path("analytics/insights/", insights),

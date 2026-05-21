@@ -13,11 +13,20 @@ def is_profile_unavailable_error(message: str) -> bool:
     text = msg.lower()
     if "обновление не применено" in text:
         return False
+    # Временный rate limit Facebook («Вы временно заблокированы») — не удалённый профиль.
+    try:
+        from platforms.facebook.rate_limit import is_facebook_rate_limited_error
+
+        if is_facebook_rate_limited_error(ValueError(msg)):
+            return False
+    except Exception:
+        pass
     hard_markers = (
         "не найден",
         "не существует",
         "удален",
         "удалён",
+        # «временно заблокирован» — rate limit FB, см. проверку выше; здесь — постоянная блокировка.
         "заблокирован",
         "забанен",
         "not found",

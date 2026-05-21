@@ -459,6 +459,8 @@ async def _run_with_page(username: str, page, _wu) -> dict:
         "like_count":      0,   # aggregated from posts in _apply_refresh
         "post_count":      post_count_raw,  # None → preserve DB value
         "_posts":          posts,
+        # Пустая лента ≠ «все твиты удалены» — не помечаем посты в БД как missing.
+        "_posts_authoritative": bool(posts),
     }
 
 

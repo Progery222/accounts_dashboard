@@ -35,12 +35,21 @@ from pathlib import Path
 
 def default_profile_dir() -> Path:
     """
-    Должен совпадать с BROWSER_PROFILE_DIR в Django/настройках: иначе вход в Settings
-    пишет куки в один каталог, а воркер subprocess читает другой.
+    Должен совпадать с BROWSER_PROFILE_DIR / ACCOUNTS_BROWSER_PROFILE_DIR:
+    иначе вход в Settings и warm_tiktok_session пишут куки в один каталог,
+    а воркер читает другой.
     """
     env = (os.environ.get("BROWSER_PROFILE_DIR") or "").strip()
     if env:
         return Path(env)
+    try:
+        from django.conf import settings as dj_settings
+
+        raw = getattr(dj_settings, "ACCOUNTS_BROWSER_PROFILE_DIR", None)
+        if raw:
+            return Path(raw)
+    except Exception:
+        pass
     home = Path.home()
     if (home / "AppData").exists():          # Windows
         return home / "AppData" / "Local" / "TikStatsChromeProfile"
@@ -202,13 +211,76 @@ _CHALLENGE_JS = r"""
     const title = (document.title || '').toLowerCase();
     const href = (location.href || '').toLowerCase();
     const body = (document.body?.innerText || '').toLowerCase();
-    return (
+    if (
         title.includes('just a moment') ||
         title.includes('attention required') ||
         href.includes('challenge') ||
         body.includes('checking your browser') ||
         body.includes('verify you are human') ||
         body.includes('verify you are a human')
+    ) {
+        return true;
+    }
+    // TikTok / ByteDance: слайдер, puzzle, «подтвердите…»
+    if (
+        href.includes('captcha') ||
+        href.includes('/verify') ||
+        body.includes('captcha') ||
+        body.includes('verify to continue') ||
+        body.includes('drag the slider') ||
+        (body.includes('подтвердите') && (
+            body.includes('робот') || body.includes('личност') || body.includes('человек')
+        )) ||
+        (body.includes('перетащите') && body.includes('ползун'))
+    ) {
+        return true;
+    }
+    try {
+        if (document.querySelector(
+            '#captcha-verify-container, #captcha_container, '
+            + '[class*="captcha"], [class*="Captcha"], [data-e2e*="captcha"]'
+        )) {
+            return true;
+        }
+        for (const f of document.querySelectorAll('iframe')) {
+            const s = (f.getAttribute('src') || '').toLowerCase();
+            if (s.includes('captcha') || s.includes('verify')) return true;
+        }
+    } catch (_) {}
+    return false;
+}
+"""
+
+
+def anti_bot_wait_timeout_ms(platform: str) -> int:
+    """Сколько ждать ручного прохождения капчи/челленджа (мс)."""
+    plat = (platform or "").strip().lower()
+    if plat == "tiktok":
+        raw = os.environ.get("TIKTOK_CAPTCHA_WAIT_MS", "300000")
+    else:
+        raw = os.environ.get("ANTI_BOT_WAIT_MS", "120000")
+    try:
+        return max(30_000, int(str(raw).strip()))
+    except (TypeError, ValueError):
+        return 300_000 if plat == "tiktok" else 120_000
+
+# Встроенная страница Chromium «Доступ запрещён / HTTP ERROR 403» (не Cloudflare).
+_CHROMIUM_403_JS = r"""
+() => {
+    const body = (document.body?.innerText || '').toLowerCase();
+    const title = (document.title || '').toLowerCase();
+    return (
+        body.includes('http error 403') ||
+        body.includes('ошибка http 403') ||
+        body.includes('у вас нет прав для просмотра') ||
+        body.includes('access to www.tiktok.com was denied') ||
+        body.includes('access denied') ||
+        (body.includes('403') && (
+            body.includes('запрещ') ||
+            body.includes('forbidden') ||
+            body.includes('denied')
+        )) ||
+        title.includes('403')
     );
 }
 """
@@ -257,6 +329,14 @@ def resolve_headless(
     glob = _env_bool("BROWSER_HEADLESS")
     if glob is not None:
         return glob
+    try:
+        from django.conf import settings as dj_settings
+
+        acc = getattr(dj_settings, "ACCOUNTS_BROWSER_HEADLESS", None)
+        if acc is not None:
+            return bool(acc)
+    except Exception:
+        pass
     return fallback
 
 
@@ -296,7 +376,27 @@ async def launch_context(
     if headless is None:
         headless = resolve_headless(platform=platform)
 
+    init_script = _STEALTH_SCRIPT
+    user_agent = _UA_CHROME
+    if platform == "facebook":
+        from platforms.facebook.browser_profile import (
+            build_stealth_script,
+            context_options,
+            launch_args,
+            load_profile,
+        )
+
+        bp = load_profile()
+        co = context_options(bp)
+        locale = str(co.get("locale") or locale)
+        viewport = dict(co.get("viewport") or viewport)
+        user_agent = str(co.get("user_agent") or user_agent)
+        extra_args = list(extra_args or []) + list(launch_args(bp))
+        if bp.get("stealth_enabled", True):
+            init_script = build_stealth_script(bp.get("languages") or [])
+
     base = profile_dir or default_profile_dir()
+    print(f"[{platform}_worker] launch_context headless={headless}", file=sys.stderr)
     sf = state_file_path(platform, base)
 
     ig_state_broken = (
@@ -318,7 +418,9 @@ async def launch_context(
             file=sys.stderr,
         )
 
-    all_args = _COMMON_ARGS + (extra_args or [])
+    all_args = list(_COMMON_ARGS) + list(extra_args or [])
+    if not headless:
+        all_args.append("--start-maximized")
 
     use_storage_state = sf.exists() and not force_persistent and not ig_state_broken
 
@@ -335,9 +437,9 @@ async def launch_context(
             storage_state=str(sf),
             locale=locale,
             viewport=viewport,
-            user_agent=_UA_CHROME,
+            user_agent=user_agent,
         )
-        await context.add_init_script(_STEALTH_SCRIPT)
+        await context.add_init_script(init_script)
         return context, browser   # caller must close browser too
 
     # ── Fallback: persistent profile ──────────────────────────────────────────
@@ -364,9 +466,10 @@ async def launch_context(
                     args=all_args,
                     locale=locale,
                     viewport=viewport,
+                    user_agent=user_agent,
                     channel=browser_channel,
                 )
-                await context.add_init_script(_STEALTH_SCRIPT)
+                await context.add_init_script(init_script)
                 return context, None   # caller closes context only
             except Exception as exc:
                 if attempt == 0:
@@ -427,6 +530,145 @@ _DAEMON_HOME_URL: dict[str, str] = {
 }
 
 
+async def _click_chromium_reload_button(page) -> bool:
+    """Кнопка «Перезагрузить» на встроенной странице ошибки Chromium."""
+    for label in ("Перезагрузить", "Reload"):
+        try:
+            btn = page.get_by_role("button", name=label)
+            if await btn.count() > 0:
+                await btn.first.click(timeout=5000)
+                return True
+        except Exception:
+            continue
+    try:
+        return bool(
+            await page.evaluate(
+                """() => {
+                    const labels = ['перезагруз', 'reload'];
+                    for (const el of document.querySelectorAll('button, [role="button"]')) {
+                        const t = (el.innerText || el.textContent || '').toLowerCase();
+                        if (labels.some((l) => t.includes(l))) {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+            ),
+        )
+    except Exception:
+        return False
+
+
+async def page_is_chromium_http_403(page) -> bool:
+    """Встроенная страница Chrome «Доступ запрещён / HTTP ERROR 403»."""
+    try:
+        u = (page.url or "").lower()
+        if u.startswith("chrome-error://"):
+            return True
+        return bool(await page.evaluate(_CHROMIUM_403_JS))
+    except Exception:
+        return False
+
+
+async def recover_from_chromium_http_403(
+    page,
+    *,
+    platform: str = "tiktok",
+    target_url: str | None = None,
+    wait_before_click_ms: int = 5000,
+    max_cycles: int = 4,
+) -> bool:
+    """
+    Снять interstitial HTTP 403: «Перезагрузить», reload, затем заход на главную и снова target_url.
+    Возвращает True, если страница больше не 403.
+    """
+    plat = (platform or "worker").strip().lower()
+    handled = False
+    for cycle in range(max_cycles):
+        if not await page_is_chromium_http_403(page):
+            return True
+        handled = True
+        print(
+            f"[{plat}_worker] Chrome HTTP 403 — ждём {wait_before_click_ms / 1000:.0f} с "
+            f"и «Перезагрузить» ({cycle + 1}/{max_cycles}), url={page.url!r}",
+            file=sys.stderr,
+        )
+        await page.wait_for_timeout(wait_before_click_ms)
+        clicked = await _click_chromium_reload_button(page)
+        if clicked:
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=45_000)
+            except Exception:
+                pass
+        else:
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=45_000)
+            except Exception as exc:
+                print(f"[{plat}_worker] HTTP 403: reload() не удался: {exc}", file=sys.stderr)
+        await page.wait_for_timeout(1500)
+        if not await page_is_chromium_http_403(page):
+            return True
+        # Прямой goto на профиль часто ловит 403 «холодным» Chrome — сначала главная с куками.
+        try:
+            await page.goto(
+                "https://www.tiktok.com/",
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            await page.wait_for_timeout(2000)
+        except Exception as exc:
+            print(f"[{plat}_worker] HTTP 403: warm home failed: {exc}", file=sys.stderr)
+        if target_url and "tiktok.com" in target_url.lower():
+            try:
+                await page.goto(
+                    target_url,
+                    wait_until="domcontentloaded",
+                    timeout=45_000,
+                )
+                await page.wait_for_timeout(1500)
+            except Exception as exc:
+                print(f"[{plat}_worker] HTTP 403: re-goto {target_url!r}: {exc}", file=sys.stderr)
+    return not await page_is_chromium_http_403(page)
+
+
+async def try_dismiss_chromium_http_403(
+    page,
+    *,
+    platform: str,
+    wait_before_click_ms: int = 5000,
+    max_attempts: int = 3,
+    target_url: str | None = None,
+) -> bool:
+    """Обёртка для совместимости; предпочтительно recover_from_chromium_http_403."""
+    if not await page_is_chromium_http_403(page):
+        return False
+    return await recover_from_chromium_http_403(
+        page,
+        platform=platform,
+        target_url=target_url,
+        wait_before_click_ms=wait_before_click_ms,
+        max_cycles=max_attempts,
+    )
+
+
+async def tiktok_goto_with_403_recovery(
+    page,
+    url: str,
+    *,
+    timeout_ms: int = 45_000,
+) -> None:
+    """page.goto + 403 recovery + ожидание капчи TikTok в открытом окне."""
+    target = (url or "").strip()
+    await page.goto(target, wait_until="domcontentloaded", timeout=timeout_ms)
+    await recover_from_chromium_http_403(
+        page,
+        platform="tiktok",
+        target_url=target,
+    )
+    await wait_for_anti_bot_clear(page, platform="tiktok")
+
+
 async def warm_playwright_page_home(page, platform: str) -> None:
     """Открыть домашнюю страницу площадки вместо about:blank (белый экран в окне worker)."""
     plat = str(platform or "").strip().lower()
@@ -436,7 +678,10 @@ async def warm_playwright_page_home(page, platform: str) -> None:
     try:
         if page is None or page.is_closed():
             return
-        await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        if plat == "tiktok":
+            await tiktok_goto_with_403_recovery(page, url, timeout_ms=45_000)
+        else:
+            await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
         await page.wait_for_timeout(500)
     except Exception as exc:
         print(f"[audience] warm {plat} home: {exc}", file=sys.stderr)
@@ -497,12 +742,21 @@ async def wait_for_anti_bot_clear(
     page,
     *,
     platform: str,
-    timeout_ms: int = 120_000,
+    timeout_ms: int | None = None,
 ) -> None:
     """
-    If a Cloudflare/anti-bot challenge is shown, wait until it is cleared.
+    If a Cloudflare/anti-bot/captcha challenge is shown, wait until it is cleared.
     The browser stays open so the user can pass challenge manually.
     """
+    plat = (platform or "").strip().lower()
+    if timeout_ms is None:
+        timeout_ms = anti_bot_wait_timeout_ms(plat)
+    if plat == "tiktok":
+        await recover_from_chromium_http_403(
+            page,
+            platform=plat,
+            target_url=page.url if page.url and "tiktok.com" in page.url else None,
+        )
     try:
         has_challenge = await page.evaluate(_CHALLENGE_JS)
     except Exception:
@@ -511,16 +765,23 @@ async def wait_for_anti_bot_clear(
         return
 
     print(
-        f"[{platform}_worker] anti-bot challenge detected, waiting for manual pass...",
+        f"[{plat}_worker] капча/антибот — пройдите проверку в открытом окне "
+        f"(ожидание до {timeout_ms // 1000} с)…",
         file=sys.stderr,
+        flush=True,
     )
     try:
         await page.wait_for_function(
             f"() => !({_CHALLENGE_JS})()",
             timeout=timeout_ms,
         )
-        await page.wait_for_timeout(1500)
+        await page.wait_for_timeout(2500 if plat == "tiktok" else 1500)
     except Exception:
+        if plat == "tiktok":
+            raise ValueError(
+                "TikTok: время ожидания капчи истекло. Пройдите проверку в открытом окне Chrome "
+                "и повторите обновление (или увеличьте TIKTOK_CAPTCHA_WAIT_MS)."
+            )
         raise ValueError(
             f"{platform.capitalize()} временно недоступен (антибот-челлендж), "
             "пройдите проверку в открывшемся окне и повторите обновление"

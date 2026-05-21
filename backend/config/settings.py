@@ -305,8 +305,9 @@ BROWSER_STATE_FILE = os.getenv("BROWSER_STATE_FILE", "")
 BROWSER_PROFILE_DIR = os.getenv("BROWSER_PROFILE_DIR", "")
 TIKTOK_USERNAME = os.getenv("TIKTOK_USERNAME", "")
 TIKTOK_PASSWORD = os.getenv("TIKTOK_PASSWORD", "")
-# Автозаполнение формы входа TikTok в UI настроек: false / true / не задано (=вкл., если заданы и логин, и пароль).
-TIKTOK_AUTH_AUTOFILL = os.getenv("TIKTOK_AUTH_AUTOFILL", "")
+# Автозаполнение формы входа TikTok в UI настроек: false — только ручной ввод (по умолчанию);
+# true — подставлять TIKTOK_USERNAME / TIKTOK_PASSWORD при наличии пары.
+TIKTOK_AUTH_AUTOFILL = os.getenv("TIKTOK_AUTH_AUTOFILL", "false")
 
 # ── Instagram (instaloader — no browser needed) ───────────────────────────────
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")
