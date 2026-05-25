@@ -5,7 +5,8 @@
     cd backend
     py -3.13 -m poetry run python manage.py warm_tiktok_session
     py -3.13 -m poetry run python manage.py warm_tiktok_session --min-minutes 8 --max-minutes 20
-    py -3.13 -m poetry run python manage.py warm_tiktok_session --feed following --keep-open
+    py -3.13 -m poetry run python manage.py warm_tiktok_session --feed following
+    py -3.13 -m poetry run python manage.py warm_tiktok_session --close
 """
 from __future__ import annotations
 
@@ -73,9 +74,9 @@ class Command(BaseCommand):
             help="Какую ленту открыть (по умолчанию For You).",
         )
         parser.add_argument(
-            "--keep-open",
+            "--close",
             action="store_true",
-            help="Не закрывать браузер после прогрева (Ctrl+C для выхода).",
+            help="Закрыть браузер после прогрева (по умолчанию окно остаётся открытым).",
         )
         parser.add_argument(
             "--state-file",
@@ -85,6 +86,25 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         applied = sync_accounts_browser_env()
+        from accounts.refresh_state import clear_stale_refresh_runs_if_needed
+        from accounts.models import AutoRefreshState, RefreshAllState
+
+        cleared = clear_stale_refresh_runs_if_needed()
+        auto = AutoRefreshState.get()
+        rr = RefreshAllState.get()
+        if auto.is_running or rr.is_running:
+            raise CommandError(
+                "Сейчас идёт автообновление или «собрать всех». "
+                "Остановите в UI или подождите; после warm_tiktok старый прогон мог зависнуть — "
+                "обновите страницу (статус сбросится через 4 ч без прогресса) или: "
+                "python manage.py clear_refresh_run_state",
+            )
+        if cleared:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Сброшен зависший прогон: {', '.join(cleared)}",
+                ),
+            )
         state_path = self._resolve_state_path(options.get("state_file") or "")
         if not state_path:
             raise CommandError(
@@ -112,7 +132,7 @@ class Command(BaseCommand):
             like_every_min=like_min,
             like_every_max=like_max,
             feed=str(options["feed"]),
-            keep_browser_open=bool(options["keep_open"]),
+            keep_browser_open=not bool(options["close"]),
         )
 
         headless = getattr(settings, "ACCOUNTS_BROWSER_HEADLESS", None)
@@ -147,6 +167,11 @@ class Command(BaseCommand):
             f"Прогрев {cfg.min_minutes:.0f}–{cfg.max_minutes:.0f} мин, лента={cfg.feed}, "
             f"просмотр: {watch_duration_summary(cfg)}",
         )
+        if cfg.keep_browser_open:
+            self.stdout.write(
+                "После прогрева окно Chrome останется открытым (Ctrl+C — выход из команды). "
+                "Чтобы закрыть автоматически: --close",
+            )
 
         try:
             stats = asyncio.run(

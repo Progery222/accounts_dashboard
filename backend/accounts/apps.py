@@ -232,6 +232,12 @@ class AccountsConfig(AppConfig):
             "test", "createsuperuser", "loaddata", "dumpdata",
         )):
             return
+        try:
+            from platforms.worker_pool import reconcile_orphan_worker_daemons
+
+            reconcile_orphan_worker_daemons()
+        except Exception as exc:
+            print(f"[worker_pool] reconcile at startup failed: {exc}", file=sys.stderr)
         if not _scheduler_enabled_from_env():
             print("[scheduler] disabled via RUN_SCHEDULER env")
             return
@@ -355,12 +361,16 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "include_hidden_profile_accounts",
                 "include_unavailable_accounts",
                 "auto_refresh_csv_report",
+                "auto_refresh_platforms",
+                "auto_refresh_profile_ids",
             ],
         )
     except Exception:
         pass
     skip_recent_hours = max(0, int(getattr(cfg, "skip_recent_hours", 0) or 0))
     cutoff = timezone.now() - timedelta(hours=skip_recent_hours) if skip_recent_hours > 0 else None
+    from .auto_refresh_scope import apply_auto_refresh_scope
+
     accounts_qs = Account.objects.select_related("profile").all()
     hidden_platforms = set()
     if not bool(getattr(cfg, "include_hidden_platform_accounts", False)):
@@ -378,6 +388,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         accounts_qs = accounts_qs.exclude(profile__is_hidden=True)
     if not bool(getattr(cfg, "include_unavailable_accounts", False)):
         accounts_qs = accounts_qs.exclude(profile_unavailable=True)
+    accounts_qs = apply_auto_refresh_scope(accounts_qs, cfg)
     accounts = list(accounts_qs)
 
     def _interleave_accounts_by_platform(items: list) -> list:
@@ -445,14 +456,6 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         ])
 
         ig_preload: dict[str, dict] = {}
-        ig_accounts = [a for a in accounts if a.platform == "instagram"]
-        if ig_accounts:
-            try:
-                from platforms.instagram.scraper import fetch_instagram_profiles_bulk
-
-                ig_preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
-            except Exception as e:
-                print(f"[scheduled_refresh] instagram bulk preload failed: {e}")
 
         def _int_env(name: str, default: int, *, min_v: int = 1, max_v: int = 32) -> int:
             raw = os.environ.get(name)
@@ -513,26 +516,18 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
             fb_batch_guard = FacebookRefreshBatchGuard()
 
-        if ig_accounts:
-            try:
-                from accounts.views import _PLATFORM_WORKERS
-                from platforms.worker_pool import ensure_worker
-
-                ig_worker = _PLATFORM_WORKERS.get("instagram")
-                if ig_worker and ig_worker.exists():
-                    ensure_worker(ig_worker)
-            except Exception as e:
-                print(f"[scheduled_refresh] instagram worker prewarm failed: {e}", file=sys.stderr)
-
         try:
             from .parallel_account_queue import ParallelAccountQueue
+            from .refresh_all_warm import RefreshAllWarmTracker
+
+            warm_tracker = RefreshAllWarmTracker(accounts, label="scheduled_refresh")
 
             state_lock = threading.Lock()
             stop_requested = threading.Event()
             report_by_index: list[dict | None] = [None] * len(accounts)
             platform_limits = _platform_limits()
             account_queue = ParallelAccountQueue(len(accounts), platform_limits)
-            worker_count = _int_env("AUTO_REFRESH_WORKERS", 4, min_v=1, max_v=16)
+            worker_count = _int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
 
             thread_slot_map: dict[int, int] = {}
             thread_slot_lock = threading.Lock()
@@ -632,6 +627,15 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         return
 
                     account = accounts[idx]
+                    from .warm_run_detail import is_refresh_cancel_requested
+
+                    if is_refresh_cancel_requested():
+                        stop_requested.set()
+                        return
+                    warm_tracker.wait_warm_before_refresh(account.platform)
+                    if is_refresh_cancel_requested():
+                        stop_requested.set()
+                        return
                     row_started = time.perf_counter()
                     attempted_network = False
                     try:
@@ -714,6 +718,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     detail=skip_detail,
                                 )
                             else:
+                                if is_refresh_cancel_requested():
+                                    stop_requested.set()
+                                    return
                                 account.refresh_from_db()
                                 before = (
                                     int(account.follower_count or 0),
@@ -798,11 +805,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             _persist_run_item(account.id, status="error", worker=None, detail=detail)
                             print(f"[scheduled_refresh] {account.platform}/@{account.username}: {e}")
                         finally:
-                            if attempted_network:
+                            if attempted_network and not is_refresh_cancel_requested():
                                 account_queue.set_platform_cooldown(
                                     account.platform,
                                     _refresh_all_delay_seconds(account),
                                 )
+                                warm_tracker.after_network_refresh(account.platform)
                     finally:
                         if report_by_index[idx] is None:
                             account_queue.abandon(idx, account.platform)
@@ -814,6 +822,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 for f in futures:
                     f.result()
 
+            from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancelled
+
+            warm_join_timeout = 15.0 if _refresh_cancelled() else None
+            warm_tracker.join_warm_threads(timeout=warm_join_timeout)
             _finalize_run_detail_stale()
 
             for i, row in enumerate(report_by_index):

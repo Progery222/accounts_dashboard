@@ -126,8 +126,10 @@ class RefreshApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
         self.assertIn("detail", response.data)
 
+    @patch("accounts.refresh_all_warm.RefreshAllWarmTracker")
     @patch("accounts.views._refresh_with_retry")
-    def test_refresh_all_continues_on_partial_failures(self, mock_refresh):
+    def test_refresh_all_continues_on_partial_failures(self, mock_refresh, mock_warm_tracker):
+        mock_warm_tracker.return_value.after_network_refresh = lambda *a, **k: None
         second = Account.objects.create(username="broken", platform=Platform.TIKTOK)
 
         def _side_effect(account, scraped=None):

@@ -1,14 +1,13 @@
 {
-  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-  "viewport_width": 3440,
-  "viewport_height": 1305,
-  "locale": "ru-RU",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.6 Safari/537.36",
+  "viewport_width": 1280,
+  "viewport_height": 900,
+  "locale": "en-US",
   "languages": [
-    "ru-RU",
-    "ru",
     "en-US",
     "en"
   ],
   "stealth_enabled": true,
-  "hide_automation_flags": true
+  "hide_automation_flags": true,
+  "refresh_browser_slot": "authorized"
 }

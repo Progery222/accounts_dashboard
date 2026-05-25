@@ -1,0 +1,96 @@
+
+/* ─── Desktop sidebar collapse ─────────────────────────────────────────────── */
+
+.sidebar {
+  position: relative;
+  transition: width 0.25s ease, min-width 0.25s ease, opacity 0.2s ease, transform 0.3s ease;
+}
+
+.sidebarCollapsed {
+  width: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  border-right: none !important;
+  overflow: hidden !important;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebarHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px 0 0;
+  flex-shrink: 0;
+}
+
+.sidebarHead .logo {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebarCollapse {
+  position: static;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border-light);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebarCollapse:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.sidebarExpand {
+  position: fixed;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 105;
+  width: 28px;
+  height: 52px;
+  border-radius: 0 8px 8px 0;
+  border: 1px solid var(--border-light);
+  border-left: none;
+  background: rgba(15, 15, 15, 0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 4px 0 16px rgba(0, 0, 0, 0.35);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebarExpand:hover {
+  color: var(--text-primary);
+  background: rgba(25, 25, 30, 0.98);
+}
+
+@media (max-width: 768px) {
+  .sidebarCollapse,
+  .sidebarExpand {
+    display: none;
+  }
+
+  .sidebarCollapsed {
+    width: 220px !important;
+    min-width: 220px !important;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}

@@ -1,9 +1,11 @@
 """
 Очистить данные TikTok в persistent-профиле Chromium (куки, state, IndexedDB и т.д.).
 
+    cd backend
     py -3.13 -m poetry run python manage.py clear_tiktok_browser_data
 
 Перед очисткой останавливает демоны Playwright и процессы Chrome для этого профиля.
+После очистки: setup_tiktok_auth или импорт cookies в настройках TikTok.
 """
 from __future__ import annotations
 
@@ -15,17 +17,28 @@ from platforms.worker_utils import kill_chrome_processes_for_profile
 
 
 class Command(BaseCommand):
-    help = "Сбросить сессию TikTok в браузерном профиле дашборда (куки, storage, tiktok_state.json)."
+    help = (
+        "Сбросить сессию TikTok в браузерном профиле дашборда "
+        "(куки, storage, tiktok_state.json). Останавливает worker и Chrome."
+    )
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            "--skip-workers",
+            action="store_true",
+            help="Не вызывать shutdown_all_workers (если Django/runserver уже остановлен).",
+        )
 
     def handle(self, *args, **options):
         profile_dir = _get_profile_dir()
         self.stdout.write(f"Профиль Chromium: {profile_dir}")
 
-        try:
-            shutdown_all_workers()
-            self.stdout.write("Демоны Playwright остановлены.")
-        except Exception as exc:
-            self.stdout.write(self.style.WARNING(f"shutdown_all_workers: {exc}"))
+        if not options.get("skip_workers"):
+            try:
+                shutdown_all_workers()
+                self.stdout.write("Демоны Playwright остановлены.")
+            except Exception as exc:
+                self.stdout.write(self.style.WARNING(f"shutdown_all_workers: {exc}"))
 
         try:
             kill_chrome_processes_for_profile(profile_dir)

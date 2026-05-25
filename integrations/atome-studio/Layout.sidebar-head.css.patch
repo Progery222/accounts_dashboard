@@ -1,0 +1,22 @@
+
+/* collapse: кнопка в шапке сайдбара, не поверх логотипа */
+.sidebarHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px 0 0;
+  flex-shrink: 0;
+}
+
+.sidebarHead .logo {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebarCollapse {
+  position: static !important;
+  top: auto !important;
+  right: auto !important;
+  flex-shrink: 0;
+}

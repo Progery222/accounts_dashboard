@@ -1,7 +1,7 @@
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import AutoRefreshState, RefreshAllState, RefreshScheduleConfig
+from accounts.models import Account, AutoRefreshState, Platform, Profile, RefreshAllState, RefreshScheduleConfig
 
 
 class RefreshScheduleApiTests(APITestCase):
@@ -44,6 +44,70 @@ class RefreshScheduleApiTests(APITestCase):
         )
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertTrue(r2.data["auto_refresh_csv_report"])
+
+    def test_auto_refresh_scope_platforms_and_profiles(self):
+        RefreshScheduleConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "enabled": False,
+                "mode": "interval",
+                "interval_hours": 6,
+                "times": [],
+                "auto_refresh_platforms": [],
+                "auto_refresh_profile_ids": [],
+            },
+        )
+        r = self.client.post(
+            "/api/accounts/schedule/",
+            {
+                "auto_refresh_platforms": ["tiktok", "facebook", "bad"],
+                "auto_refresh_profile_ids": ["none", 5, "5"],
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["auto_refresh_platforms"], ["tiktok", "facebook"])
+        self.assertEqual(r.data["auto_refresh_profile_ids"], ["none", 5])
+
+        prof = Profile.objects.create(name="P1", color="#fff")
+        Account.objects.create(username="tt1", platform=Platform.TIKTOK, profile=prof)
+        Account.objects.create(username="ig1", platform=Platform.INSTAGRAM, profile=prof)
+        Account.objects.create(username="fb1", platform=Platform.FACEBOOK, profile=prof)
+
+        from accounts.auto_refresh_scope import apply_auto_refresh_scope
+
+        cfg = RefreshScheduleConfig.get()
+        cfg.auto_refresh_platforms = ["tiktok", "instagram"]
+        cfg.auto_refresh_profile_ids = [prof.id]
+        cfg.save(update_fields=["auto_refresh_platforms", "auto_refresh_profile_ids"])
+
+        ids = set(
+            apply_auto_refresh_scope(Account.objects.all(), cfg).values_list("username", flat=True),
+        )
+        self.assertEqual(ids, {"tt1", "ig1"})
+
+    def test_refresh_warm_enabled_toggle(self):
+        RefreshScheduleConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "enabled": False,
+                "mode": "interval",
+                "interval_hours": 6,
+                "times": [],
+                "refresh_warm_enabled": True,
+            },
+        )
+        r = self.client.get("/api/accounts/schedule/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertTrue(r.data.get("refresh_warm_enabled"))
+
+        r2 = self.client.post(
+            "/api/accounts/schedule/",
+            {"refresh_warm_enabled": False},
+            format="json",
+        )
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertFalse(r2.data["refresh_warm_enabled"])
 
     def test_auto_refresh_status_includes_run_detail(self):
         r = self.client.get("/api/accounts/auto-refresh-status/")

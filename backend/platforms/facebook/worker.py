@@ -2535,6 +2535,16 @@ def _write_response(payload: dict) -> None:
     write_json_line(payload)
 
 
+def _payload_refresh_warm_enabled(payload: dict) -> bool:
+    """Прогрев только если Django передал refresh_warm_enabled (галочка в расписании)."""
+    v = payload.get("refresh_warm_enabled")
+    if v is None:
+        return False
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def daemon_main(*, cli_first_json: str | None = None) -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
@@ -2542,25 +2552,93 @@ async def daemon_main(*, cli_first_json: str | None = None) -> None:
             pw, platform="facebook",
             locale="ru-RU", force_persistent=True,
         )
-        page = context.pages[0] if context.pages else await context.new_page()
+        refresh_page = context.pages[0] if context.pages else await context.new_page()
+        warm_page = None
+        warm_task: asyncio.Task | None = None
+        warm_progress_path: Path | None = None
 
-        async def _ensure_live_page() -> None:
-            nonlocal page
-            if page.is_closed():
-                print(
-                    "[facebook_worker] вкладка закрыта — открываю новую в том же Chromium",
-                    file=sys.stderr,
-                )
+        async def _ensure_refresh_page() -> None:
+            nonlocal refresh_page
+            try:
+                if refresh_page is not None and not refresh_page.is_closed():
+                    return
+            except Exception:
+                pass
+            print(
+                "[facebook_worker] вкладка съёма закрыта — открываю новую в том же Chromium",
+                file=sys.stderr,
+            )
+            refresh_page = await context.new_page()
+
+        async def _stop_parallel_warm() -> dict:
+            nonlocal warm_task, warm_page, warm_progress_path
+            if warm_progress_path is not None:
                 try:
-                    for p in list(context.pages):
-                        try:
-                            if not p.is_closed():
-                                await p.close()
-                        except Exception:
-                            pass
+                    from platforms.warm_progress import write_warm_progress
+
+                    write_warm_progress(
+                        warm_progress_path,
+                        platform="facebook",
+                        cancel_requested=True,
+                        status="cancelled",
+                    )
                 except Exception:
                     pass
-                page = await context.new_page()
+            task = warm_task
+            warm_task = None
+            stats: dict = {}
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    stats = await task
+                except asyncio.CancelledError:
+                    stats = {"cancelled": True, "warm_parallel": True}
+                except Exception as exc:
+                    stats = {"error": str(exc), "warm_parallel": True}
+            elif task is not None:
+                try:
+                    stats = task.result()
+                except Exception:
+                    stats = {}
+            warm_progress_path = None
+            return stats
+
+        async def _start_parallel_warm(payload: dict) -> dict:
+            nonlocal warm_task, warm_page, warm_progress_path
+            await _stop_parallel_warm()
+            prog = (payload.get("progress_path") or "").strip()
+            warm_progress_path = Path(prog) if prog else None
+            if warm_page is None or warm_page.is_closed():
+                warm_page = await context.new_page()
+                print(
+                    "[facebook_worker] прогрев Reels — вторая вкладка; съём профилей — в первой",
+                    file=sys.stderr,
+                )
+            from platforms.facebook.warm_session import (
+                WarmFacebookConfig,
+                warm_facebook_until_cancelled,
+            )
+
+            sp = None
+            if hasattr(_wu, "state_file_path"):
+                sp = _wu.state_file_path("facebook", _wu.default_profile_dir())
+            cfg = WarmFacebookConfig()
+
+            async def _warm_runner() -> dict:
+                try:
+                    return await warm_facebook_until_cancelled(
+                        warm_page,
+                        _wu,
+                        cfg,
+                        state_path=sp,
+                        context=context,
+                        progress_path=warm_progress_path,
+                    )
+                except asyncio.CancelledError:
+                    return {"cancelled": True, "warm_parallel": True}
+
+            warm_task = asyncio.create_task(_warm_runner())
+            return {"warm_parallel": True, "started": True, "detail": "Reels · вкладка 2"}
 
         if cli_first_json is not None and sys.stdin.isatty():
             print(
@@ -2574,13 +2652,70 @@ async def daemon_main(*, cli_first_json: str | None = None) -> None:
             except Exception:
                 _write_response({"error": "Невалидный JSON payload"})
                 continue
-            await _ensure_live_page()
-            try:
-                username = str(payload.get("username", "")).lstrip("@")
-                if not username:
-                    _write_response({"error": "Не указан username"})
+
+            if payload.get("warm_parallel"):
+                action = str(payload.get("action") or "start").strip().lower()
+                try:
+                    if action == "stop":
+                        stats = await _stop_parallel_warm()
+                        result = {"warm_parallel": True, "stopped": True, **stats}
+                    elif not _payload_refresh_warm_enabled(payload):
+                        result = {
+                            "warm_parallel": True,
+                            "skipped": True,
+                            "detail": "прогрев выключен (refresh_warm_enabled)",
+                        }
+                    else:
+                        result = await _start_parallel_warm(payload)
+                except Exception as exc:
+                    _write_response({"error": f"Ошибка worker: {exc}"})
                     continue
-                result = await _run_with_page(username, page, _wu)
+                _write_response(result)
+                continue
+
+            await _ensure_refresh_page()
+            try:
+                try:
+                    await refresh_page.bring_to_front()
+                except Exception:
+                    pass
+                if payload.get("warm"):
+                    if not _payload_refresh_warm_enabled(payload):
+                        _write_response({
+                            "warm": True,
+                            "skipped": True,
+                            "detail": "прогрев выключен (refresh_warm_enabled)",
+                        })
+                        continue
+                    from platforms.facebook.warm_session import (
+                        WarmFacebookConfig,
+                        warm_facebook_on_page,
+                    )
+
+                    sp = None
+                    if hasattr(_wu, "state_file_path"):
+                        sp = _wu.state_file_path("facebook", _wu.default_profile_dir())
+                    cfg = WarmFacebookConfig(
+                        min_minutes=float(payload.get("min_minutes") or 3),
+                        max_minutes=float(payload.get("max_minutes") or 11),
+                    )
+                    prog = (payload.get("progress_path") or "").strip()
+                    progress_path = Path(prog) if prog else None
+                    warm_tab = warm_page if warm_page is not None and not warm_page.is_closed() else refresh_page
+                    result = await warm_facebook_on_page(
+                        warm_tab,
+                        _wu,
+                        cfg,
+                        state_path=sp,
+                        context=context,
+                        progress_path=progress_path,
+                    )
+                else:
+                    username = str(payload.get("username", "")).lstrip("@")
+                    if not username:
+                        _write_response({"error": "Не указан username"})
+                        continue
+                    result = await _run_with_page(username, refresh_page, _wu)
             except Exception as exc:
                 _write_response({"error": f"Ошибка worker: {exc}"})
                 continue

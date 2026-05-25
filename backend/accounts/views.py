@@ -436,6 +436,8 @@ def _normalize_instagram_username_key(username: str) -> str:
 def _get_float_setting(name: str, default: float) -> float:
     raw = getattr(settings, name, None)
     if raw is None:
+        raw = os.environ.get(name)
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
         return default
     try:
         return float(raw)
@@ -449,21 +451,22 @@ def _refresh_all_delay_seconds(account: Account) -> float:
 
     Instagram is already preloaded in batch and generally doesn't need extra delay.
     Other platforms keep a short jitter to reduce burst traffic / anti-bot friction.
-    Facebook: 3–6 мин между аккаунтами (секунды в коде) — Playwright + антибот.
+    Facebook: 2–5 мин между аккаунтами (120–300 с) — Playwright + антибот.
+    TikTok: пауза между аккаунтами 30–90 с (снижает капчу на профилях; env REFRESH_ALL_DELAY_TIKTOK_*).
     YouTube: пауза 5–10 с между аккаунтами — снижает риск квот/блокировок при серии запросов.
     """
     platform_defaults: dict[str, tuple[float, float]] = {
         Platform.INSTAGRAM: (0.0, 0.0),
-        Platform.TIKTOK: (50.0, 200.0),
+        Platform.TIKTOK: (30.0, 90.0),
         Platform.X: (0.8, 1.6),
         Platform.THREADS: (2.0, 4.0),
-        Platform.FACEBOOK: (180.0, 360.0),
+        Platform.FACEBOOK: (120.0, 300.0),
         Platform.YOUTUBE: (5.0, 10.0),
         Platform.TELEGRAM: (0.3, 0.8),
         Platform.RUMBLE: (0.5, 1.0),
         Platform.REDDIT: (0.4, 0.9),
     }
-    dmin, dmax = platform_defaults.get(account.platform, (0.6, 1.2))
+    dmin, dmax = platform_defaults.get(account.platform, (3.0, 7.0))
     key = account.platform.upper()
     lo = _get_float_setting(f"REFRESH_ALL_DELAY_{key}_MIN", dmin)
     hi = _get_float_setting(f"REFRESH_ALL_DELAY_{key}_MAX", dmax)
@@ -483,6 +486,58 @@ def _refresh_all_delay_seconds(account: Account) -> float:
     if a == b:
         return a
     return random.uniform(a, b)
+
+
+def _refresh_int_env(name: str, default: int, *, min_v: int = 1, max_v: int = 32) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        val = int(str(raw).strip())
+    except Exception:
+        return default
+    return max(min_v, min(max_v, val))
+
+
+def _refresh_platform_limits(accs: list[Account]) -> dict[str, int]:
+    defaults: dict[str, int] = {
+        Platform.TIKTOK: 1,
+        Platform.INSTAGRAM: 1,
+        Platform.THREADS: 1,
+        Platform.FACEBOOK: 1,
+        Platform.RUMBLE: 1,
+        Platform.TELEGRAM: 2,
+        Platform.X: 2,
+        Platform.REDDIT: 2,
+        Platform.YOUTUBE: 2,
+    }
+    limits: dict[str, int] = {}
+    for p in {a.platform for a in accs}:
+        env_key = f"AUTO_REFRESH_CONCURRENCY_{str(p).upper()}"
+        limits[p] = _refresh_int_env(env_key, defaults.get(p, 1), min_v=1, max_v=8)
+    return limits
+
+
+def _interleave_accounts_by_platform(items: list[Account]) -> list[Account]:
+    buckets: dict[str, list[Account]] = {}
+    platform_order: list[str] = []
+    for acc in items:
+        p = str(acc.platform)
+        if p not in buckets:
+            buckets[p] = []
+            platform_order.append(p)
+        buckets[p].append(acc)
+    out: list[Account] = []
+    while True:
+        pushed = False
+        for p in platform_order:
+            arr = buckets.get(p) or []
+            if arr:
+                out.append(arr.pop(0))
+                pushed = True
+        if not pushed:
+            break
+    return out
 
 
 def _format_refresh_error(account: Account, exc: BaseException) -> tuple[str, int]:
@@ -540,21 +595,313 @@ def _prewarm_workers(accounts: list[Account]) -> None:
     Start daemon workers upfront for platforms present in refresh_all batch.
     This opens one browser window per used platform at the beginning.
     """
-    from platforms.worker_pool import ensure_worker
+    from platforms.worker_pool import prewarm_workers
 
     used_platforms = {acc.platform for acc in accounts}
-    for platform in used_platforms:
+    worker_paths: list[Path] = []
+    for platform in sorted(used_platforms):
         worker = _PLATFORM_WORKERS.get(platform)
-        if not worker:
-            continue
-        if worker.exists():
-            try:
-                ensure_worker(worker)
-            except Exception as e:
-                logger.warning("refresh.prewarm_failed", extra={"platform": platform, "error": str(e)})
+        if worker and worker.exists():
+            worker_paths.append(worker)
+    if not worker_paths:
+        return
+    try:
+        prewarm_workers(worker_paths)
+    except Exception as e:
+        logger.warning("refresh.prewarm_failed", extra={"error": str(e)})
 
 
 _refresh_all_start_lock = threading.Lock()
+
+
+def _mark_bulk_refresh_queued_cancelled(state: AutoRefreshState) -> None:
+    rd = dict(state.run_detail or {})
+    items = [dict(x) for x in (rd.get("items") or [])]
+    changed = False
+    for i, it in enumerate(items):
+        if (it.get("status") or "").strip() == "queued":
+            items[i] = {**it, "status": "cancelled", "detail": "Остановлено пользователем"}
+            changed = True
+    if changed:
+        rd["items"] = items
+        state.run_detail = rd
+        state.save(update_fields=["run_detail", "updated_at"])
+
+
+def _run_bulk_refresh_background(account_ids: list[int]) -> None:
+    from django.db import close_old_connections
+
+    close_old_connections()
+    state = AutoRefreshState.get()
+    id_ints = [int(x) for x in account_ids]
+    by_id = {a.id: a for a in Account.objects.filter(id__in=id_ints).select_related("profile")}
+    ordered: list[Account] = []
+    for i in id_ints:
+        if i in by_id:
+            ordered.append(by_id[i])
+    if not ordered:
+        state.is_running = False
+        state.finished_at = timezone.now()
+        state.last_error = "Аккаунты не найдены"
+        state.save(update_fields=["is_running", "finished_at", "last_error", "updated_at"])
+        return
+
+    accounts = _interleave_accounts_by_platform(ordered)
+    skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
+    from .refresh_priority import account_refresh_priority_session
+
+    stop_requested = threading.Event()
+    state_lock = threading.Lock()
+    warm_tracker = None
+    try:
+        with account_refresh_priority_session():
+            try:
+                from platforms.worker_pool import shutdown_all_workers
+
+                shutdown_all_workers()
+            except Exception:
+                pass
+
+            from .parallel_account_queue import ParallelAccountQueue
+            from .refresh_all_warm import RefreshAllWarmTracker
+
+            warm_tracker = RefreshAllWarmTracker(accounts, label="bulk_refresh")
+            state.refresh_from_db(fields=["cancel_requested"])
+            if state.cancel_requested:
+                stop_requested.set()
+                state.last_error = "Обновление остановлено пользователем."
+                state.save(update_fields=["last_error", "updated_at"])
+            errors_out: list[dict] = []
+
+            has_facebook = any(a.platform == Platform.FACEBOOK for a in accounts)
+            fb_batch_guard = None
+            if has_facebook:
+                from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
+
+                fb_batch_guard = FacebookRefreshBatchGuard()
+
+            if not stop_requested.is_set():
+                from django.conf import settings as dj_settings
+
+                if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
+                    _prewarm_workers(accounts)
+                preload: dict[str, dict] = {}
+            else:
+                preload = {}
+
+            platform_limits = _refresh_platform_limits(accounts)
+            account_queue = ParallelAccountQueue(len(accounts), platform_limits)
+            worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
+
+            with state_lock:
+                state.refresh_from_db(fields=["run_detail"])
+                rd = dict(state.run_detail or {})
+                rd["worker_count"] = worker_count
+                state.run_detail = rd
+                state.save(update_fields=["run_detail", "updated_at"])
+
+            thread_slot_map: dict[int, int] = {}
+            thread_slot_lock = threading.Lock()
+
+            def _worker_slot() -> int:
+                tid = threading.get_ident()
+                with thread_slot_lock:
+                    if tid not in thread_slot_map:
+                        thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
+                    return thread_slot_map[tid]
+
+            def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
+                with state_lock:
+                    state.processed_accounts += 1
+                    if success:
+                        state.success_accounts += 1
+                    if failed:
+                        state.failed_accounts += 1
+                        state.last_error = last_error
+                    state.save(update_fields=[
+                        "processed_accounts", "success_accounts", "failed_accounts",
+                        "last_error", "updated_at",
+                    ])
+
+            def _worker() -> None:
+                while True:
+                    if stop_requested.is_set():
+                        return
+                    with state_lock:
+                        state.refresh_from_db(fields=["cancel_requested"])
+                        if bool(state.cancel_requested):
+                            state.last_error = "Обновление остановлено пользователем."
+                            state.save(update_fields=["last_error", "updated_at"])
+                            stop_requested.set()
+                            return
+
+                    idx = account_queue.claim(
+                        lambda i: accounts[i].platform,
+                        stop_event=stop_requested,
+                    )
+                    if idx is None:
+                        return
+
+                    close_old_connections()
+                    account = accounts[idx]
+                    from .warm_run_detail import is_refresh_cancel_requested
+
+                    if is_refresh_cancel_requested():
+                        stop_requested.set()
+                        return
+                    warm_tracker.wait_warm_before_refresh(account.platform)
+                    if is_refresh_cancel_requested():
+                        stop_requested.set()
+                        return
+                    attempted_network = False
+                    try:
+                        if stop_requested.is_set():
+                            return
+
+                        slot = _worker_slot()
+                        with state_lock:
+                            state.current_account = f"{account.platform}/@{account.username}"
+                            state.save(update_fields=["current_account", "updated_at"])
+                        _persist_auto_refresh_run_item(account.id, status="running", worker=slot)
+
+                        if cutoff is not None and account.updated_at and account.updated_at >= cutoff:
+                            skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
+                            _persist_auto_refresh_run_item(
+                                account.id,
+                                status="skipped",
+                                worker=None,
+                                detail=skip_detail,
+                            )
+                            _mark_progress(success=True, failed=False)
+                        elif (
+                            account.platform == Platform.FACEBOOK
+                            and fb_batch_guard is not None
+                            and fb_batch_guard.is_tripped()
+                        ):
+                            skip_detail = fb_batch_guard.skip_detail()
+                            _persist_auto_refresh_run_item(
+                                account.id,
+                                status="skipped",
+                                worker=None,
+                                detail=skip_detail,
+                            )
+                            _mark_progress(success=True, failed=False)
+                        else:
+                            if is_refresh_cancel_requested():
+                                stop_requested.set()
+                                return
+                            with _account_refresh_mutex(account.id):
+                                Account.objects.filter(pk=account.pk).update(
+                                    profile_unavailable=False,
+                                )
+                                account.profile_unavailable = False
+                                key = _normalize_instagram_username_key(account.username)
+                                scraped = None
+                                if account.platform == Platform.INSTAGRAM and key in preload:
+                                    scraped = preload[key]
+                                attempted_network = True
+                                refreshed, detail, _ = _refresh_account_for_api(
+                                    account, scraped=scraped,
+                                )
+                            if refreshed is not None:
+                                _persist_auto_refresh_run_item(
+                                    account.id, status="done", worker=None, detail="",
+                                )
+                                _mark_progress(success=True, failed=False)
+                            else:
+                                err_msg = str(detail or "")
+                                _persist_auto_refresh_run_item(
+                                    account.id,
+                                    status="error",
+                                    worker=None,
+                                    detail=err_msg[:800],
+                                )
+                                _mark_progress(success=False, failed=True, last_error=err_msg)
+                                errors_out.append({"id": account.id, "detail": detail})
+                    except Exception as e:
+                        if account.platform == Platform.FACEBOOK:
+                            from platforms.facebook.rate_limit import (
+                                is_facebook_rate_limited_error,
+                                shutdown_facebook_worker,
+                            )
+
+                            if is_facebook_rate_limited_error(e):
+                                shutdown_facebook_worker()
+                                if fb_batch_guard is not None:
+                                    fb_batch_guard.trip(str(e))
+                        detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
+                        if len(detail) > 800:
+                            detail = detail[:797] + "..."
+                        _persist_auto_refresh_run_item(
+                            account.id,
+                            status="error",
+                            worker=None,
+                            detail=detail,
+                        )
+                        _mark_progress(success=False, failed=True, last_error=detail)
+                        errors_out.append({"id": account.id, "detail": detail})
+                        print(
+                            f"[bulk_refresh] {account.platform}/@{account.username}: {e}",
+                            file=sys.stderr,
+                        )
+                    finally:
+                        if attempted_network and not is_refresh_cancel_requested():
+                            delay_sec = _refresh_all_delay_seconds(account)
+                            account_queue.set_platform_cooldown(account.platform, delay_sec)
+                            if account.platform == Platform.FACEBOOK and delay_sec > 0:
+                                print(
+                                    f"[bulk_refresh] facebook cooldown {delay_sec:.0f} с",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            warm_tracker.after_network_refresh(account.platform)
+                        if stop_requested.is_set():
+                            account_queue.abandon(idx, account.platform)
+                        else:
+                            account_queue.finish(idx, account.platform)
+
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = [executor.submit(_worker) for _ in range(worker_count)]
+                for f in futures:
+                    f.result()
+
+            warm_tracker.join_warm_threads(
+                timeout=15.0 if is_refresh_cancel_requested() else None,
+            )
+
+            with state_lock:
+                state.refresh_from_db()
+                if stop_requested.is_set():
+                    _mark_bulk_refresh_queued_cancelled(state)
+                if errors_out:
+                    last = errors_out[-1]
+                    prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
+                    state.last_error = (
+                        f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
+                        f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
+                    )[:4000]
+                    state.save(update_fields=["last_error", "updated_at"])
+                elif not stop_requested.is_set():
+                    state.last_error = ""
+                    state.save(update_fields=["last_error", "updated_at"])
+    finally:
+        if warm_tracker is not None:
+            try:
+                warm_tracker.join_warm_threads()
+            except Exception:
+                pass
+        finished = timezone.now()
+        state.refresh_from_db()
+        if stop_requested.is_set():
+            _mark_bulk_refresh_queued_cancelled(state)
+        state.is_running = False
+        state.cancel_requested = False
+        state.current_account = ""
+        state.finished_at = finished
+        state.save(update_fields=[
+            "is_running", "cancel_requested", "current_account",
+            "finished_at", "run_detail", "updated_at",
+        ])
 
 
 def _schedule_skip_recent_cutoff() -> tuple[int, datetime.datetime | None]:
@@ -838,55 +1185,6 @@ def _run_refresh_all_background(
     close_old_connections()
     state = RefreshAllState.get()
 
-    def _int_env(name: str, default: int, *, min_v: int = 1, max_v: int = 32) -> int:
-        raw = os.environ.get(name)
-        if raw is None:
-            return default
-        try:
-            val = int(str(raw).strip())
-        except Exception:
-            return default
-        return max(min_v, min(max_v, val))
-
-    def _platform_limits(accs: list[Account]) -> dict[str, int]:
-        defaults: dict[str, int] = {
-            Platform.TIKTOK: 1,
-            Platform.INSTAGRAM: 1,
-            Platform.THREADS: 1,
-            Platform.FACEBOOK: 1,
-            Platform.RUMBLE: 1,
-            Platform.TELEGRAM: 2,
-            Platform.X: 2,
-            Platform.REDDIT: 2,
-            Platform.YOUTUBE: 2,
-        }
-        limits: dict[str, int] = {}
-        for p in {a.platform for a in accs}:
-            env_key = f"AUTO_REFRESH_CONCURRENCY_{str(p).upper()}"
-            limits[p] = _int_env(env_key, defaults.get(p, 1), min_v=1, max_v=8)
-        return limits
-
-    def _interleave_accounts_by_platform(items: list[Account]) -> list[Account]:
-        buckets: dict[str, list[Account]] = {}
-        platform_order: list[str] = []
-        for acc in items:
-            p = str(acc.platform)
-            if p not in buckets:
-                buckets[p] = []
-                platform_order.append(p)
-            buckets[p].append(acc)
-        out: list[Account] = []
-        while True:
-            pushed = False
-            for p in platform_order:
-                arr = buckets.get(p) or []
-                if arr:
-                    out.append(arr.pop(0))
-                    pushed = True
-            if not pushed:
-                break
-        return out
-
     _prev_worker_autoclose = os.environ.get("WORKER_AUTOCLOSE_BROWSER_ON_EXIT")
     os.environ["WORKER_AUTOCLOSE_BROWSER_ON_EXIT"] = "1"
     try:
@@ -898,7 +1196,7 @@ def _run_refresh_all_background(
         )
         accounts = list(accounts_qs)
         accounts = _interleave_accounts_by_platform(accounts)
-        worker_count = _int_env("AUTO_REFRESH_WORKERS", 6, min_v=1, max_v=16)
+        worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
         _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
         run_items = [
@@ -928,14 +1226,6 @@ def _run_refresh_all_background(
         skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
 
         ig_preload: dict[str, dict] = {}
-        ig_accounts = [a for a in accounts if a.platform == Platform.INSTAGRAM]
-        if ig_accounts:
-            try:
-                from platforms.instagram.scraper import fetch_instagram_profiles_bulk
-
-                ig_preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
-            except Exception as e:
-                print(f"[refresh_all] instagram bulk preload failed: {e}", file=sys.stderr)
 
         has_facebook = any(a.platform == Platform.FACEBOOK for a in accounts)
         fb_batch_guard = None
@@ -943,16 +1233,6 @@ def _run_refresh_all_background(
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
             fb_batch_guard = FacebookRefreshBatchGuard()
-
-        if ig_accounts:
-            try:
-                ig_worker = _PLATFORM_WORKERS.get("instagram")
-                if ig_worker and ig_worker.exists():
-                    from platforms.worker_pool import ensure_worker
-
-                    ensure_worker(ig_worker)
-            except Exception as e:
-                print(f"[refresh_all] instagram worker prewarm failed: {e}", file=sys.stderr)
 
         from .refresh_priority import account_refresh_priority_session
 
@@ -970,11 +1250,16 @@ def _run_refresh_all_background(
                 _prewarm_workers(accounts)
 
             from .parallel_account_queue import ParallelAccountQueue
+            from .refresh_all_warm import RefreshAllWarmTracker
 
             report_lock = threading.Lock()
             stop_requested = threading.Event()
+
+            warm_tracker = RefreshAllWarmTracker(accounts, label="refresh_all")
+            if _refresh_all_cancel_requested():
+                stop_requested.set()
             report_by_index: list[dict | None] = [None] * len(accounts)
-            platform_limits = _platform_limits(accounts)
+            platform_limits = _refresh_platform_limits(accounts)
             account_queue = ParallelAccountQueue(len(accounts), platform_limits)
 
             thread_slot_map: dict[int, int] = {}
@@ -1003,6 +1288,15 @@ def _run_refresh_all_background(
                         return
                     close_old_connections()
                     account = accounts[idx]
+                    from .warm_run_detail import is_refresh_cancel_requested
+
+                    if is_refresh_cancel_requested():
+                        stop_requested.set()
+                        return
+                    warm_tracker.wait_warm_before_refresh(account.platform)
+                    if is_refresh_cancel_requested():
+                        stop_requested.set()
+                        return
                     before = {
                         "follower_count": account.follower_count,
                         "like_count": account.like_count,
@@ -1095,6 +1389,9 @@ def _run_refresh_all_background(
                                     detail=skip_detail,
                                 )
                             else:
+                                if is_refresh_cancel_requested():
+                                    stop_requested.set()
+                                    return
                                 scraped = None
                                 if account.platform == Platform.INSTAGRAM and ig_preload:
                                     key = (account.username or "").lstrip("@").strip().lower()
@@ -1182,11 +1479,12 @@ def _run_refresh_all_background(
                             else:
                                 row["account_db_updated_local"] = ""
                     finally:
-                        if attempted_network:
+                        if attempted_network and not is_refresh_cancel_requested():
                             account_queue.set_platform_cooldown(
                                 account.platform,
                                 _refresh_all_delay_seconds(account),
                             )
+                            warm_tracker.after_network_refresh(account.platform)
                         if stop_requested.is_set() and row is None:
                             account_queue.abandon(idx, account.platform)
                         else:
@@ -1202,6 +1500,9 @@ def _run_refresh_all_background(
                 for f in futures:
                     f.result()
 
+            warm_tracker.join_warm_threads(
+                timeout=15.0 if is_refresh_cancel_requested() else None,
+            )
             _finalize_refresh_all_run_detail_stale()
 
             report_rows: list[dict] = []
@@ -1633,8 +1934,8 @@ class AccountViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="bulk-refresh")
     def bulk_refresh(self, request):
         """
-        Обновить несколько аккаунтов за один запрос.
-        Для нескольких Instagram с Instaloader: один Playwright-сеанс на все /reels/.
+        Запустить фоновое обновление выбранных аккаунтов (статус — auto-refresh-status).
+        Для нескольких Instagram: один Playwright-сеанс на все /reels/ в фоновом потоке.
         """
         ids = request.data.get("ids")
         if not isinstance(ids, list) or not ids:
@@ -1661,167 +1962,51 @@ class AccountViewSet(viewsets.ModelViewSet):
         if not ordered:
             return Response({"detail": "Аккаунты не найдены"}, status=status.HTTP_404_NOT_FOUND)
 
-        state = AutoRefreshState.get()
-        rr = RefreshAllState.get()
-        if state.is_running or rr.is_running:
-            return Response(
-                {"detail": "Сейчас уже выполняется другое автообновление/обновление."},
-                status=status.HTTP_409_CONFLICT,
-            )
-        skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
-        run_items = [
-            {
-                "account_id": a.id,
-                "platform": a.platform,
-                "username": a.username,
-                "status": "queued",
-                "worker": None,
-                "detail": "",
-            }
-            for a in ordered
-        ]
-        state.is_running = True
-        state.source = "bulk_refresh"
-        state.cancel_requested = False
-        state.total_accounts = len(ordered)
-        state.processed_accounts = 0
-        state.success_accounts = 0
-        state.failed_accounts = 0
-        state.current_account = ""
-        state.last_error = ""
-        state.started_at = timezone.now()
-        state.finished_at = None
-        state.run_detail = {"items": run_items, "worker_count": 1}
-        state.save(update_fields=[
-            "is_running", "source", "cancel_requested", "total_accounts",
-            "processed_accounts", "success_accounts", "failed_accounts",
-            "current_account", "last_error", "started_at", "finished_at",
-            "run_detail", "updated_at",
-        ])
-
-        from .refresh_priority import account_refresh_priority_session
-
-        try:
-            with account_refresh_priority_session():
-                try:
-                    from platforms.worker_pool import shutdown_all_workers
-
-                    shutdown_all_workers()
-                except Exception:
-                    pass
-
-                _prewarm_workers(ordered)
-
-                ig_accounts = [a for a in ordered if a.platform == Platform.INSTAGRAM]
-                preload: dict[str, dict] = {}
-                if ig_accounts:
-                    try:
-                        from platforms.instagram.scraper import fetch_instagram_profiles_bulk
-
-                        preload = fetch_instagram_profiles_bulk([a.username for a in ig_accounts])
-                    except Exception as e:
-                        print(f"[bulk_refresh] instagram bulk prefetch failed: {e}", file=sys.stderr)
-                        preload = {}
-
-                accounts_out: list[dict] = []
-                errors_out: list[dict] = []
-                stop_requested = threading.Event()
-                state_lock = threading.Lock()
-
-                for a in ordered:
-                    if stop_requested.is_set():
-                        break
-                    with state_lock:
-                        state.refresh_from_db(fields=["cancel_requested"])
-                        if state.cancel_requested:
-                            stop_requested.set()
-                            state.last_error = "Обновление остановлено пользователем."
-                            state.save(update_fields=["last_error", "updated_at"])
-                            break
-                        state.current_account = f"{a.platform}/@{a.username}"
-                        state.save(update_fields=["current_account", "updated_at"])
-
-                    _persist_auto_refresh_run_item(a.id, status="running", worker=0)
-
-                    if cutoff is not None and a.updated_at and a.updated_at >= cutoff:
-                        skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
-                        _persist_auto_refresh_run_item(
-                            a.id,
-                            status="skipped",
-                            worker=None,
-                            detail=skip_detail,
-                        )
-                        with state_lock:
-                            state.processed_accounts += 1
-                            state.success_accounts += 1
-                            state.save(update_fields=[
-                                "processed_accounts", "success_accounts", "updated_at",
-                            ])
-                        continue
-
-                    with _account_refresh_mutex(a.id):
-                        Account.objects.filter(pk=a.pk).update(profile_unavailable=False)
-                        a.profile_unavailable = False
-                        key = _normalize_instagram_username_key(a.username)
-                        scraped = None
-                        if a.platform == Platform.INSTAGRAM and key in preload:
-                            scraped = preload[key]
-                        account, detail, _ = _refresh_account_for_api(a, scraped=scraped)
-
-                    with state_lock:
-                        state.processed_accounts += 1
-                        if account is not None:
-                            state.success_accounts += 1
-                            _persist_auto_refresh_run_item(a.id, status="done", worker=None, detail="")
-                        else:
-                            state.failed_accounts += 1
-                            state.last_error = str(detail or "")
-                            _persist_auto_refresh_run_item(
-                                a.id,
-                                status="error",
-                                worker=None,
-                                detail=str(detail or "")[:800],
-                            )
-                        state.save(update_fields=[
-                            "processed_accounts", "success_accounts", "failed_accounts",
-                            "last_error", "updated_at",
-                        ])
-
-                    if account is not None:
-                        accounts_out.append(AccountSerializer(account, context=self.get_serializer_context()).data)
-                    else:
-                        errors_out.append({"id": a.id, "detail": detail})
-
-                with state_lock:
-                    state.refresh_from_db()
-                    if errors_out:
-                        last = errors_out[-1]
-                        prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
-                        state.last_error = (
-                            f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
-                            f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
-                        )[:4000]
-                        state.save(update_fields=["last_error", "updated_at"])
-                    elif not stop_requested.is_set():
-                        state.last_error = ""
-                        state.save(update_fields=["last_error", "updated_at"])
-
-                return Response({
-                    "accounts": accounts_out,
-                    "errors": errors_out,
-                    "cancelled": bool(stop_requested.is_set()),
-                })
-        finally:
-            finished = timezone.now()
-            state.refresh_from_db()
-            state.is_running = False
+        with _refresh_all_start_lock:
+            state = AutoRefreshState.get()
+            rr = RefreshAllState.get()
+            if state.is_running or rr.is_running:
+                return Response(
+                    {"detail": "Сейчас уже выполняется другое автообновление/обновление."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            run_items = [
+                {
+                    "account_id": a.id,
+                    "platform": a.platform,
+                    "username": a.username,
+                    "status": "queued",
+                    "worker": None,
+                    "detail": "",
+                }
+                for a in ordered
+            ]
+            state.is_running = True
+            state.source = "bulk_refresh"
             state.cancel_requested = False
+            state.total_accounts = len(ordered)
+            state.processed_accounts = 0
+            state.success_accounts = 0
+            state.failed_accounts = 0
             state.current_account = ""
-            state.finished_at = finished
+            state.last_error = ""
+            state.started_at = timezone.now()
+            state.finished_at = None
+            worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
+            state.run_detail = {"items": run_items, "worker_count": worker_count}
             state.save(update_fields=[
-                "is_running", "cancel_requested", "current_account",
-                "finished_at", "updated_at",
+                "is_running", "source", "cancel_requested", "total_accounts",
+                "processed_accounts", "success_accounts", "failed_accounts",
+                "current_account", "last_error", "started_at", "finished_at",
+                "run_detail", "updated_at",
             ])
+        threading.Thread(
+            target=_run_bulk_refresh_background,
+            kwargs={"account_ids": id_ints},
+            daemon=True,
+            name="bulk-refresh",
+        ).start()
+        return Response({"started": True, "total_accounts": len(ordered)})
 
     @action(detail=False, methods=["post"], url_path="refresh-link-clicks")
     def refresh_link_clicks(self, request):
@@ -2344,11 +2529,23 @@ def _clamp_max_audience_followers_saved(raw) -> int:
 
 
 def _schedule_to_dict(config) -> dict:
+    from .auto_refresh_scope import (
+        normalize_auto_refresh_platforms,
+        normalize_auto_refresh_profile_ids,
+    )
+
     return {
         "enabled": config.enabled,
         "mode": config.mode,
         "interval_hours": config.interval_hours,
         "skip_recent_hours": config.skip_recent_hours,
+        "refresh_warm_enabled": bool(getattr(config, "refresh_warm_enabled", True)),
+        "auto_refresh_platforms": normalize_auto_refresh_platforms(
+            getattr(config, "auto_refresh_platforms", None),
+        ),
+        "auto_refresh_profile_ids": normalize_auto_refresh_profile_ids(
+            getattr(config, "auto_refresh_profile_ids", None),
+        ),
         "auto_refresh_csv_report": bool(
             getattr(config, "auto_refresh_csv_report", False),
         ),
@@ -2473,6 +2670,8 @@ def refresh_schedule(request):
             config.interval_hours = max(1, min(24, int(data["interval_hours"])))
         if "skip_recent_hours" in data:
             config.skip_recent_hours = max(0, min(168, int(data["skip_recent_hours"])))
+        if "refresh_warm_enabled" in data:
+            config.refresh_warm_enabled = _coerce_bool(data["refresh_warm_enabled"])
         if "auto_refresh_csv_report" in data:
             config.auto_refresh_csv_report = _coerce_bool(data["auto_refresh_csv_report"])
         if "include_hidden_platform_accounts" in data:
@@ -2481,6 +2680,18 @@ def refresh_schedule(request):
             config.include_hidden_profile_accounts = _coerce_bool(data["include_hidden_profile_accounts"])
         if "include_unavailable_accounts" in data:
             config.include_unavailable_accounts = _coerce_bool(data["include_unavailable_accounts"])
+        if "auto_refresh_platforms" in data:
+            from .auto_refresh_scope import normalize_auto_refresh_platforms
+
+            config.auto_refresh_platforms = normalize_auto_refresh_platforms(
+                data["auto_refresh_platforms"],
+            )
+        if "auto_refresh_profile_ids" in data:
+            from .auto_refresh_scope import normalize_auto_refresh_profile_ids
+
+            config.auto_refresh_profile_ids = normalize_auto_refresh_profile_ids(
+                data["auto_refresh_profile_ids"],
+            )
         if "times" in data and isinstance(data["times"], list):
             valid = []
             for t in data["times"]:
@@ -2603,11 +2814,14 @@ def auto_refresh_series(request):
 @api_view(["GET"])
 def auto_refresh_status(request):
     """
-    Статус фонового обновления для виджета прогресса: запланированное автообновление
-    (``AutoRefreshState``) и ручной «собрать всех» (``RefreshAllState``). Раньше сюда попадало
-    только авто — при ``POST …/refresh_all/`` лампочка и модалка показывали «не идёт», хотя
-    воркеры уже крутятся.
+    Статус фонового обновления (авто + refresh_all). Сбрасывает зависший is_running по таймауту.
     """
+    try:
+        from .refresh_state import clear_stale_refresh_runs_if_needed
+
+        clear_stale_refresh_runs_if_needed()
+    except Exception:
+        pass
     try:
         sched = RefreshScheduleConfig.get()
         try:
@@ -2673,6 +2887,9 @@ def auto_refresh_status(request):
 def auto_refresh_run_now(request):
     """Start auto-refresh immediately in background."""
     try:
+        from .refresh_state import clear_stale_refresh_runs_if_needed
+
+        clear_stale_refresh_runs_if_needed()
         state = AutoRefreshState.get()
         rr = RefreshAllState.get()
         if state.is_running or rr.is_running:
@@ -2695,6 +2912,27 @@ def auto_refresh_run_now(request):
 
 
 @api_view(["POST"])
+def auto_refresh_reset_state(request):
+    """Сбросить зависший is_running (после warm_tiktok, сбоя воркеров). body/query: force=1."""
+    try:
+        from .refresh_state import clear_stale_refresh_runs_if_needed, clear_stuck_refresh_run
+
+        raw = request.data.get("force") if hasattr(request, "data") else None
+        if raw is None:
+            raw = request.query_params.get("force")
+        force = str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+        if force:
+            cleared = clear_stuck_refresh_run(
+                reason="Сброшено вручную (API auto-refresh-reset-state).",
+            )
+        else:
+            cleared = clear_stale_refresh_runs_if_needed()
+        return Response({"cleared": cleared, "force": force})
+    except (ProgrammingError, OperationalError) as exc:
+        return _schedule_db_error_response(exc)
+
+
+@api_view(["POST"])
 def auto_refresh_stop(request):
     """Request graceful stop of currently running auto-refresh."""
     try:
@@ -2703,7 +2941,19 @@ def auto_refresh_stop(request):
             return Response({"stopped": False, "detail": "Автообновление сейчас не выполняется."}, status=status.HTTP_409_CONFLICT)
         state.cancel_requested = True
         state.save(update_fields=["cancel_requested", "updated_at"])
-        return Response({"stopped": True})
+        from .refresh_interrupt import interrupt_refresh_playwright_workers
+
+        interrupt_refresh_playwright_workers(label="auto_refresh_stop")
+        return Response(
+            {
+                "stopped": True,
+                "detail": (
+                    "Остановка запрошена. Текущий scrape может занять до 1–3 мин; "
+                    "если статус не сбросится — обновите страницу или "
+                    "manage.py clear_refresh_run_state --force"
+                ),
+            },
+        )
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)
 
@@ -2809,6 +3059,9 @@ def refresh_all_stop(request):
             )
         st.cancel_requested = True
         st.save(update_fields=["cancel_requested", "updated_at"])
+        from .refresh_interrupt import interrupt_refresh_playwright_workers
+
+        interrupt_refresh_playwright_workers(label="refresh_all_stop")
         return Response({"stopped": True})
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)

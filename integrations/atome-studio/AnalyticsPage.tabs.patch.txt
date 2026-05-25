@@ -1,0 +1,38 @@
+--- Патч для AnalyticsPage.tsx: добавить после imports:
+import { AccountStatsEmbed } from "../../components/AccountStatsEmbed";
+
+--- Добавить тип и state после export function AnalyticsPage() {
+type MainTab = "publish" | "accounts";
+const [mainTab, setMainTab] = useState<MainTab>("publish");
+
+--- Заменить блок return header + PublishAnalytics на:
+
+      <div className={styles.header}>
+        <h1 className={styles.title}>Analytics</h1>
+      </div>
+
+      <div className={styles.mainTabs}>
+        <button
+          type="button"
+          className={`${styles.mainTabBtn} ${mainTab === "publish" ? styles.mainTabBtnActive : ""}`}
+          onClick={() => setMainTab("publish")}
+        >
+          Аналитика публикаций
+        </button>
+        <button
+          type="button"
+          className={`${styles.mainTabBtn} ${mainTab === "accounts" ? styles.mainTabBtnActive : ""}`}
+          onClick={() => setMainTab("accounts")}
+        >
+          Аналитика аккаунтов
+        </button>
+      </div>
+
+      {mainTab === "accounts" ? (
+        <AccountStatsEmbed />
+      ) : (
+        <>
+      <div style={{ marginBottom: 24 }}>
+        <PublishAnalytics />
+      </div>
+      ... REST UNCHANGED until closing of root div - add </> ) before final closing

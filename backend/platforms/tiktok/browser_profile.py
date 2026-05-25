@@ -22,6 +22,15 @@ DEFAULT_VIEWPORT_HEIGHT = 900
 DEFAULT_LOCALE = "en-US"
 DEFAULT_LANGUAGES = ["en-US", "en"]
 
+# Два изолированных user-data-dir Chrome (не общий launch + storage_state).
+REFRESH_BROWSER_AUTHORIZED = "authorized"
+REFRESH_BROWSER_SECONDARY = "secondary"
+REFRESH_BROWSER_SLOTS = (REFRESH_BROWSER_AUTHORIZED, REFRESH_BROWSER_SECONDARY)
+DIR_AUTHORIZED = "tiktok_chrome_authorized"
+DIR_SECONDARY = "tiktok_chrome_secondary"
+STATE_AUTHORIZED = "tiktok_state.json"
+STATE_SECONDARY = "tiktok_state_secondary.json"
+
 
 def _config_path() -> Path:
     try:
@@ -42,7 +51,71 @@ def default_profile() -> dict[str, Any]:
         "languages": list(DEFAULT_LANGUAGES),
         "stealth_enabled": True,
         "hide_automation_flags": True,
+        "refresh_browser_slot": REFRESH_BROWSER_AUTHORIZED,
     }
+
+
+def profile_base_dir() -> Path:
+    """Каталог ACCOUNTS_BROWSER_PROFILE_DIR / TikStatsChromeProfile."""
+    env = (os.environ.get("BROWSER_PROFILE_DIR") or "").strip()
+    if env:
+        return Path(env)
+    try:
+        from platforms.worker_utils import default_profile_dir
+
+        return default_profile_dir()
+    except Exception:
+        home = Path.home()
+        if (home / "AppData").exists():
+            return home / "AppData" / "Local" / "TikStatsChromeProfile"
+        return home / ".config" / "tikstats-chrome-profile"
+
+
+def normalize_refresh_browser_slot(raw: Any) -> str:
+    v = str(raw or REFRESH_BROWSER_AUTHORIZED).strip().lower()
+    if v in {REFRESH_BROWSER_SECONDARY, "guest", "secondary", "no_auth", "alt"}:
+        return REFRESH_BROWSER_SECONDARY
+    return REFRESH_BROWSER_AUTHORIZED
+
+
+def user_data_dir_for_slot(profile_base: Path | None, slot: str) -> Path:
+    base = profile_base or profile_base_dir()
+    if normalize_refresh_browser_slot(slot) == REFRESH_BROWSER_SECONDARY:
+        return base / DIR_SECONDARY
+    return base / DIR_AUTHORIZED
+
+
+def state_file_for_slot(profile_base: Path | None, slot: str) -> Path:
+    base = profile_base or profile_base_dir()
+    if normalize_refresh_browser_slot(slot) == REFRESH_BROWSER_SECONDARY:
+        return base / STATE_SECONDARY
+    return base / STATE_AUTHORIZED
+
+
+def browser_slots_for_api(profile_base: Path | None = None) -> list[dict[str, Any]]:
+    base = profile_base or profile_base_dir()
+    auth_dir = user_data_dir_for_slot(base, REFRESH_BROWSER_AUTHORIZED)
+    sec_dir = user_data_dir_for_slot(base, REFRESH_BROWSER_SECONDARY)
+    auth_state = state_file_for_slot(base, REFRESH_BROWSER_AUTHORIZED)
+    sec_state = state_file_for_slot(base, REFRESH_BROWSER_SECONDARY)
+    return [
+        {
+            "id": REFRESH_BROWSER_AUTHORIZED,
+            "label": "Chrome с авторизацией",
+            "user_data_dir": str(auth_dir),
+            "state_file": str(auth_state),
+            "state_exists": auth_state.is_file(),
+            "hint": "Куки из tiktok_state.json подмешиваются при старте воркера.",
+        },
+        {
+            "id": REFRESH_BROWSER_SECONDARY,
+            "label": "Отдельный Chrome без авторизации",
+            "user_data_dir": str(sec_dir),
+            "state_file": str(sec_state),
+            "state_exists": sec_state.is_file(),
+            "hint": "Изолированный профиль; при необходимости войдите вручную в этом окне.",
+        },
+    ]
 
 
 def _parse_languages(raw: Any) -> list[str]:
@@ -92,6 +165,9 @@ def _env_overrides() -> dict[str, Any]:
             out[key] = True
         elif raw in {"0", "false", "no", "off", "n"}:
             out[key] = False
+    raw_slot = (os.environ.get("TIKTOK_REFRESH_BROWSER_SLOT") or "").strip()
+    if raw_slot:
+        out["refresh_browser_slot"] = normalize_refresh_browser_slot(raw_slot)
     return out
 
 
@@ -113,6 +189,9 @@ def load_profile() -> dict[str, Any]:
     data["user_agent"] = str(data.get("user_agent") or DEFAULT_USER_AGENT).strip() or DEFAULT_USER_AGENT
     data["stealth_enabled"] = bool(data.get("stealth_enabled", True))
     data["hide_automation_flags"] = bool(data.get("hide_automation_flags", True))
+    data["refresh_browser_slot"] = normalize_refresh_browser_slot(
+        data.get("refresh_browser_slot"),
+    )
     return data
 
 
@@ -147,6 +226,10 @@ def normalize_patch(payload: dict) -> dict[str, Any]:
         cur["stealth_enabled"] = bool(payload["stealth_enabled"])
     if "hide_automation_flags" in payload:
         cur["hide_automation_flags"] = bool(payload["hide_automation_flags"])
+    if "refresh_browser_slot" in payload:
+        cur["refresh_browser_slot"] = normalize_refresh_browser_slot(
+            payload["refresh_browser_slot"],
+        )
     if payload.get("reset_defaults"):
         cur = default_profile()
     return cur
@@ -163,6 +246,9 @@ def save_profile(data: dict[str, Any]) -> Path:
         "languages": _parse_languages(data.get("languages")),
         "stealth_enabled": bool(data.get("stealth_enabled", True)),
         "hide_automation_flags": bool(data.get("hide_automation_flags", True)),
+        "refresh_browser_slot": normalize_refresh_browser_slot(
+            data.get("refresh_browser_slot"),
+        ),
     }
     path.write_text(json.dumps(to_store, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _apply_to_environ(to_store)
@@ -178,6 +264,9 @@ def _apply_to_environ(data: dict[str, Any]) -> None:
     os.environ["TIKTOK_STEALTH_ENABLED"] = "true" if data.get("stealth_enabled") else "false"
     os.environ["TIKTOK_HIDE_AUTOMATION_FLAGS"] = (
         "true" if data.get("hide_automation_flags") else "false"
+    )
+    os.environ["TIKTOK_REFRESH_BROWSER_SLOT"] = normalize_refresh_browser_slot(
+        data.get("refresh_browser_slot"),
     )
 
 
@@ -217,9 +306,14 @@ def context_options(profile: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def profile_for_api() -> dict[str, Any]:
     p = load_profile()
+    base = profile_base_dir()
+    slot = normalize_refresh_browser_slot(p.get("refresh_browser_slot"))
     return {
         **p,
         "languages": _parse_languages(p.get("languages")),
         "config_path": str(_config_path()),
         "defaults": default_profile(),
+        "refresh_browser_slot": slot,
+        "browser_slots": browser_slots_for_api(base),
+        "active_user_data_dir": str(user_data_dir_for_slot(base, slot)),
     }

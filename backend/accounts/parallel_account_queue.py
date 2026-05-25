@@ -58,6 +58,15 @@ class ParallelAccountQueue:
         while True:
             if stop_event is not None and stop_event.is_set():
                 return None
+            try:
+                from accounts.warm_run_detail import is_refresh_cancel_requested
+
+                if is_refresh_cancel_requested():
+                    if stop_event is not None:
+                        stop_event.set()
+                    return None
+            except Exception:
+                pass
             with self._cond:
                 if len(self._completed) >= self._total:
                     return None

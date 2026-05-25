@@ -785,75 +785,127 @@ def _load_worker_utils():
     return _wu
 
 
+async def _apply_storage_state_cookies(context, state_path: Path) -> None:
+    if not state_path.is_file():
+        return
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        cookies = data.get("cookies") or []
+        if cookies:
+            await context.add_cookies(cookies)
+            print(
+                f"[tiktok_worker] imported {len(cookies)} cookies from {state_path}",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"[tiktok_worker] cookies import failed: {exc}", file=sys.stderr)
+
+
 async def _create_tiktok_context(
     pw,
     _wu,
     *,
     state_path: Path | None = None,
     headless: bool | None = None,
+    browser_slot: str | None = None,
 ):
-    # Incognito mode: always launch a regular browser + ephemeral context.
-    # If state file exists, load cookies/session into this context.
-    if _wu is not None and hasattr(_wu, "default_profile_dir"):
-        profile_base = _wu.default_profile_dir()
-    else:
-        profile_base = Path(PROFILE_DIR)
-    if state_path is not None:
-        sp = Path(state_path)
-    elif _wu is not None:
-        sp = _wu.state_file_path("tiktok", profile_base)
-    else:
-        sp = Path(STATE_FILE) if STATE_FILE else profile_base / "tiktok_state.json"
-    state_path = sp
-
-    # headless: None → BROWSER_HEADLESS / TIKTOK_HEADLESS; False — окно входа в Settings.
-    if headless is None:
-        if _wu is not None and hasattr(_wu, "resolve_headless"):
-            headless = _wu.resolve_headless(platform="tiktok")
-        else:
-            headless = (os.environ.get("BROWSER_HEADLESS", "false").strip().lower()
-                        in {"1", "true", "yes", "on", "y"})
-
-    # channel="chrome" требует системный Google Chrome — на сервере без него.
-    # На Windows/macOS (локалка) по умолчанию используем системный Chrome — это
-    # историческое поведение и оно лучше проходит детект TikTok. На Linux/сервере
-    # дефолт — встроенный Chromium Playwright. Переопределить через
-    # TIKTOK_BROWSER_CHANNEL=chrome|chromium|""(пусто = bundled).
+    """Два изолированных Chrome (persistent user-data-dir), слот из browser_profile."""
     from platforms.tiktok.browser_profile import (
+        REFRESH_BROWSER_AUTHORIZED,
+        REFRESH_BROWSER_SECONDARY,
         build_stealth_script,
         context_options,
         launch_args,
         load_profile,
+        normalize_refresh_browser_slot,
+        profile_base_dir,
+        state_file_for_slot,
+        user_data_dir_for_slot,
     )
 
+    if _wu is not None and hasattr(_wu, "default_profile_dir"):
+        profile_base = Path(_wu.default_profile_dir())
+    else:
+        profile_base = profile_base_dir()
+
     bp = load_profile()
+    slot = normalize_refresh_browser_slot(
+        browser_slot if browser_slot is not None else bp.get("refresh_browser_slot"),
+    )
+    ud_dir = user_data_dir_for_slot(profile_base, slot)
+    if state_path is not None:
+        sp = Path(state_path)
+    else:
+        sp = state_file_for_slot(profile_base, slot)
+
+    if headless is None:
+        if _wu is not None and hasattr(_wu, "resolve_headless"):
+            headless = _wu.resolve_headless(platform="tiktok")
+        else:
+            headless = os.environ.get("BROWSER_HEADLESS", "false").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+                "y",
+            }
+
+    co = context_options(bp)
     _default_channel = "chrome" if sys.platform != "linux" else ""
     channel = os.environ.get("TIKTOK_BROWSER_CHANNEL", _default_channel).strip()
-    launch_kwargs = {
+    launch_kwargs: dict = {
         "headless": headless,
-        "args": launch_args(bp),
+        "args": list(launch_args(bp)),
+        "locale": co.get("locale", "en-US"),
     }
+    if co.get("viewport"):
+        launch_kwargs["viewport"] = co["viewport"]
+    if co.get("user_agent"):
+        launch_kwargs["user_agent"] = co["user_agent"]
     if channel:
         launch_kwargs["channel"] = channel
-    browser = await pw.chromium.launch(**launch_kwargs)
-    ctx_kwargs = dict(context_options(bp))
+
+    ud_dir.mkdir(parents=True, exist_ok=True)
     print(
-        f"[tiktok_worker] profile={profile_base} state={state_path}",
+        f"[tiktok_worker] slot={slot} user_data_dir={ud_dir} state={sp}",
         file=sys.stderr,
     )
-    if state_path.exists():
-        ctx_kwargs["storage_state"] = str(state_path)
-        print(f"[tiktok_worker] loading state from {state_path}", file=sys.stderr)
-    else:
-        print(
-            "[tiktok_worker] state file missing — браузер без cookies; "
-            "импортируйте TikTok в Настройках или setup_tiktok_auth",
-            file=sys.stderr,
-        )
-    context = await browser.new_context(**ctx_kwargs)
+
+    last_exc: BaseException | None = None
+    context = None
+    for attempt in range(2):
+        try:
+            context = await pw.chromium.launch_persistent_context(
+                str(ud_dir),
+                **launch_kwargs,
+            )
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                _cleanup_chrome_artifacts(str(ud_dir))
+                await asyncio.sleep(0.8)
+    if context is None:
+        assert last_exc is not None
+        raise last_exc
+
     if bp.get("stealth_enabled", True):
         await context.add_init_script(build_stealth_script(bp.get("languages") or []))
-    return context, browser, state_path
+
+    if sp.is_file():
+        await _apply_storage_state_cookies(context, sp)
+    elif slot == REFRESH_BROWSER_AUTHORIZED:
+        print(
+            "[tiktok_worker] tiktok_state.json отсутствует — войдите в Настройках → TikTok",
+            file=sys.stderr,
+        )
+    elif slot == REFRESH_BROWSER_SECONDARY:
+        print(
+            "[tiktok_worker] второй Chrome без cookies (гостевой профиль)",
+            file=sys.stderr,
+        )
+
+    return context, None, sp
 
 
 async def run_once(data: dict) -> None:

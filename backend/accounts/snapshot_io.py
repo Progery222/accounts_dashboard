@@ -6,19 +6,50 @@ from __future__ import annotations
 import csv
 import io
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Account, Platform, Post, Profile, AccountSnapshot, PostSnapshot
+from .models import (
+    Account,
+    AccountSnapshot,
+    AutoRefreshPoint,
+    Platform,
+    Post,
+    PostSnapshot,
+    Profile,
+)
 
 SECTION_ACCOUNTS = "ACCOUNTS"
 SECTION_POSTS = "POSTS"
 SECTION_PROFILES = "PROFILES"
 SECTION_ACCOUNT_SNAPSHOTS = "ACCOUNT_SNAPSHOTS"
 SECTION_POST_SNAPSHOTS = "POST_SNAPSHOTS"
+SECTION_AUTO_REFRESH_POINTS = "AUTO_REFRESH_POINTS"
+
+# Ключ поста в CSV: (platform, username lower, external_id)
+PostExportKey = tuple[str, str, str]
+
+
+def _norm_username(username: str) -> str:
+    return (username or "").lstrip("@").strip()
+
+
+def _post_export_key(platform: str, username: str, external_id: str) -> PostExportKey:
+    return (
+        (platform or "").strip().lower(),
+        _norm_username(username).lower(),
+        (external_id or "").strip(),
+    )
+
+
+def _resolve_account(platform: str, username: str) -> Account:
+    """Поиск аккаунта без учёта регистра username (как в экспорте/импорте CSV)."""
+    pl = (platform or "").strip().lower()
+    un = _norm_username(username)
+    return Account.objects.get(username__iexact=un, platform=pl)
 
 
 def _bool_csv(value: bool) -> str:
@@ -32,8 +63,118 @@ def _parse_bool(cell: str, *, default: bool = False) -> bool:
     return v in ("1", "true", "yes", "y", "да")
 
 
+def _post_to_csv_row(post: Post) -> list:
+    acc = post.account
+    posted = post.posted_at.isoformat() if post.posted_at else ""
+    return [
+        acc.platform,
+        acc.username,
+        post.external_id,
+        post.description,
+        json.dumps(post.hashtags or [], ensure_ascii=False),
+        post.thumbnail_url,
+        post.post_url,
+        post.view_count,
+        post.like_count,
+        post.comment_count,
+        post.share_count,
+        posted,
+    ]
+
+
+def _collect_posts_for_export() -> dict[PostExportKey, Post]:
+    """
+    Все посты для секции POSTS: из Post и из PostSnapshot (на случай рассинхрона).
+    Каждый post_external_id из POST_SNAPSHOTS должен иметь строку в POSTS.
+    """
+    posts: dict[PostExportKey, Post] = {}
+    for post in Post.objects.select_related("account").order_by("account_id", "id"):
+        acc = post.account
+        key = _post_export_key(acc.platform, acc.username, post.external_id)
+        if key[0] and key[1] and key[2]:
+            posts[key] = post
+    for snap in PostSnapshot.objects.select_related("post__account").order_by("post_id", "id"):
+        post = snap.post
+        acc = post.account
+        key = _post_export_key(acc.platform, acc.username, post.external_id)
+        if key[0] and key[1] and key[2]:
+            posts.setdefault(key, post)
+    return posts
+
+
+def _normalize_imported_chart_times(
+    rows: list[dict[str, Any]],
+    *,
+    window_hours: int = 24,
+    min_span_hours: float = 2.0,
+    force: bool = False,
+) -> bool:
+    """
+    После импорта CSV метки measured_at часто «из прошлого» или все в одну секунду.
+    Live-график по оси X тогда даёт плато + вертикальный скачок справа.
+
+    Равномерно раскладывает точки по [now-window, now], сохраняя порядок.
+    Возвращает True, если время было пересчитано.
+    """
+    if not rows:
+        return False
+    now = timezone.now()
+    window_start = now - timedelta(hours=window_hours)
+    times = [r["measured_at"] for r in rows if r.get("measured_at")]
+    if not times:
+        return False
+    t_min, t_max = min(times), max(times)
+    span_src = (t_max - t_min).total_seconds()
+    collapsed = span_src < min_span_hours * 3600
+    stale = t_max < window_start
+    if not force and not stale and not collapsed:
+        return False
+
+    span_dst = (now - window_start).total_seconds()
+    n = len(rows)
+    if span_src <= 0:
+        for i, row in enumerate(rows):
+            frac = i / max(1, n - 1)
+            new_dt = window_start + timedelta(seconds=frac * span_dst)
+            row["measured_at"] = new_dt
+            row["local_date"] = timezone.localtime(new_dt).date()
+        return True
+
+    for row in rows:
+        dt = row.get("measured_at")
+        if not dt:
+            continue
+        frac = (dt - t_min).total_seconds() / span_src
+        new_dt = window_start + timedelta(seconds=frac * span_dst)
+        row["measured_at"] = new_dt
+        row["local_date"] = timezone.localtime(new_dt).date()
+    return True
+
+
+def _parse_platform_deltas(cell: str) -> dict[str, int]:
+    cell = (cell or "").strip()
+    if not cell:
+        return {}
+    try:
+        data = json.loads(cell)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, int] = {}
+    for k, v in data.items():
+        key = str(k).strip().lower()
+        if not key:
+            continue
+        try:
+            out[key] = int(float(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def build_snapshot_csv() -> bytes:
-    """UTF-8 с BOM, секции # PROFILES, # ACCOUNTS, # POSTS и исторические snapshots."""
+    """UTF-8 с BOM: профили, аккаунты, посты, снапшоты и точки графика Live (AUTO_REFRESH_POINTS)."""
     out = io.StringIO(newline="")
     out.write("\ufeff")
 
@@ -88,23 +229,9 @@ def build_snapshot_csv() -> bytes:
     ]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(post_headers)
-    for p in Post.objects.select_related("account").order_by("account_id", "id"):
-        acc = p.account
-        posted = p.posted_at.isoformat() if p.posted_at else ""
-        w.writerow([
-            acc.platform,
-            acc.username,
-            p.external_id,
-            p.description,
-            json.dumps(p.hashtags or [], ensure_ascii=False),
-            p.thumbnail_url,
-            p.post_url,
-            p.view_count,
-            p.like_count,
-            p.comment_count,
-            p.share_count,
-            posted,
-        ])
+    export_posts = _collect_posts_for_export()
+    for key in sorted(export_posts.keys()):
+        w.writerow(_post_to_csv_row(export_posts[key]))
 
     out.write(f"\n# {SECTION_ACCOUNT_SNAPSHOTS}\n")
     acc_snap_headers = [
@@ -146,6 +273,33 @@ def build_snapshot_csv() -> bytes:
             s.comment_count,
         ])
 
+    out.write(f"\n# {SECTION_AUTO_REFRESH_POINTS}\n")
+    ar_headers = [
+        "measured_at",
+        "local_date",
+        "source",
+        "slot_label",
+        "view_count_total",
+        "view_delta_from_prev_point",
+        "view_delta_from_day_start",
+        "platform_deltas",
+    ]
+    w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+    w.writerow(ar_headers)
+    chart_since = timezone.now() - timedelta(days=30)
+    for p in AutoRefreshPoint.objects.filter(measured_at__gte=chart_since).order_by("measured_at"):
+        measured = timezone.localtime(p.measured_at).isoformat() if p.measured_at else ""
+        w.writerow([
+            measured,
+            p.local_date.isoformat() if p.local_date else "",
+            p.source or "",
+            p.slot_label or "",
+            p.view_count_total,
+            p.view_delta_from_prev_point,
+            p.view_delta_from_day_start,
+            json.dumps(p.platform_deltas or {}, ensure_ascii=False),
+        ])
+
     return out.getvalue().encode("utf-8")
 
 
@@ -167,6 +321,7 @@ def _parse_sections(text: str) -> dict[str, list[list[str]]]:
                 SECTION_POSTS,
                 SECTION_ACCOUNT_SNAPSHOTS,
                 SECTION_POST_SNAPSHOTS,
+                SECTION_AUTO_REFRESH_POINTS,
             }:
                 current = part
                 raw_sections.setdefault(current, [])
@@ -288,6 +443,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
     post_rows = sections.get(SECTION_POSTS, [])
     acc_snap_rows = sections.get(SECTION_ACCOUNT_SNAPSHOTS, [])
     post_snap_rows = sections.get(SECTION_POST_SNAPSHOTS, [])
+    auto_refresh_rows = sections.get(SECTION_AUTO_REFRESH_POINTS, [])
 
     result: dict[str, Any] = {
         "accounts_created": 0,
@@ -296,15 +452,27 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
         "posts_updated": 0,
         "account_snapshots_upserted": 0,
         "post_snapshots_upserted": 0,
+        "auto_refresh_points_imported": 0,
+        "auto_refresh_chart_times_remapped": False,
         "errors": [],
     }
 
-    if not prof_rows and not acc_rows and not post_rows and not acc_snap_rows and not post_snap_rows:
+    if (
+        not prof_rows
+        and not acc_rows
+        and not post_rows
+        and not acc_snap_rows
+        and not post_snap_rows
+        and not auto_refresh_rows
+    ):
         result["errors"].append(
             {
                 "section": "",
                 "row": 0,
-                "message": "Нет секций PROFILES/ACCOUNTS/POSTS/ACCOUNT_SNAPSHOTS/POST_SNAPSHOTS в файле",
+                "message": (
+                    "Нет секций PROFILES/ACCOUNTS/POSTS/ACCOUNT_SNAPSHOTS/"
+                    "POST_SNAPSHOTS/AUTO_REFRESH_POINTS в файле"
+                ),
             }
         )
         return result
@@ -492,13 +660,13 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         return row[j] if row[j] is not None else default
 
                     pl = col("account_platform").strip().lower()
-                    un = col("account_username").lstrip("@").strip()
+                    un = _norm_username(col("account_username"))
                     ext = col("external_id").strip()
                     if not pl or not un or not ext:
                         row_err(SECTION_POSTS, rnum, "Пустые account_platform, account_username или external_id")
                         continue
                     try:
-                        acc = Account.objects.get(username=un, platform=pl)
+                        acc = _resolve_account(pl, un)
                     except Account.DoesNotExist:
                         row_err(SECTION_POSTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
                         continue
@@ -582,7 +750,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         return row[j] if row[j] is not None else default
 
                     pl = col("account_platform").strip().lower()
-                    un = col("account_username").lstrip("@").strip()
+                    un = _norm_username(col("account_username"))
                     snap_date = _parse_date(col("date"))
                     if not pl or not un or snap_date is None:
                         row_err(
@@ -592,7 +760,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         )
                         continue
                     try:
-                        acc = Account.objects.get(username=un, platform=pl)
+                        acc = _resolve_account(pl, un)
                     except Account.DoesNotExist:
                         row_err(SECTION_ACCOUNT_SNAPSHOTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
                         continue
@@ -649,7 +817,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         return row[j] if row[j] is not None else default
 
                     pl = col("account_platform").strip().lower()
-                    un = col("account_username").lstrip("@").strip()
+                    un = _norm_username(col("account_username"))
                     ext = col("post_external_id").strip()
                     snap_date = _parse_date(col("date"))
                     if not pl or not un or not ext or snap_date is None:
@@ -660,18 +828,9 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         )
                         continue
                     try:
-                        acc = Account.objects.get(username=un, platform=pl)
+                        acc = _resolve_account(pl, un)
                     except Account.DoesNotExist:
                         row_err(SECTION_POST_SNAPSHOTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
-                        continue
-                    try:
-                        post = Post.objects.get(account=acc, external_id=ext)
-                    except Post.DoesNotExist:
-                        row_err(
-                            SECTION_POST_SNAPSHOTS,
-                            rnum,
-                            f"Пост не найден: {pl}/@{un}/{ext}",
-                        )
                         continue
 
                     try:
@@ -681,6 +840,26 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     except ValueError as e:
                         row_err(SECTION_POST_SNAPSHOTS, rnum, f"Некорректное число: {e}")
                         continue
+
+                    post, post_created = Post.objects.get_or_create(
+                        account=acc,
+                        external_id=ext,
+                        defaults={
+                            "view_count": vc,
+                            "like_count": lc,
+                            "comment_count": cc,
+                        },
+                    )
+                    if post_created:
+                        result["posts_created"] += 1
+                    elif not post_rows:
+                        # Секции POSTS нет в файле — подтянуть метрики из снапшота.
+                        post.view_count = max(post.view_count, vc)
+                        post.like_count = max(post.like_count, lc)
+                        post.comment_count = max(post.comment_count, cc)
+                        post.save(
+                            update_fields=["view_count", "like_count", "comment_count"],
+                        )
 
                     PostSnapshot.objects.update_or_create(
                         post=post,
@@ -692,5 +871,80 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         },
                     )
                     result["post_snapshots_upserted"] += 1
+
+    # ── AUTO_REFRESH_POINTS (графики Live / auto-refresh-series) ──
+    if auto_refresh_rows:
+        header = [c.strip() for c in auto_refresh_rows[0]]
+        hmap = {h.lower(): i for i, h in enumerate(header)}
+        missing = [k for k in ("measured_at", "view_count_total") if k not in hmap]
+        if missing:
+            row_err(
+                SECTION_AUTO_REFRESH_POINTS,
+                1,
+                f"В шапке AUTO_REFRESH_POINTS не хватает колонок: {', '.join(missing)}",
+            )
+        else:
+            data_rows = [
+                row for row in auto_refresh_rows[1:]
+                if row and any((c or "").strip() for c in row)
+            ]
+            if data_rows:
+                parsed_rows: list[dict[str, Any]] = []
+                for rnum, row in enumerate(data_rows, start=2):
+                    def col(name: str, default="") -> str:
+                        j = hmap.get(name.lower())
+                        if j is None or j >= len(row):
+                            return default
+                        return row[j] if row[j] is not None else default
+
+                    measured_at = _parse_iso_datetime(col("measured_at"))
+                    if measured_at is None:
+                        row_err(
+                            SECTION_AUTO_REFRESH_POINTS,
+                            rnum,
+                            "Некорректный measured_at",
+                        )
+                        continue
+                    local_date = _parse_date(col("local_date"))
+                    if local_date is None:
+                        local_date = timezone.localtime(measured_at).date()
+                    try:
+                        view_total = _parse_int(col("view_count_total"))
+                        view_prev = _parse_int(col("view_delta_from_prev_point"))
+                        view_day = _parse_int(col("view_delta_from_day_start"))
+                    except ValueError as e:
+                        row_err(SECTION_AUTO_REFRESH_POINTS, rnum, f"Некорректное число: {e}")
+                        continue
+                    platform_deltas = _parse_platform_deltas(col("platform_deltas"))
+                    parsed_rows.append({
+                        "measured_at": measured_at,
+                        "local_date": local_date,
+                        "source": (col("source") or "import").strip()[:32],
+                        "slot_label": (col("slot_label") or "").strip()[:32],
+                        "view_count_total": view_total,
+                        "view_delta_from_prev_point": view_prev,
+                        "view_delta_from_day_start": view_day,
+                        "platform_deltas": platform_deltas,
+                    })
+
+                if parsed_rows:
+                    parsed_rows.sort(key=lambda r: r["measured_at"])
+                    result["auto_refresh_chart_times_remapped"] = _normalize_imported_chart_times(
+                        parsed_rows,
+                    )
+                    with transaction.atomic():
+                        AutoRefreshPoint.objects.all().delete()
+                        for row in parsed_rows:
+                            AutoRefreshPoint.objects.create(
+                                measured_at=row["measured_at"],
+                                local_date=row["local_date"],
+                                source=row["source"],
+                                slot_label=row["slot_label"],
+                                view_count_total=row["view_count_total"],
+                                view_delta_from_prev_point=row["view_delta_from_prev_point"],
+                                view_delta_from_day_start=row["view_delta_from_day_start"],
+                                platform_deltas=row["platform_deltas"],
+                            )
+                            result["auto_refresh_points_imported"] += 1
 
     return result

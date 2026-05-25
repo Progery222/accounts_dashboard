@@ -21,6 +21,18 @@ if _raw_db_url and not _raw_db_url.startswith(("postgres://", "postgresql://", "
 load_dotenv(BASE_DIR / "config" / "worker_accounts.env", override=False)
 load_dotenv(BASE_DIR / "config" / "worker_subs.env", override=False)
 
+try:
+    from platforms.worker_utils import normalize_playwright_browsers_env
+
+    _pw_browsers = normalize_playwright_browsers_env(mutate_os_environ=True)
+    if _pw_browsers:
+        print(
+            f"[django settings] PLAYWRIGHT_BROWSERS_PATH={_pw_browsers}",
+            file=sys.stderr,
+        )
+except Exception as _pw_exc:
+    print(f"[django settings] playwright env normalize failed: {_pw_exc}", file=sys.stderr)
+
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-s)66ib*p(f+^813d+^2do6@*w4b^f57g787=hv)@lu7t=g^7!k")
 DEBUG = os.getenv("DEBUG", "True") == "True"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if h.strip()]
@@ -211,10 +223,10 @@ def _optional_env_abs_path(name: str) -> Path | None:
 ACCOUNTS_BROWSER_PROFILE_DIR = _optional_env_abs_path("ACCOUNTS_BROWSER_PROFILE_DIR")
 ACCOUNTS_BROWSER_HEADLESS = _optional_env_bool("ACCOUNTS_BROWSER_HEADLESS")
 
-# Автообновление по расписанию: не поднимать все Playwright-демоны заранее (по одному окну на платформу
-# при первом реальном запросе). True — прежнее поведение: сразу открыть Chromium по каждой платформе в батче.
+# Автообновление / refresh_all: поднять Playwright-демоны по всем платформам батча в начале.
+# False — отложенный старт (одно окно при первом запросе; удобно на headless-сервере).
 _ar_prewarm = _optional_env_bool("ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT")
-ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT = False if _ar_prewarm is None else _ar_prewarm
+ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT = True if _ar_prewarm is None else _ar_prewarm
 
 # CORS / CSRF
 _extra_origins = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]

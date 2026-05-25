@@ -33,6 +33,10 @@ class RefreshScheduleConfig(models.Model):
     )
     interval_hours = models.IntegerField(default=6)
     skip_recent_hours = models.IntegerField(default=0)
+    refresh_warm_enabled = models.BooleanField(
+        default=True,
+        help_text="Прогрев Facebook при refresh_all, bulk и автообновлении.",
+    )
     auto_refresh_csv_report = models.BooleanField(
         default=False,
         help_text="После завершения автообновления сохранять CSV-отчёт для скачивания в интерфейсе.",
@@ -48,6 +52,16 @@ class RefreshScheduleConfig(models.Model):
     include_unavailable_accounts = models.BooleanField(
         default=False,
         help_text="В автообновлении учитывать недоступные аккаунты.",
+    )
+    auto_refresh_platforms = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Пусто — все платформы; иначе только перечисленные id платформ.",
+    )
+    auto_refresh_profile_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Пусто — все профили; иначе id профилей и/или «none» (без профиля).",
     )
     account_delta_period_days = models.PositiveSmallIntegerField(
         default=1,
@@ -74,10 +88,13 @@ class RefreshScheduleConfig(models.Model):
                 "mode": "interval",
                 "interval_hours": 6,
                 "skip_recent_hours": 0,
+                "refresh_warm_enabled": True,
                 "auto_refresh_csv_report": False,
                 "include_hidden_platform_accounts": False,
                 "include_hidden_profile_accounts": False,
                 "include_unavailable_accounts": False,
+                "auto_refresh_platforms": [],
+                "auto_refresh_profile_ids": [],
                 "account_delta_period_days": 1,
                 "max_audience_followers_per_account": MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT,
                 "times": ["06:00", "12:00", "18:00", "00:00"],

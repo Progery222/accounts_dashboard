@@ -28,7 +28,11 @@ class Command(BaseCommand):
         parser.add_argument("--short-prob", type=float, default=0.7)
         parser.add_argument("--like-every-min", type=int, default=10)
         parser.add_argument("--like-every-max", type=int, default=30)
-        parser.add_argument("--keep-open", action="store_true")
+        parser.add_argument(
+            "--close",
+            action="store_true",
+            help="Закрыть браузер после прогрева (по умолчанию окно остаётся открытым).",
+        )
         parser.add_argument("--state-file", default="")
 
     def handle(self, *args, **options):
@@ -54,7 +58,7 @@ class Command(BaseCommand):
             watch_short_prob=max(0.0, min(1.0, float(options["short_prob"]))),
             like_every_min=like_min,
             like_every_max=like_max,
-            keep_browser_open=bool(options["keep_open"]),
+            keep_browser_open=not bool(options["close"]),
         )
 
         watch_cfg = WarmTikTokConfig(watch_short_prob=cfg.watch_short_prob)
@@ -76,6 +80,11 @@ class Command(BaseCommand):
             f"просмотр: {watch_duration_summary(watch_cfg)}, "
             f"лайк каждые {like_min}–{like_max} роликов",
         )
+        if cfg.keep_browser_open:
+            self.stdout.write(
+                "После прогрева окно Chrome останется открытым (Ctrl+C — выход). "
+                "Чтобы закрыть автоматически: --close",
+            )
 
         try:
             stats = asyncio.run(

@@ -88,6 +88,18 @@ def _compose_worker_env(backend_root: str) -> dict:
     auth_nav = (os.environ.get("AUTH_NAV_TIMEOUT_MS") or "").strip()
     if auth_nav:
         env["AUTH_NAV_TIMEOUT_MS"] = auth_nav
+    try:
+        from platforms.worker_utils import normalize_playwright_browsers_env
+
+        pw_path = normalize_playwright_browsers_env(env)
+        if pw_path:
+            print(
+                f"[worker_pool] PLAYWRIGHT_BROWSERS_PATH={pw_path}",
+                file=sys.stderr,
+                flush=True,
+            )
+    except Exception:
+        pass
     return env
 
 
@@ -95,9 +107,34 @@ def pool_storage_key(worker_path: Path) -> str:
     return str(worker_path.resolve())
 
 
+def _kill_chromium_after_worker(chrome_roots: list[Path] | None = None) -> None:
+    """
+    None — снять Chrome по всем каталогам профиля (refresh stop, полный shutdown).
+    list — только указанные user-data-dir (прогрев TikTok, один воркер).
+    """
+    try:
+        from platforms.worker_utils import (
+            kill_all_accounts_profile_chrome,
+            kill_chrome_profile_roots,
+        )
+
+        if chrome_roots:
+            kill_chrome_profile_roots(chrome_roots, cleanup_artifacts=False)
+        else:
+            kill_all_accounts_profile_chrome(cleanup_artifacts=False)
+    except Exception:
+        pass
+
+
 class _WorkerHandle:
-    def __init__(self, worker_path: Path):
+    def __init__(
+        self,
+        worker_path: Path,
+        *,
+        chrome_roots_on_close: list[Path] | None = None,
+    ):
         self.worker_path = worker_path
+        self._chrome_roots_on_close = chrome_roots_on_close
         self.lock = threading.Lock()
         self._cwd = str(_backend_dir_for_worker(worker_path))
         child_env = _compose_worker_env(self._cwd)
@@ -196,16 +233,87 @@ class _WorkerHandle:
                         pass
         except Exception:
             pass
-        _kill_orphan_chromium_after_worker()
+        _kill_chromium_after_worker(self._chrome_roots_on_close)
 
 
-def _kill_orphan_chromium_after_worker() -> None:
-    try:
-        from platforms.worker_utils import kill_all_accounts_profile_chrome
+def _dashboard_backend_root() -> Path:
+    return Path(__file__).resolve().parent.parent
 
-        kill_all_accounts_profile_chrome(cleanup_artifacts=False)
-    except Exception:
-        pass
+
+def _pool_tracked_pids() -> set[int]:
+    keep: set[int] = set()
+    with _GLOBAL_LOCK:
+        for handle in _HANDLES.values():
+            proc = getattr(handle, "proc", None)
+            if proc is not None and proc.poll() is None:
+                keep.add(int(proc.pid))
+    return keep
+
+
+def reconcile_orphan_worker_daemons(worker_path: Path | None = None) -> int:
+    """
+    Снять лишние ``worker.py --daemon`` этого backend (после autoreload / сбоя пула).
+
+    Оставляет только PID, уже зарегистрированные в ``_HANDLES``.
+    """
+    from platforms.worker_utils import (
+        find_dashboard_worker_daemon_pids,
+        kill_worker_process_pids,
+    )
+
+    backend_root = (
+        _backend_dir_for_worker(worker_path)
+        if worker_path is not None
+        else _dashboard_backend_root()
+    )
+    keep = _pool_tracked_pids()
+    orphans = [
+        pid
+        for pid in find_dashboard_worker_daemon_pids(
+            backend_root,
+            worker_script=worker_path.resolve() if worker_path is not None else None,
+        )
+        if pid not in keep
+    ]
+    if not orphans:
+        return 0
+    killed = kill_worker_process_pids(orphans)
+    if killed:
+        label = worker_path.name if worker_path is not None else "all"
+        print(
+            f"[worker_pool] снято зомби-воркеров ({label}): {killed}",
+            file=sys.stderr,
+            flush=True,
+        )
+        roots = _chrome_roots_for_worker(worker_path) if worker_path is not None else None
+        _kill_chromium_after_worker(roots)
+        time.sleep(0.35)
+    return killed
+
+
+def _chrome_roots_for_worker(worker_path: Path) -> list[Path] | None:
+    """Каталоги Chrome только для этой платформы; None = все профили дашборда."""
+    name = worker_path.resolve().parent.name
+    if name == "tiktok":
+        from platforms.tiktok.browser_profile import (
+            REFRESH_BROWSER_AUTHORIZED,
+            REFRESH_BROWSER_SECONDARY,
+            profile_base_dir,
+            user_data_dir_for_slot,
+        )
+
+        base = profile_base_dir()
+        return [
+            user_data_dir_for_slot(base, REFRESH_BROWSER_AUTHORIZED),
+            user_data_dir_for_slot(base, REFRESH_BROWSER_SECONDARY),
+        ]
+    if name == "facebook":
+        from platforms.worker_utils import accounts_profile_roots
+
+        base = accounts_profile_roots()[0]
+        roots = [base, base / "facebook_persistent"]
+        return [p for p in roots if p.is_dir() or not p.exists()]
+    return None
 
 
 _HANDLES: dict[str, _WorkerHandle] = {}
@@ -229,16 +337,7 @@ def _is_recoverable_playwright_error(message: str) -> bool:
 
 def release_worker(worker_path: Path) -> None:
     """Снять демон из пула (перед subs one-shot TikTok, чтобы не держать тот же Chrome)."""
-    key = pool_storage_key(worker_path)
-    with _GLOBAL_LOCK:
-        handle = _HANDLES.pop(key, None)
-    if handle is not None:
-        try:
-            handle.close()
-        except Exception:
-            pass
-        _kill_orphan_chromium_after_worker()
-        time.sleep(0.45)
+    shutdown_worker(worker_path)
 
 
 def call_worker_oneshot(
@@ -318,9 +417,11 @@ def call_worker(
                         pass
                     closed_dead_worker = True
                 if closed_dead_worker or _attempt > 0:
-                    _kill_orphan_chromium_after_worker()
+                    _kill_chromium_after_worker(_chrome_roots_for_worker(worker_path))
                     time.sleep(0.45)
-                handle = _WorkerHandle(worker_path)
+                reconcile_orphan_worker_daemons(worker_path)
+                roots = _chrome_roots_for_worker(worker_path)
+                handle = _WorkerHandle(worker_path, chrome_roots_on_close=roots)
                 _HANDLES[key] = handle
         try:
             return handle.call(payload, timeout_sec=timeout_sec)
@@ -342,19 +443,16 @@ def call_worker(
                     _HANDLES.pop(key, None)
                     popped = True
             if popped:
-                _kill_orphan_chromium_after_worker()
+                _kill_chromium_after_worker(_chrome_roots_for_worker(worker_path))
                 time.sleep(0.85)
     assert last_exc is not None
     raise last_exc
 
 
-def ensure_worker(worker_path: Path) -> None:
-    """
-    Ensure daemon worker process is started and kept in pool.
-    Used for pre-warming browser windows/contexts before bulk refresh.
-    """
+def _spawn_worker_daemon(worker_path: Path, *, reconcile: bool = True) -> None:
+    """Поднять один демон в пуле (без глобального kill_all после старта)."""
     key = pool_storage_key(worker_path)
-    closed_dead = False
+    need_spawn = False
     with _GLOBAL_LOCK:
         handle = _HANDLES.get(key)
         if handle is None or handle.proc.poll() is not None:
@@ -363,11 +461,53 @@ def ensure_worker(worker_path: Path) -> None:
                     handle.close()
                 except Exception:
                     pass
-                closed_dead = True
-            _HANDLES[key] = _WorkerHandle(worker_path)
-    if closed_dead:
-        time.sleep(0.5)
-        _kill_orphan_chromium_after_worker()
+            need_spawn = True
+    if not need_spawn:
+        return
+    if reconcile:
+        reconcile_orphan_worker_daemons(worker_path)
+    with _GLOBAL_LOCK:
+        handle = _HANDLES.get(key)
+        if handle is None or handle.proc.poll() is not None:
+            roots = _chrome_roots_for_worker(worker_path)
+            _HANDLES[key] = _WorkerHandle(
+                worker_path,
+                chrome_roots_on_close=roots,
+            )
+    time.sleep(0.5)
+
+
+def ensure_worker(worker_path: Path) -> None:
+    """
+    Ensure daemon worker process is started and kept in pool.
+    Used for pre-warming browser windows/contexts before bulk refresh.
+
+    Не вызываем kill_all_accounts_profile_chrome после spawn: демон уже открыл
+    Chromium (persistent / TikTok user-data-dir), а kill снимает только процессы
+    с путём общего профиля — окна на storage_state (Instagram/X/Threads) не трогает,
+    из‑за чего при автообновлении «остаются» только они.
+    См. prewarm_workers и handle.close / call_worker retry.
+    """
+    _spawn_worker_daemon(worker_path)
+
+
+def prewarm_workers(worker_paths: list[Path]) -> None:
+    """
+    Поднять несколько Playwright-демонов подряд.
+
+    Не вызывает kill_all_accounts_profile_chrome между платформами — иначе
+    при refresh_all/автообновлении остаются только окна на storage_state
+    (Instagram/X/Threads), а TikTok/Facebook в общем профиле гасятся.
+    """
+    paths = [p for p in worker_paths if p.exists()]
+    if not paths:
+        return
+    reconcile_orphan_worker_daemons()
+    stagger = float((os.environ.get("ACCOUNTS_PREWARM_STAGGER_SEC") or "1.5").strip() or "1.5")
+    stagger = max(0.5, min(8.0, stagger))
+    for worker_path in paths:
+        _spawn_worker_daemon(worker_path, reconcile=False)
+        time.sleep(stagger)
 
 
 @atexit.register
@@ -388,23 +528,32 @@ def shutdown_all_workers() -> None:
             except Exception:
                 pass
         _HANDLES.clear()
-    _kill_orphan_chromium_after_worker()
+    reconcile_orphan_worker_daemons()
+    _kill_chromium_after_worker(None)
 
 
 def shutdown_worker(worker_path: Path) -> bool:
-    """Закрыть один демон Playwright (например, только Facebook)."""
+    """Закрыть один демон Playwright; Chrome — только каталоги этой платформы."""
     key = pool_storage_key(worker_path)
     handle = None
     with _GLOBAL_LOCK:
         handle = _HANDLES.pop(key, None)
     if handle is None:
+        reconcile_orphan_worker_daemons(worker_path)
         return False
     try:
         handle.close()
     except Exception:
         pass
-    _kill_orphan_chromium_after_worker()
     return True
+
+
+def prepare_tiktok_warm_session() -> None:
+    """Перед warm_tiktok_session: только TikTok worker/Chrome, не Facebook и не весь пул."""
+    worker_path = Path(__file__).resolve().parent / "tiktok" / "worker.py"
+    if worker_path.exists():
+        shutdown_worker(worker_path)
+    reconcile_orphan_worker_daemons(worker_path if worker_path.exists() else None)
 
 
 def shutdown_playwright_pool_aggressive(*, sleep_sec: float = 0.55) -> None:
@@ -414,6 +563,7 @@ def shutdown_playwright_pool_aggressive(*, sleep_sec: float = 0.55) -> None:
     часто остаётся в доке ещё сотни миллисекунд.
     """
     shutdown_all_workers()
+    reconcile_orphan_worker_daemons()
     try:
         from platforms.worker_utils import kill_all_accounts_profile_chrome
 

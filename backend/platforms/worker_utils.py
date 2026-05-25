@@ -62,6 +62,74 @@ def state_file_path(platform: str, profile_dir: Path | None = None) -> Path:
     return base / f"{platform}_state.json"
 
 
+def _playwright_root_has_chromium(root: Path) -> bool:
+    """Есть ли в каталоге Playwright установленный Chromium (ms-playwright layout)."""
+    if not root.is_dir():
+        return False
+    for child in root.iterdir():
+        if not child.is_dir() or not child.name.startswith("chromium"):
+            continue
+        for sub in ("chrome-win64", "chrome-win"):
+            exe = child / sub / "chrome.exe"
+            if exe.is_file():
+                return True
+    return False
+
+
+def default_playwright_browsers_path() -> Path | None:
+    """Стандартный каталог браузеров Playwright на этой машине."""
+    local = (os.environ.get("LOCALAPPDATA") or "").strip()
+    if local:
+        candidate = Path(local) / "ms-playwright"
+        if _playwright_root_has_chromium(candidate):
+            return candidate.resolve()
+    home = Path.home()
+    for rel in (
+        ".cache/ms-playwright",
+        "Library/Caches/ms-playwright",
+        "AppData/Local/ms-playwright",
+    ):
+        candidate = (home / rel).resolve()
+        if _playwright_root_has_chromium(candidate):
+            return candidate
+    return None
+
+
+def _playwright_browsers_path_unusable(raw: str) -> bool:
+    if not raw.strip():
+        return True
+    low = raw.replace("\\", "/").lower()
+    if "cursor-sandbox-cache" in low or "/temp/cursor-" in low:
+        return True
+    return not _playwright_root_has_chromium(Path(raw))
+
+
+def normalize_playwright_browsers_env(
+    env: dict[str, str] | None = None,
+    *,
+    mutate_os_environ: bool = False,
+) -> str | None:
+    """
+    Cursor sandbox задаёт PLAYWRIGHT_BROWSERS_PATH на cache без chromium — воркеры
+    падают при launch. Подставляем ms-playwright или снимаем переменную.
+    """
+    store = os.environ if mutate_os_environ else (env if env is not None else os.environ)
+    raw = (store.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    resolved: str | None = None
+    if raw and not _playwright_browsers_path_unusable(raw):
+        resolved = str(Path(raw).expanduser().resolve())
+    else:
+        default = default_playwright_browsers_path()
+        if default is not None:
+            resolved = str(default)
+        elif mutate_os_environ or isinstance(store, dict):
+            store.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            return None
+    if resolved:
+        store["PLAYWRIGHT_BROWSERS_PATH"] = resolved
+    return resolved
+
+
 def _storage_state_has_instagram_session(path: Path) -> bool:
     """instagram_state.json без sessionid даёт «пустой» браузер — не используем такой файл."""
     try:
@@ -138,6 +206,23 @@ def kill_chrome_processes_for_profile(profile_dir: Path | str) -> None:
             pass
 
 
+def kill_chrome_profile_roots(
+    roots: list[Path] | tuple[Path, ...],
+    *,
+    cleanup_artifacts: bool = False,
+) -> None:
+    """Снять Chromium только для указанных user-data-dir (не трогать FB/IG и общий профиль)."""
+    seen: set[str] = set()
+    for root in roots:
+        key = str(Path(root).expanduser().resolve())
+        if key in seen:
+            continue
+        seen.add(key)
+        kill_chrome_processes_for_profile(root)
+        if cleanup_artifacts:
+            cleanup_chrome_artifacts(root)
+
+
 def kill_all_accounts_profile_chrome(*, cleanup_artifacts: bool = True) -> None:
     """Снять все Chromium, связанные с профилем дашборда (перед/после пула воркеров)."""
     seen: set[str] = set()
@@ -149,6 +234,128 @@ def kill_all_accounts_profile_chrome(*, cleanup_artifacts: bool = True) -> None:
         kill_chrome_processes_for_profile(root)
         if cleanup_artifacts:
             cleanup_chrome_artifacts(root)
+
+
+def _cmdline_matches_worker_daemon(
+    cmdline: str,
+    *,
+    backend_root_norm: str,
+    worker_script_norm: str | None,
+) -> bool:
+    low = (cmdline or "").replace("\\", "/").lower()
+    if not low or backend_root_norm not in low:
+        return False
+    if "worker.py" not in low or "--daemon" not in low:
+        return False
+    if worker_script_norm is not None:
+        return worker_script_norm in low
+    return "/platforms/" in low or "\\platforms\\" in (cmdline or "").lower()
+
+
+def find_dashboard_worker_daemon_pids(
+    backend_root: Path,
+    *,
+    worker_script: Path | None = None,
+) -> list[int]:
+    """
+    PID процессов ``platforms/*/worker.py --daemon`` этого backend (не из пула).
+    """
+    root = backend_root.expanduser().resolve()
+    root_norm = str(root).replace("\\", "/").lower()
+    script_norm = (
+        str(worker_script.expanduser().resolve()).replace("\\", "/").lower()
+        if worker_script is not None
+        else None
+    )
+    pids: list[int] = []
+
+    if os.name == "nt":
+        escaped = str(root).replace("'", "''")
+        ps = (
+            f"$root = '{escaped}'.ToLower().Replace('\\','/'); "
+            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+            "Where-Object { "
+            "$cl = $_.CommandLine; "
+            "if (-not $cl) { return $false }; "
+            "$low = $cl.ToLower().Replace('\\','/'); "
+            "if (-not $low.Contains($root)) { return $false }; "
+            "if ($low -notlike '*worker.py*' -or $low -notlike '*--daemon*') { return $false }; "
+        )
+        if script_norm is not None:
+            esc_script = script_norm.replace("'", "''")
+            ps += f"if (-not $low.Contains('{esc_script}')) {{ return $false }}; "
+        else:
+            ps += "if ($low -notlike '*/platforms/*') { return $false }; "
+        ps += "return $true } | Select-Object -ExpandProperty ProcessId"
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            for line in (proc.stdout or "").splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+        except Exception:
+            pass
+        return sorted(set(pids))
+
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+        for line in (out.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) < 2 or not parts[0].isdigit():
+                continue
+            pid = int(parts[0])
+            args = parts[1]
+            if _cmdline_matches_worker_daemon(
+                args,
+                backend_root_norm=root_norm,
+                worker_script_norm=script_norm,
+            ):
+                pids.append(pid)
+    except Exception:
+        pass
+    return sorted(set(pids))
+
+
+def kill_worker_process_pids(pids: list[int]) -> int:
+    """Завершить процессы воркеров по PID. Возвращает число успешных kill."""
+    killed = 0
+    for pid in pids:
+        if pid <= 0:
+            continue
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                )
+            else:
+                os.kill(pid, 9)
+            killed += 1
+        except Exception:
+            pass
+    return killed
 
 
 def cleanup_chrome_artifacts(profile_dir: Path) -> None:

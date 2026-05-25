@@ -1,17 +1,35 @@
-# VPS overlay: свободный порт 9080 (8080 занят agentmusic, 80/443 — nginx-proxy).
-# Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.vps.yml up -d --build
+# VPS overlay: порт 9080, nginx /accounts-stats/, БД — shared-postgres (без второго тома).
+# Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.vps.yml up -d --build backend frontend
+
+networks:
+  shared:
+    external: true
+    name: opt_shared
 
 services:
+  # Локальный postgres из docker-compose.prod.yml на VPS не поднимаем (экономия ~1GB+ диска).
   postgres:
-    # Без публикации на хост — не конфликтует с shared-postgres :5432
-    ports: []
+    profiles:
+      - with-local-postgres
 
   backend:
     environment:
       ALLOWED_HOSTS: "${ALLOWED_HOSTS}"
       CSRF_EXTRA_ORIGINS: "${CSRF_EXTRA_ORIGINS}"
+      DB_HOST: shared-postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-dashboard}
+      DB_USER: ${DB_USER:-dashboard}
+      DB_PASSWORD: ${DB_PASSWORD}
+    depends_on: !reset null
+    networks:
+      - default
+      - shared
 
   frontend:
     build:
       context: .
       dockerfile: deploy/nginx-atomic/Dockerfile
+    networks:
+      - default
+      - shared

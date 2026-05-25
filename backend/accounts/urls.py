@@ -4,6 +4,7 @@ from .subs_api import subs_tiktok_audience_bulk
 from .views import (
     AccountViewSet, ProfileViewSet, platforms, summary, refresh_schedule,
     auto_refresh_status, auto_refresh_series, auto_refresh_run_now, auto_refresh_stop,
+    auto_refresh_reset_state,
     auto_refresh_report_download,
     auto_refresh_last_error_ids,
     refresh_all_status, refresh_all_stop, refresh_all_report_download,
@@ -27,6 +28,7 @@ urlpatterns = [
     path("auto-refresh-series/", auto_refresh_series),
     path("auto-refresh-run-now/", auto_refresh_run_now),
     path("auto-refresh-stop/", auto_refresh_stop),
+    path("auto-refresh-reset-state/", auto_refresh_reset_state),
     path("auto-refresh-report/", auto_refresh_report_download),
     path("auto-refresh-last-error-ids/", auto_refresh_last_error_ids),
     path("refresh-all-status/", refresh_all_status),

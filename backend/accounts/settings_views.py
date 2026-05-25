@@ -693,8 +693,14 @@ def _run_tiktok_auth(job_id: str) -> None:
                 _set_job(job_id, "pending", "Запущен Xvfb, открываю TikTok…")
 
             async with async_playwright() as pw:
+                from platforms.tiktok.browser_profile import REFRESH_BROWSER_AUTHORIZED
+
                 ctx, browser, state_path = await _create_tiktok_context(
-                    pw, _wu, state_path=state_path, headless=False,
+                    pw,
+                    _wu,
+                    state_path=state_path,
+                    headless=False,
+                    browser_slot=REFRESH_BROWSER_AUTHORIZED,
                 )
                 try:
                     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
