@@ -615,9 +615,11 @@ async def _launch_persistent_context(
     """Запуск Chromium с профилем; повтор при артефактах lock/CHROME_DELETE."""
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
     last_exc: Exception | None = None
+    from platforms.worker_utils import chromium_launch_args
+
     kwargs: dict = {
         "headless": headless,
-        "args": ["--disable-blink-features=AutomationControlled"],
+        "args": chromium_launch_args(hide_automation=True),
         "locale": locale,
     }
     init_script = None
@@ -632,12 +634,22 @@ async def _launch_persistent_context(
         bp = load_profile()
         co = context_options(bp)
         kwargs["locale"] = co.get("locale", locale)
-        kwargs["args"] = list(kwargs["args"]) + list(launch_args(bp))
+        kwargs["args"] = chromium_launch_args(
+            hide_automation=bool(bp.get("hide_automation_flags", True)),
+            extra=list(launch_args(bp)),
+        )
         kwargs["user_agent"] = co.get("user_agent")
         if not headless:
             kwargs["viewport"] = co.get("viewport") or {"width": 1366, "height": 900}
         if bp.get("stealth_enabled", True):
             init_script = build_stealth_script(bp.get("languages") or [])
+        from platforms.worker_utils import playwright_ignore_automation_defaults
+
+        kwargs.update(
+            playwright_ignore_automation_defaults(
+                enabled=bool(bp.get("hide_automation_flags", True)),
+            ),
+        )
     elif not headless:
         kwargs["viewport"] = {"width": 1280, "height": 900}
     for attempt in range(2):

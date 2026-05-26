@@ -52,7 +52,18 @@ def default_profile() -> dict[str, Any]:
         "stealth_enabled": True,
         "hide_automation_flags": True,
         "refresh_browser_slot": REFRESH_BROWSER_AUTHORIZED,
+        "sadcaptcha_enabled": False,
+        "sadcaptcha_api_key": "",
     }
+
+
+def _mask_api_key(key: str) -> str:
+    k = (key or "").strip()
+    if not k:
+        return ""
+    if len(k) <= 8:
+        return "••••"
+    return f"{k[:4]}••••{k[-4:]}"
 
 
 def profile_base_dir() -> Path:
@@ -168,6 +179,12 @@ def _env_overrides() -> dict[str, Any]:
     raw_slot = (os.environ.get("TIKTOK_REFRESH_BROWSER_SLOT") or "").strip()
     if raw_slot:
         out["refresh_browser_slot"] = normalize_refresh_browser_slot(raw_slot)
+    key = (os.environ.get("SADCAPTCHA_API_KEY") or "").strip()
+    if key:
+        out["sadcaptcha_api_key"] = key
+    raw_en = (os.environ.get("SADCAPTCHA_ENABLED") or "").strip().lower()
+    if raw_en:
+        out["sadcaptcha_enabled"] = raw_en not in ("0", "false", "no", "off", "n")
     return out
 
 
@@ -192,6 +209,8 @@ def load_profile() -> dict[str, Any]:
     data["refresh_browser_slot"] = normalize_refresh_browser_slot(
         data.get("refresh_browser_slot"),
     )
+    data["sadcaptcha_enabled"] = bool(data.get("sadcaptcha_enabled", False))
+    data["sadcaptcha_api_key"] = str(data.get("sadcaptcha_api_key") or "").strip()
     return data
 
 
@@ -230,6 +249,20 @@ def normalize_patch(payload: dict) -> dict[str, Any]:
         cur["refresh_browser_slot"] = normalize_refresh_browser_slot(
             payload["refresh_browser_slot"],
         )
+    if "sadcaptcha_enabled" in payload:
+        cur["sadcaptcha_enabled"] = bool(payload["sadcaptcha_enabled"])
+    if payload.get("clear_sadcaptcha_api_key"):
+        cur["sadcaptcha_api_key"] = ""
+    elif "sadcaptcha_api_key" in payload:
+        raw_key = str(payload.get("sadcaptcha_api_key") or "").strip()
+        if raw_key:
+            if len(raw_key) < 8 or len(raw_key) > 256:
+                raise ValueError("API-ключ SadCaptcha: от 8 до 256 символов")
+            cur["sadcaptcha_api_key"] = raw_key
+    if cur.get("sadcaptcha_enabled") and not (cur.get("sadcaptcha_api_key") or "").strip():
+        raise ValueError(
+            "Включён SadCaptcha, но API-ключ не задан. Вставьте ключ или выключите автопрохождение капчи.",
+        )
     if payload.get("reset_defaults"):
         cur = default_profile()
     return cur
@@ -249,6 +282,8 @@ def save_profile(data: dict[str, Any]) -> Path:
         "refresh_browser_slot": normalize_refresh_browser_slot(
             data.get("refresh_browser_slot"),
         ),
+        "sadcaptcha_enabled": bool(data.get("sadcaptcha_enabled", False)),
+        "sadcaptcha_api_key": str(data.get("sadcaptcha_api_key") or "").strip(),
     }
     path.write_text(json.dumps(to_store, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     _apply_to_environ(to_store)
@@ -268,6 +303,13 @@ def _apply_to_environ(data: dict[str, Any]) -> None:
     os.environ["TIKTOK_REFRESH_BROWSER_SLOT"] = normalize_refresh_browser_slot(
         data.get("refresh_browser_slot"),
     )
+    key = str(data.get("sadcaptcha_api_key") or "").strip()
+    enabled = bool(data.get("sadcaptcha_enabled")) and bool(key)
+    if key:
+        os.environ["SADCAPTCHA_API_KEY"] = key
+    else:
+        os.environ.pop("SADCAPTCHA_API_KEY", None)
+    os.environ["SADCAPTCHA_ENABLED"] = "true" if enabled else "false"
 
 
 def build_stealth_script(languages: list[str]) -> str:
@@ -287,12 +329,14 @@ def build_stealth_script(languages: list[str]) -> str:
 """
 
 
-def launch_args(profile: dict[str, Any] | None = None) -> list[str]:
+def launch_args(profile: dict[str, Any] | None = None, *, channel: str | None = None) -> list[str]:
+    from platforms.worker_utils import chromium_launch_args
+
     p = profile or load_profile()
-    args: list[str] = []
-    if p.get("hide_automation_flags", True):
-        args.append("--disable-blink-features=AutomationControlled")
-    return args
+    return chromium_launch_args(
+        channel=channel,
+        hide_automation=bool(p.get("hide_automation_flags", True)),
+    )
 
 
 def context_options(profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -308,12 +352,21 @@ def profile_for_api() -> dict[str, Any]:
     p = load_profile()
     base = profile_base_dir()
     slot = normalize_refresh_browser_slot(p.get("refresh_browser_slot"))
+    key = str(p.get("sadcaptcha_api_key") or "").strip()
     return {
-        **p,
+        "user_agent": p["user_agent"],
+        "viewport_width": p["viewport_width"],
+        "viewport_height": p["viewport_height"],
+        "locale": p["locale"],
         "languages": _parse_languages(p.get("languages")),
+        "stealth_enabled": bool(p.get("stealth_enabled", True)),
+        "hide_automation_flags": bool(p.get("hide_automation_flags", True)),
+        "refresh_browser_slot": slot,
+        "sadcaptcha_enabled": bool(p.get("sadcaptcha_enabled", False)),
+        "sadcaptcha_api_key_set": bool(key),
+        "sadcaptcha_api_key_masked": _mask_api_key(key),
         "config_path": str(_config_path()),
         "defaults": default_profile(),
-        "refresh_browser_slot": slot,
         "browser_slots": browser_slots_for_api(base),
         "active_user_data_dir": str(user_data_dir_for_slot(base, slot)),
     }

@@ -113,7 +113,8 @@ def _apply_postgres_connection_hardening(db: dict) -> None:
     eng = (db.get("ENGINE") or "").lower()
     if "postgresql" not in eng and "postgis" not in eng:
         return
-    db.setdefault("CONN_MAX_AGE", int(os.getenv("DB_CONN_MAX_AGE", "600") or "600"))
+    # 0 = новое соединение на каждый запрос ORM в потоке (нужно для долгого Playwright).
+    db.setdefault("CONN_MAX_AGE", int(os.getenv("DB_CONN_MAX_AGE", "0") or "0"))
     db["CONN_HEALTH_CHECKS"] = True
     opts = db.setdefault("OPTIONS", {})
     if not isinstance(opts, dict):
@@ -140,7 +141,7 @@ if _database_url:
     # выставьте DB_SSL_REQUIRE=false.
     _db_ssl_default = "true" if _is_postgres_url else "false"
     _db_ssl_require = os.getenv("DB_SSL_REQUIRE", _db_ssl_default).lower() == "true"
-    _db_parse_kwargs = {"conn_max_age": int(os.getenv("DB_CONN_MAX_AGE", "600") or "600")}
+    _db_parse_kwargs = {"conn_max_age": int(os.getenv("DB_CONN_MAX_AGE", "0") or "0")}
     if _is_postgres_url:
         _db_parse_kwargs["ssl_require"] = _db_ssl_require
     _default_db = dj_database_url.parse(_database_url, **_db_parse_kwargs)
@@ -155,7 +156,7 @@ else:
             "PASSWORD": os.getenv("DB_PASSWORD", "dashboard"),
             "HOST": os.getenv("DB_HOST", "localhost"),
             "PORT": os.getenv("DB_PORT", "5432"),
-            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "600") or "600"),
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "0") or "0"),
             "CONN_HEALTH_CHECKS": True,
             "OPTIONS": {
                 "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "10") or "10"),
@@ -320,6 +321,8 @@ TIKTOK_PASSWORD = os.getenv("TIKTOK_PASSWORD", "")
 # Автозаполнение формы входа TikTok в UI настроек: false — только ручной ввод (по умолчанию);
 # true — подставлять TIKTOK_USERNAME / TIKTOK_PASSWORD при наличии пары.
 TIKTOK_AUTH_AUTOFILL = os.getenv("TIKTOK_AUTH_AUTOFILL", "false")
+# SadCaptcha (tiktok-captcha-solver): ключ в worker_accounts.env, не коммитить.
+SADCAPTCHA_API_KEY = os.getenv("SADCAPTCHA_API_KEY", "").strip()
 
 # ── Instagram (instaloader — no browser needed) ───────────────────────────────
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")

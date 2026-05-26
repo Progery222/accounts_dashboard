@@ -447,16 +447,11 @@ async def run_warm_facebook_session(
     _wu_spec.loader.exec_module(_wu)
 
     try:
-        from platforms.worker_pool import shutdown_worker
+        from platforms.worker_pool import prepare_facebook_warm_session
 
-        shutdown_worker(Path(__file__).parent / "worker.py")
+        prepare_facebook_warm_session()
     except Exception:
-        try:
-            from platforms.worker_pool import shutdown_all_workers
-
-            shutdown_all_workers()
-        except Exception:
-            pass
+        pass
 
     sp = Path(state_path) if state_path is not None else None
     if sp is None:

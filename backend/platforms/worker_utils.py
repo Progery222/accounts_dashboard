@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -163,6 +164,34 @@ def accounts_profile_roots() -> list[Path]:
     return roots
 
 
+def chrome_cmdline_matches_user_data_dir(cmdline: str, profile_dir: Path | str) -> bool:
+    """
+    True, если процесс Chrome использует ровно этот user-data-dir (не подкаталог).
+    Нужно для параллельного warm_tiktok (tiktok_chrome_*) и warm_facebook (base / *_persistent).
+    """
+    if not cmdline:
+        return False
+    prof = str(Path(profile_dir).expanduser().resolve())
+    if not prof:
+        return False
+    low = cmdline.replace("\\", "/")
+    prof_fwd = prof.replace("\\", "/").rstrip("/")
+    for prefix in (
+        f"--user-data-dir={prof_fwd}",
+        f'--user-data-dir="{prof_fwd}"',
+        f"--user-data-dir='{prof_fwd}'",
+    ):
+        if prefix not in low:
+            continue
+        idx = low.find(prefix) + len(prefix)
+        if idx >= len(low):
+            return True
+        nxt = low[idx]
+        if nxt in " \t\"'":
+            return True
+    return False
+
+
 def kill_chrome_processes_for_profile(profile_dir: Path | str) -> None:
     """
     Завершить Chromium/Chrome, привязанные к user-data-dir (после terminate() воркера
@@ -174,11 +203,15 @@ def kill_chrome_processes_for_profile(profile_dir: Path | str) -> None:
 
     if os.name == "nt":
         needle = path.replace("'", "''")
+        esc = needle.replace("\\", "\\\\")
         for exe in ("chrome.exe", "chromium.exe"):
             ps = (
-                f"$needle = '{needle}'; "
+                f"$esc = [regex]::Escape('{esc}'); "
                 f"Get-CimInstance Win32_Process -Filter \"name='{exe}'\" -ErrorAction SilentlyContinue | "
-                "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($needle) } | "
+                "Where-Object { "
+                "  $_.CommandLine -and "
+                "  ($_.CommandLine -match ('--user-data-dir=\"?' + $esc + '\"?(\\s|$)')) "
+                "} | "
                 "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
             )
             try:
@@ -193,17 +226,47 @@ def kill_chrome_processes_for_profile(profile_dir: Path | str) -> None:
                 pass
         return
 
-    for pat in (f"--user-data-dir={path}", path):
-        try:
-            subprocess.run(
-                ["pkill", "-f", pat],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-        except Exception:
-            pass
+    try:
+        out = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if out.returncode == 0 and out.stdout:
+            for line in out.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                pid_s, cmd = parts[0], parts[1]
+                if not chrome_cmdline_matches_user_data_dir(cmd, path):
+                    continue
+                try:
+                    subprocess.run(
+                        ["kill", "-9", pid_s],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        for pat in (f"--user-data-dir={path}", f'--user-data-dir="{path}"'):
+            try:
+                subprocess.run(
+                    ["pkill", "-f", pat],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                )
+            except Exception:
+                pass
 
 
 def kill_chrome_profile_roots(
@@ -386,13 +449,56 @@ _UA_CHROME = (
     "Chrome/145.0.7632.6 Safari/537.36"
 )
 
-_COMMON_ARGS = [
+_STEALTH_CHROMIUM_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-features=AutomationControlled",
+]
+_SAFE_CHROME_ARGS = [
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-default-apps",
 ]
+# Обратная совместимость (bundled Chromium без channel).
+_COMMON_ARGS = list(_STEALTH_CHROMIUM_ARGS) + list(_SAFE_CHROME_ARGS)
+
+
+def chromium_launch_args(
+    *,
+    channel: str | None = None,
+    hide_automation: bool = True,
+    extra: list[str] | None = None,
+) -> list[str]:
+    """
+    Аргументы Chrome для Playwright.
+
+    Системный Chrome (channel=chrome/msedge) не принимает CLI-флаги
+    AutomationControlled — маскировка только через init_script.
+    """
+    use_system = bool(str(channel or "").strip())
+    args: list[str] = []
+    if hide_automation and not use_system:
+        args.extend(_STEALTH_CHROMIUM_ARGS)
+    args.extend(_SAFE_CHROME_ARGS)
+    if extra:
+        for a in extra:
+            if a and a not in args:
+                args.append(a)
+    return args
+
+# Playwright по умолчанию добавляет, среди прочего:
+# --enable-automation → плашка «автоматизированное тестовое ПО»;
+# --no-sandbox → предупреждение в обычном Chrome на Windows (channel=chrome).
+def _playwright_default_args_to_ignore() -> list[str]:
+    ignored = ["--enable-automation"]
+    if os.name == "nt":
+        ignored.append("--no-sandbox")
+    return ignored
+
+
+def playwright_ignore_automation_defaults(*, enabled: bool = True) -> dict[str, list[str]]:
+    if not enabled:
+        return {}
+    return {"ignore_default_args": _playwright_default_args_to_ignore()}
 
 # Injected before every page load to remove automation fingerprints.
 _STEALTH_SCRIPT = """
@@ -598,7 +704,7 @@ async def launch_context(
         locale = str(co.get("locale") or locale)
         viewport = dict(co.get("viewport") or viewport)
         user_agent = str(co.get("user_agent") or user_agent)
-        extra_args = list(extra_args or []) + list(launch_args(bp))
+        extra_args = list(extra_args or []) + list(launch_args(bp, channel=browser_channel))
         if bp.get("stealth_enabled", True):
             init_script = build_stealth_script(bp.get("languages") or [])
 
@@ -625,7 +731,14 @@ async def launch_context(
             file=sys.stderr,
         )
 
-    all_args = list(_COMMON_ARGS) + list(extra_args or [])
+    hide_auto = True
+    if platform == "facebook":
+        hide_auto = bool(bp.get("hide_automation_flags", True))
+    all_args = chromium_launch_args(
+        channel=browser_channel,
+        hide_automation=hide_auto,
+        extra=list(extra_args or []),
+    )
     if not headless:
         all_args.append("--start-maximized")
 
@@ -636,6 +749,7 @@ async def launch_context(
         launch_kwargs = {
             "headless": headless,
             "args": all_args,
+            **playwright_ignore_automation_defaults(),
         }
         if browser_channel:
             launch_kwargs["channel"] = browser_channel
@@ -667,6 +781,9 @@ async def launch_context(
         launch_dir.mkdir(parents=True, exist_ok=True)
         for attempt in range(2):
             try:
+                hide_infobar = True
+                if platform == "facebook":
+                    hide_infobar = bool(bp.get("hide_automation_flags", True))
                 context = await pw.chromium.launch_persistent_context(
                     str(launch_dir),
                     headless=headless,
@@ -675,6 +792,7 @@ async def launch_context(
                     viewport=viewport,
                     user_agent=user_agent,
                     channel=browser_channel,
+                    **playwright_ignore_automation_defaults(enabled=hide_infobar),
                 )
                 await context.add_init_script(init_script)
                 return context, None   # caller closes context only
@@ -971,12 +1089,51 @@ async def wait_for_anti_bot_clear(
     if not has_challenge:
         return
 
-    print(
+    captcha_msg = (
         f"[{plat}_worker] капча/антибот — пройдите проверку в открытом окне "
-        f"(ожидание до {timeout_ms // 1000} с)…",
-        file=sys.stderr,
-        flush=True,
+        f"(ожидание до {timeout_ms // 1000} с)…"
     )
+    if plat == "tiktok":
+        try:
+            from platforms.tiktok.sadcaptcha import sadcaptcha_enabled
+
+            if sadcaptcha_enabled():
+                captcha_msg = (
+                    f"[{plat}_worker] капча — SadCaptcha решает в фоне "
+                    f"(ожидание до {timeout_ms // 1000} с)…"
+                )
+        except Exception:
+            pass
+    print(captcha_msg, file=sys.stderr, flush=True)
+
+    use_sadcaptcha_api = False
+    if plat == "tiktok":
+        try:
+            from platforms.tiktok.sadcaptcha import sadcaptcha_enabled
+
+            use_sadcaptcha_api = sadcaptcha_enabled()
+        except Exception:
+            use_sadcaptcha_api = False
+
+    if use_sadcaptcha_api:
+        from platforms.tiktok.sadcaptcha import solve_tiktok_captcha_if_present
+
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            await solve_tiktok_captcha_if_present(page, force=True)
+            try:
+                still = await page.evaluate(_CHALLENGE_JS)
+            except Exception:
+                still = True
+            if not still:
+                await page.wait_for_timeout(2500)
+                return
+            await asyncio.sleep(4.0)
+        raise ValueError(
+            "TikTok: SadCaptcha не снял капчу за отведённое время. "
+            "Проверьте баланс/ключ на sadcaptcha.com или увеличьте TIKTOK_CAPTCHA_WAIT_MS."
+        )
+
     try:
         await page.wait_for_function(
             f"() => !({_CHALLENGE_JS})()",

@@ -203,6 +203,25 @@ class SnapshotIoRoundTripTests(TestCase):
         window_start = timezone.now() - timedelta(hours=24)
         self.assertGreaterEqual(pts[0].measured_at, window_start - timedelta(seconds=5))
 
+    def test_import_rebuilds_flat_chart_totals(self):
+        t0 = timezone.now() - timedelta(hours=3)
+        for i in range(4):
+            AutoRefreshPoint.objects.create(
+                measured_at=t0 + timedelta(minutes=i),
+                local_date=timezone.localtime(t0).date(),
+                view_count_total=10_000,
+                view_delta_from_prev_point=0,
+                view_delta_from_day_start=400 if i == 3 else 0,
+                platform_deltas={},
+            )
+        csv_bytes = build_snapshot_csv()
+        AutoRefreshPoint.objects.all().delete()
+        summary = import_snapshot_csv(BytesIO(csv_bytes))
+        self.assertTrue(summary.get("auto_refresh_chart_totals_rebuilt"))
+        pts = list(AutoRefreshPoint.objects.order_by("measured_at"))
+        spread = pts[-1].view_count_total - pts[0].view_count_total
+        self.assertGreaterEqual(spread, 200)
+
     def test_export_posts_section_covers_post_snapshots(self):
         acc = Account.objects.create(username="phil", platform=Platform.INSTAGRAM)
         post = Post.objects.create(account=acc, external_id="DXwHZKjqHk7", view_count=5)

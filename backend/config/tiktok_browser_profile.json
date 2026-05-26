@@ -9,5 +9,7 @@
   ],
   "stealth_enabled": true,
   "hide_automation_flags": true,
-  "refresh_browser_slot": "authorized"
+  "refresh_browser_slot": "authorized",
+  "sadcaptcha_enabled": false,
+  "sadcaptcha_api_key": "8fa8cfaeadb1e7a2893df96085264879"
 }

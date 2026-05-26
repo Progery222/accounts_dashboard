@@ -67,6 +67,12 @@ def sync_accounts_browser_env() -> dict[str, str]:
         s = "true" if hl else "false"
         os.environ["BROWSER_HEADLESS"] = s
         applied["BROWSER_HEADLESS"] = s
+    try:
+        from platforms.tiktok.sadcaptcha import sync_sadcaptcha_env
+
+        applied.update(sync_sadcaptcha_env())
+    except Exception:
+        pass
     return applied
 
 
@@ -78,7 +84,14 @@ def _compose_worker_env(backend_root: str) -> dict:
     """
     env = _worker_subprocess_env(backend_root)
     sync_accounts_browser_env()
-    for key in ("BROWSER_PROFILE_DIR", "BROWSER_HEADLESS"):
+    for key in (
+        "BROWSER_PROFILE_DIR",
+        "BROWSER_HEADLESS",
+        "SADCAPTCHA_API_KEY",
+        "SADCAPTCHA_ENABLED",
+        "SADCAPTCHA_SOLVE_RETRIES",
+        "SADCAPTCHA_DETECT_TIMEOUT_SEC",
+    ):
         if key in os.environ:
             env[key] = os.environ[key]
     threads_nav = (os.environ.get("THREADS_NAV_TIMEOUT_MS") or "").strip()
@@ -178,6 +191,14 @@ class _WorkerHandle:
         if self.proc.stdin is None or self.proc.stdout is None:
             raise ValueError("Worker недоступен")
 
+        # Пока worker крутит браузер, не держим idle-соединение к Postgres в этом потоке.
+        try:
+            from accounts.db_connections import release_db_for_long_task
+
+            release_db_for_long_task()
+        except Exception:
+            pass
+
         with self.lock:
             self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
@@ -199,6 +220,12 @@ class _WorkerHandle:
             raise ValueError("Ошибка парсинга ответа worker")
         if "error" in data:
             raise ValueError(data["error"])
+        try:
+            from accounts.db_connections import ensure_fresh_db_connections
+
+            ensure_fresh_db_connections()
+        except Exception:
+            pass
         return data
 
     def close(self) -> None:
@@ -551,6 +578,14 @@ def shutdown_worker(worker_path: Path) -> bool:
 def prepare_tiktok_warm_session() -> None:
     """Перед warm_tiktok_session: только TikTok worker/Chrome, не Facebook и не весь пул."""
     worker_path = Path(__file__).resolve().parent / "tiktok" / "worker.py"
+    if worker_path.exists():
+        shutdown_worker(worker_path)
+    reconcile_orphan_worker_daemons(worker_path if worker_path.exists() else None)
+
+
+def prepare_facebook_warm_session() -> None:
+    """Перед warm_facebook_session: только Facebook worker/Chrome, не TikTok и не весь пул."""
+    worker_path = Path(__file__).resolve().parent / "facebook" / "worker.py"
     if worker_path.exists():
         shutdown_worker(worker_path)
     reconcile_orphan_worker_daemons(worker_path if worker_path.exists() else None)

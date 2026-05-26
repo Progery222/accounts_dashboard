@@ -1,8 +1,9 @@
+import logging
 import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,10 +20,19 @@ _schedule_sync_lock = threading.Lock()
 SCHEDULE_SYNC_JOB_ID = "schedule_sync_from_db"
 _auto_refresh_lock = threading.Lock()
 _queued_refresh_lock = threading.Lock()
+
+
+def _release_auto_refresh_lock() -> None:
+    try:
+        _auto_refresh_lock.release()
+    except RuntimeError:
+        pass
 _queued_refresh_requested = False
 _queued_refresh_source = "scheduler"
 _queued_refresh_fast_start = False
 _queued_refresh_runs: list[tuple[str, bool]] = []
+
+logger = logging.getLogger(__name__)
 
 
 def _scheduler_job_defaults() -> dict:
@@ -308,13 +318,22 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         RefreshScheduleConfig,
         GlobalVisibilityConfig,
     )
+    from .refresh_cancel import RefreshCancelledError
     from .views import (
-        _apply_refresh,
+        _account_refresh_baseline,
         _apply_visibility_filters,
         _mark_profile_unavailable_if_applicable,
         _prewarm_workers,
         _refresh_all_delay_seconds,
         _refresh_link_clicks_for_accounts,
+        _refresh_with_retry,
+        _restore_account_refresh_baseline,
+        humanize_refresh_run_detail,
+    )
+    from .db_connections import (
+        ensure_fresh_db_connections,
+        release_db_for_long_task,
+        run_with_db_reconnect,
     )
 
     if not _auto_refresh_lock.acquire(blocking=False):
@@ -324,11 +343,16 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             _queued_refresh_requested = True
             _queued_refresh_source = source or "scheduler"
             _queued_refresh_fast_start = bool(_queued_refresh_fast_start or fast_start)
+        print(
+            "[scheduled_refresh] в очереди: другой прогон ещё запускается",
+            file=sys.stderr,
+            flush=True,
+        )
         return
 
     bind_port = _runserver_bind_port()
     if bind_port == _COMPANION_API_PORT:
-        _auto_refresh_lock.release()
+        _release_auto_refresh_lock()
         print(
             "[scheduled_refresh] skip: этот процесс runserver на :8010 "
             "(автообновление только на :8000)",
@@ -337,14 +361,30 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         return
     try:
         if AutoRefreshState.get().is_running:
-            _auto_refresh_lock.release()
-            print("[scheduled_refresh] skip: уже идёт автообновление", file=sys.stderr)
+            print(
+                "[scheduled_refresh] skip: уже идёт автообновление",
+                file=sys.stderr,
+                flush=True,
+            )
             return
         if RefreshAllState.get().is_running:
-            _auto_refresh_lock.release()
+            print(
+                "[scheduled_refresh] skip: идёт «Обновить всё»",
+                file=sys.stderr,
+                flush=True,
+            )
             return
-    except Exception:
-        pass
+    except Exception as exc:
+        print(
+            f"[scheduled_refresh] проверка состояния не удалась: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
+    finally:
+        # Не держим lock во время link clicks / prewarm — иначе «Запустить сейчас»
+        # молча встаёт в очередь, а браузеры не поднимаются.
+        _release_auto_refresh_lock()
 
     cfg = RefreshScheduleConfig.get()
     # Свежая строка из БД: иначе при «Запустить сейчас» после POST расписания
@@ -369,6 +409,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         pass
     skip_recent_hours = max(0, int(getattr(cfg, "skip_recent_hours", 0) or 0))
     cutoff = timezone.now() - timedelta(hours=skip_recent_hours) if skip_recent_hours > 0 else None
+    # «Запустить сейчас» — явный полный прогон; пропуск недавних только для cron/очереди.
+    if source == "manual":
+        cutoff = None
     from .auto_refresh_scope import apply_auto_refresh_scope
 
     accounts_qs = Account.objects.select_related("profile").all()
@@ -417,24 +460,45 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         return out
 
     accounts = _interleave_accounts_by_platform(accounts)
+    print(
+        f"[scheduled_refresh] start source={source} accounts={len(accounts)} "
+        f"fast_start={fast_start}",
+        file=sys.stderr,
+        flush=True,
+    )
+    if not accounts:
+        print(
+            "[scheduled_refresh] нет аккаунтов для обновления (проверьте фильтры расписания)",
+            file=sys.stderr,
+            flush=True,
+        )
+        queued_run = None
+        with _queued_refresh_lock:
+            if _queued_refresh_requested:
+                queued_run = (
+                    str(_queued_refresh_source or "scheduler"),
+                    bool(_queued_refresh_fast_start),
+                )
+                _queued_refresh_requested = False
+                _queued_refresh_source = "scheduler"
+                _queued_refresh_fast_start = False
+        if queued_run:
+            next_source, next_fast_start = queued_run
+            threading.Thread(
+                target=_scheduled_refresh,
+                kwargs={"source": next_source, "fast_start": next_fast_start},
+                daemon=True,
+            ).start()
+        return
+
     from .refresh_priority import account_refresh_priority_session
 
-    with account_refresh_priority_session():
-        try:
-            _refresh_link_clicks_for_accounts(accounts, log_prefix="scheduled_refresh")
-        except Exception as e:
-            print(f"[scheduled_refresh] link clicks at start failed: {e}", file=sys.stderr)
+    from .auto_refresh_pulse import (
+        create_auto_refresh_point_from_report_rows,
+        refresh_pulse_batch,
+    )
 
-        # Предзапуск демонов — только если явно включён ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT
-        # (иначе по одному окну на платформу при первом реальном запросе, без «шторма» окон).
-        from django.conf import settings as dj_settings
-
-        if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
-            try:
-                _prewarm_workers(accounts)
-            except Exception as e:
-                print(f"[scheduled_refresh] prewarm workers failed: {e}")
-
+    with account_refresh_priority_session(), refresh_pulse_batch():
         report_rows: list[dict] = []
         state = AutoRefreshState.get()
         state.is_running = True
@@ -454,6 +518,40 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             "success_accounts", "failed_accounts", "current_account",
             "last_error", "started_at", "finished_at", "run_detail", "updated_at",
         ])
+
+        defer_link_clicks = bool(fast_start) or source == "manual"
+
+        def _run_link_clicks() -> None:
+            try:
+                ensure_fresh_db_connections()
+                _refresh_link_clicks_for_accounts(accounts, log_prefix="scheduled_refresh")
+            except Exception as e:
+                print(
+                    f"[scheduled_refresh] link clicks failed: {e}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        if defer_link_clicks:
+            threading.Thread(
+                target=_run_link_clicks,
+                daemon=True,
+                name="auto-refresh-link-clicks",
+            ).start()
+        else:
+            _run_link_clicks()
+
+        # Предзапуск демонов — только если явно включён ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT
+        # (иначе по одному окну на платформу при первом реальном запросе, без «шторма» окон).
+        from django.conf import settings as dj_settings
+
+        if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
+            print("[scheduled_refresh] prewarm Playwright…", file=sys.stderr, flush=True)
+            try:
+                _prewarm_workers(accounts)
+                print("[scheduled_refresh] prewarm done", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"[scheduled_refresh] prewarm workers failed: {e}", file=sys.stderr, flush=True)
 
         ig_preload: dict[str, dict] = {}
 
@@ -540,7 +638,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     return thread_slot_map[tid]
 
             def _persist_run_item(account_id: int, **kwargs) -> None:
-                try:
+                from accounts.run_detail_items import merge_run_detail_item
+
+                def _write() -> None:
                     with transaction.atomic():
                         st = AutoRefreshState.objects.select_for_update().get(pk=1)
                         rd = dict(st.run_detail or {})
@@ -549,11 +649,14 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         for i, it in enumerate(items):
                             if int(it.get("account_id", -1)) != aid:
                                 continue
-                            items[i] = {**it, **kwargs}
+                            items[i] = merge_run_detail_item(it, kwargs)
                             break
                         rd["items"] = items
                         st.run_detail = rd
                         st.save(update_fields=["run_detail", "updated_at"])
+
+                try:
+                    run_with_db_reconnect(_write)
                 except Exception as e:
                     print(f"[scheduled_refresh] run_detail update failed for {account_id}: {e}")
 
@@ -595,7 +698,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     print(f"[scheduled_refresh] run_detail finalize failed: {e}")
 
             def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
-                with state_lock:
+                def _write() -> None:
                     state.processed_accounts += 1
                     if success:
                         state.success_accounts += 1
@@ -607,15 +710,33 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         "last_error", "updated_at",
                     ])
 
+                with state_lock:
+                    try:
+                        run_with_db_reconnect(_write)
+                    except Exception as e:
+                        print(f"[scheduled_refresh] progress save failed: {e}")
+
+            def _reload_account(idx: int) -> Account:
+                ensure_fresh_db_connections()
+                return Account.objects.select_related("profile").get(pk=accounts[idx].pk)
+
             def _worker() -> None:
                 while True:
                     if stop_requested.is_set():
                         return
+                    ensure_fresh_db_connections()
                     with state_lock:
-                        state.refresh_from_db(fields=["cancel_requested"])
+                        def _read_cancel_flag() -> None:
+                            state.refresh_from_db(fields=["cancel_requested"])
+
+                        run_with_db_reconnect(_read_cancel_flag)
                         if bool(state.cancel_requested):
                             state.last_error = "Автообновление остановлено пользователем."
-                            state.save(update_fields=["last_error", "updated_at"])
+
+                            def _save_stop_msg() -> None:
+                                state.save(update_fields=["last_error", "updated_at"])
+
+                            run_with_db_reconnect(_save_stop_msg)
                             stop_requested.set()
                             return
 
@@ -626,26 +747,33 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     if idx is None:
                         return
 
-                    account = accounts[idx]
+                    account = _reload_account(idx)
                     from .warm_run_detail import is_refresh_cancel_requested
 
                     if is_refresh_cancel_requested():
                         stop_requested.set()
                         return
+                    release_db_for_long_task()
                     warm_tracker.wait_warm_before_refresh(account.platform)
                     if is_refresh_cancel_requested():
                         stop_requested.set()
                         return
+                    account = _reload_account(idx)
                     row_started = time.perf_counter()
                     attempted_network = False
+                    refresh_baseline = None
                     try:
                         if stop_requested.is_set():
                             return
 
                         slot = _worker_slot()
-                        with state_lock:
+
+                        def _mark_current_account() -> None:
                             state.current_account = f"{account.platform}/@{account.username}"
                             state.save(update_fields=["current_account", "updated_at"])
+
+                        with state_lock:
+                            run_with_db_reconnect(_mark_current_account)
                         _persist_run_item(account.id, status="running", worker=slot)
 
                         before = None
@@ -721,7 +849,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                 if is_refresh_cancel_requested():
                                     stop_requested.set()
                                     return
-                                account.refresh_from_db()
+                                ensure_fresh_db_connections()
+                                account = _reload_account(idx)
                                 before = (
                                     int(account.follower_count or 0),
                                     int(account.like_count or 0),
@@ -733,8 +862,18 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     key = (account.username or "").lstrip("@").strip().lower()
                                     scraped = ig_preload.get(key)
                                 attempted_network = True
-                                _apply_refresh(account, scraped=scraped)
-                                account.refresh_from_db()
+                                refresh_baseline = _account_refresh_baseline(account)
+                                try:
+                                    _refresh_with_retry(account, scraped=scraped)
+                                except RefreshCancelledError:
+                                    _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                                    raise
+                                if is_refresh_cancel_requested():
+                                    _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                                    raise RefreshCancelledError("Остановлено пользователем")
+                                account = run_with_db_reconnect(
+                                    lambda: Account.objects.get(pk=account.pk),
+                                )
                                 after = (
                                     int(account.follower_count or 0),
                                     int(account.like_count or 0),
@@ -762,6 +901,37 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                 }
                                 _mark_progress(success=True, failed=False)
                                 _persist_run_item(account.id, status="done", worker=None, detail="")
+                        except RefreshCancelledError:
+                            if attempted_network:
+                                _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                            if before is not None:
+                                fb, lb, vb, pb = before
+                            else:
+                                fb = lb = vb = pb = 0
+                            report_by_index[idx] = {
+                                "platform": account.platform,
+                                "username": account.username,
+                                "profile_name": _profile_name(account),
+                                "status": "отменён",
+                                "follower_before": fb,
+                                "follower_after": fb,
+                                "like_before": lb,
+                                "like_after": lb,
+                                "view_before": vb,
+                                "view_after": vb,
+                                "post_before": pb,
+                                "post_after": pb,
+                                "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
+                                "detail": "Остановлено пользователем",
+                            }
+                            _mark_progress(success=False, failed=False)
+                            _persist_run_item(
+                                account.id,
+                                status="cancelled",
+                                worker=None,
+                                detail="Остановлено пользователем",
+                            )
+                            stop_requested.set()
                         except Exception as e:
                             if account.platform == "facebook":
                                 from platforms.facebook.rate_limit import (
@@ -774,10 +944,18 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     if fb_batch_guard is not None:
                                         fb_batch_guard.trip(str(e))
                             _mark_profile_unavailable_if_applicable(account, e)
-                            detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
-                            if len(detail) > 800:
-                                detail = detail[:797] + "..."
-                            account.refresh_from_db()
+                            detail = humanize_refresh_run_detail(e)
+                            logger.warning(
+                                "scheduled_refresh.account_failed",
+                                extra={
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "error": str(e)[:500],
+                                },
+                                exc_info=True,
+                            )
+                            ensure_fresh_db_connections()
+                            account = _reload_account(idx)
                             if before is not None:
                                 fb, lb, vb, pb = before
                             else:
@@ -817,10 +995,35 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         else:
                             account_queue.finish(idx, account.platform)
 
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = [executor.submit(_worker) for _ in range(worker_count)]
-                for f in futures:
-                    f.result()
+            from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancel_poll
+
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            futures = [executor.submit(_worker) for _ in range(worker_count)]
+            pending = set(futures)
+            try:
+                while pending:
+                    if _refresh_cancel_poll():
+                        stop_requested.set()
+                        from .refresh_interrupt import interrupt_refresh_playwright_workers
+
+                        interrupt_refresh_playwright_workers(label="scheduled_refresh_cancel")
+                        break
+                    done, pending = wait(
+                        pending,
+                        timeout=1.5,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for f in done:
+                        try:
+                            f.result()
+                        except Exception:
+                            pass
+            finally:
+                if stop_requested.is_set() or _refresh_cancel_poll():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    _finalize_run_detail_stale()
+                else:
+                    executor.shutdown(wait=True)
 
             from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancelled
 
@@ -880,7 +1083,11 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 try:
                     note = (state.last_error or "").strip()
                     batch_post_total = sum(int(getattr(a, "post_count", 0) or 0) for a in accounts)
-                    qs_dash = _apply_visibility_filters(Account.objects.all(), False, False)
+                    qs_dash = _apply_visibility_filters(
+                        Account.objects.all(),
+                        include_hidden_platforms=False,
+                        include_hidden_profile_accounts=False,
+                    )
                     dash_agg = qs_dash.aggregate(Sum("post_count"))
                     dashboard_post_total = int(dash_agg.get("post_count__sum") or 0)
                     dashboard_account_count = int(qs_dash.count())
@@ -902,55 +1109,13 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 except Exception as e:
                     print(f"[scheduled_refresh] CSV report build/save failed: {e}")
             try:
-                def _to_int(v):
-                    try:
-                        if v is None:
-                            return None
-                        if isinstance(v, bool):
-                            return int(v)
-                        if isinstance(v, (int, float)):
-                            return int(v)
-                        s = str(v).strip()
-                        if not s:
-                            return None
-                        return int(float(s))
-                    except Exception:
-                        return None
-
-                current_total_views = int(Account.objects.aggregate(total=Sum("view_count")).get("total") or 0)
-                local_dt = timezone.localtime(finished)
-                local_date = local_dt.date()
-                prev_point = AutoRefreshPoint.objects.filter(
-                    measured_at__lt=finished,
-                ).order_by("-measured_at").first()
-                first_today = AutoRefreshPoint.objects.filter(
-                    local_date=local_date,
-                ).order_by("measured_at").first()
-                prev_total = int(prev_point.view_count_total) if prev_point else current_total_views
-                day_start_total = int(first_today.view_count_total) if first_today else current_total_views
-                slot_label = local_dt.strftime("%H:%M")
-                platform_deltas: dict[str, int] = {}
-                for row in report_rows:
-                    platform = str(row.get("platform") or "").strip().lower()
-                    if not platform:
-                        continue
-                    before_v = _to_int(row.get("view_before"))
-                    after_v = _to_int(row.get("view_after"))
-                    if before_v is None or after_v is None:
-                        continue
-                    platform_deltas[platform] = int(platform_deltas.get(platform, 0) + (after_v - before_v))
-                AutoRefreshPoint.objects.create(
-                    local_date=local_date,
-                    source=source or "scheduler",
-                    slot_label=slot_label,
-                    view_count_total=current_total_views,
-                    view_delta_from_prev_point=current_total_views - prev_total,
-                    view_delta_from_day_start=current_total_views - day_start_total,
-                    platform_deltas=platform_deltas,
+                create_auto_refresh_point_from_report_rows(
+                    report_rows,
+                    source=state.source or source or "scheduler",
+                    finished=finished,
                 )
             except Exception as e:
                 print(f"[scheduled_refresh] failed to persist AutoRefreshPoint: {e}")
-        _auto_refresh_lock.release()
         queued_run = None
         with _queued_refresh_lock:
             if _queued_refresh_requested:

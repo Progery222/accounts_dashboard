@@ -21,9 +21,8 @@ def _active_refresh_state():
 
 def is_refresh_cancel_requested() -> bool:
     """Остановка из bulk_refresh, refresh_all или автообновления."""
-    from django.db import close_old_connections
-
-    close_old_connections()
+    # Не вызывать close_old_connections() здесь: проверка идёт из transaction.atomic()
+    # при сохранении аккаунта — закрытие соединения даёт «the connection is closed».
     try:
         if RefreshAllState.objects.filter(pk=1, is_running=True, cancel_requested=True).exists():
             return True

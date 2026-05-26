@@ -127,6 +127,13 @@ def _install_subs_tiktok_scrape_hooks(enrich_usernames: list[str] | None) -> Non
 
 
 async def _create_subs_tiktok_context(pw, _wu):
+    from platforms.tiktok.sadcaptcha import sadcaptcha_enabled
+
+    if sadcaptcha_enabled():
+        from platforms.tiktok.worker import _create_tiktok_context
+
+        return await _create_tiktok_context(pw, _wu)
+
     profile_base = Path(_PROFILE_DIR)
     if _wu is not None:
         state_path = _wu.state_file_path("tiktok", profile_base)

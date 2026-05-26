@@ -86,6 +86,16 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         applied = sync_accounts_browser_env()
+        from platforms.tiktok.sadcaptcha import sadcaptcha_enabled
+
+        if sadcaptcha_enabled():
+            self.stdout.write("SadCaptcha: включён (авто-решение капчи)")
+        else:
+            self.stdout.write(
+                self.style.WARNING(
+                    "SadCaptcha: выключен — добавьте SADCAPTCHA_API_KEY в worker_accounts.env",
+                ),
+            )
         from accounts.refresh_state import clear_stale_refresh_runs_if_needed
         from accounts.models import AutoRefreshState, RefreshAllState
 

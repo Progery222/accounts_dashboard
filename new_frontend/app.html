@@ -802,7 +802,30 @@ function _platformsFromSummary(summary) {
     color: PLATFORM_COLORS[String(p.platform || '')] || '#9ca3af',
     share: Math.max(0, Number(p.account_count || 0) / totalAcc),
     accounts: Number(p.account_count || 0),
+    viewDelta: Number(p.view_delta || 0),
   }));
+}
+
+/** Сумма dViews по платформе (тот же период, что и таблица аккаунтов). */
+function _platformViewDeltasFromAccounts(accounts) {
+  const out = {};
+  for (const a of accounts || []) {
+    const id = String(a.platform || '').toLowerCase();
+    if (!id) continue;
+    const d = Number(a.dViews ?? 0);
+    if (!Number.isFinite(d)) continue;
+    out[id] = (out[id] || 0) + d;
+  }
+  return out;
+}
+
+function _fallbackPlatformSpark(delta) {
+  const n = 12;
+  const v = Math.max(0, Number(delta || 0));
+  if (v < 1) {
+    return _normalizeSparkData(Array.from({ length: n }, () => 0));
+  }
+  return _normalizeSparkData(Array.from({ length: n }, (_, i) => (v * (i + 1)) / n));
 }
 
 function _applyDeltaSnapshotToGlobals(snap) {
@@ -1350,6 +1373,15 @@ async function _postJson(url, payload) {
   throw new Error(_apiTunnelDeadHint(lastErr || new Error(`Failed to post ${url}`)));
 }
 
+/** Остановка фонового прогона: refresh_all → refresh-all-stop, остальное → auto-refresh-stop. */
+async function _stopActiveRefreshPipeline(activePipeline) {
+  const pipeline = String(activePipeline || '').trim();
+  if (pipeline === 'refresh_all') {
+    return _postJson('/api/accounts/refresh-all-stop/', {});
+  }
+  return _postJson('/api/accounts/auto-refresh-stop/', {});
+}
+
 async function _patchJson(url, payload) {
   const candidates = _apiBaseCandidates();
   let lastErr = null;
@@ -1526,6 +1558,9 @@ function _formatImportSummaryMessage(summary) {
   }
   if (summary.auto_refresh_chart_times_remapped) {
     parts.push('время точек графика сдвинуто в последние 24 ч');
+  }
+  if (summary.auto_refresh_chart_totals_rebuilt) {
+    parts.push('кривая графика пересобрана по дельтам за сутки');
   }
   const errs = Array.isArray(summary.errors) ? summary.errors : [];
   let msg = parts.length ? parts.join('\n') : 'Данные обработаны (без изменений счётчиков).';
@@ -3429,7 +3464,7 @@ function ScenePulse({ accent, mood, pulse }) {
   const showPlatformInfo = (e, label) => openInfoPopover(
     e,
     `Platform Pulse · ${label}`,
-    `Линия ${label} показывает изменение дельты просмотров платформы между точками автообновления. Число справа — суммарный вклад платформы за интервал.`
+    `Линия ${label}: прирост просмотров по точкам автообновления и ручных refresh за 24 ч. Если в series нет данных — число и мини-график из summary/списка аккаунтов (дельта за выбранный период).`
   );
 
   const seriesAll = Array.isArray(AUTO_REFRESH_SERIES) ? AUTO_REFRESH_SERIES : [];
@@ -3513,20 +3548,34 @@ function ScenePulse({ accent, mood, pulse }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <div className="mono" style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', letterSpacing: '0.24em', marginBottom: 4 }}>PLATFORM PULSE</div>
         {(() => {
+          const accountDeltas = _platformViewDeltasFromAccounts(ACCOUNTS);
           const candidates = (PLATFORMS || []).map((p, i) => {
             const pulse = _platformPulseFromSeries(series, p.id);
-            const hasReal = Array.isArray(pulse.data) && pulse.data.length > 1 && pulse.hasVariation;
+            const hasSeries = Array.isArray(pulse.data) && pulse.data.length > 1 && pulse.hasVariation;
+            const summaryDelta = Number(p.viewDelta ?? 0);
+            const accountDelta = Number(accountDeltas[p.id] ?? 0);
+            const periodDelta = Math.abs(summaryDelta) >= Math.abs(accountDelta)
+              ? summaryDelta
+              : accountDelta;
+            const hasPeriod = Math.abs(periodDelta) >= 1;
+            const hasReal = hasSeries || hasPeriod;
             const fallbackValue = Math.round(TOTAL.views.delta * p.share);
+            const value = hasSeries
+              ? Math.round(pulse.totalDelta)
+              : (hasPeriod ? Math.round(periodDelta) : fallbackValue);
+            const data = hasSeries
+              ? _normalizeSparkData(pulse.data)
+              : (hasPeriod
+                ? _fallbackPlatformSpark(value)
+                : _normalizeSparkData(TREND_24H.map((v, idx) => v * (p.share + 0.4) + Math.sin(idx + i) * 30)));
             return {
               id: p.id,
               label: p.label,
               color: p.color,
               idx: i,
               hasReal,
-              value: hasReal ? Math.round(pulse.totalDelta) : fallbackValue,
-              data: hasReal
-                ? _normalizeSparkData(pulse.data)
-                : _normalizeSparkData(TREND_24H.map((v, idx) => v * (p.share + 0.4) + Math.sin(idx + i) * 30)),
+              value,
+              data,
             };
           });
           const hasAnyReal = candidates.some((c) => c.hasReal);
@@ -3661,7 +3710,13 @@ function BigChart({ accent, series = [], isMobile = false }) {
       let endVal = last.value;
       try {
         const lv = Number(typeof TOTAL !== 'undefined' && TOTAL && TOTAL.views ? TOTAL.views.value : NaN);
-        if (Number.isFinite(lv)) endVal = Math.max(last.value, lv);
+        const snapTotal = Number(lastSnap?.view_count_total ?? NaN);
+        if (Number.isFinite(lv) && Number.isFinite(snapTotal)) {
+          const gap = Math.max(0, lv - snapTotal);
+          endVal = last.value + gap;
+        } else if (Number.isFinite(lv)) {
+          endVal = Math.max(last.value, lv);
+        }
       } catch (_) { /* ignore */ }
       drawnPoints.push({ ts: windowEnd, value: endVal });
     }
@@ -4312,6 +4367,7 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
     );
     const barStats = _aggregateBarStatsFromAccountRows(rows);
     const getter = (a) => {
+      if (sortKey === 'updated') return _toSortableNumber(a.updatedTs);
       if (sortByDelta) {
         if (sortKey === 'followers') return _toSortableNumber(a.dFollowers);
         if (sortKey === 'likes') return _toSortableNumber(a.dLikes);
@@ -4350,6 +4406,19 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
     }));
     return showHidden ? fallback : fallback.filter((p) => !p.hidden);
   }, [showHidden, hiddenPlatforms]);
+
+  const profileFilterOptions = useMemoAcc(() => {
+    const rows = (PROFILES || []).filter((p) => p.id !== 'none');
+    const visible = showHidden
+      ? rows
+      : rows.filter((p) => !hiddenProfileIds.has(String(p.id)));
+    return visible.map((p) => ({
+      id: String(p.id),
+      label: p.label,
+      color: p.color,
+      accounts: Number(p.accounts || 0),
+    }));
+  }, [showHidden, hiddenProfileIds]);
 
   const handleMetricSort = (key) => {
     if (sortKey === key) {
@@ -4409,6 +4478,9 @@ function AccountsScreen({ tweaks, onNavigate, onDataChanged, onOpenAccount, onOp
           <FilterBar
             platform={platform}
             setPlatform={setPlatform}
+            profile={profile}
+            setProfile={setProfile}
+            profileOptions={profileFilterOptions}
             status={status}
             setStatus={setStatus}
             accent={accent}
@@ -4715,6 +4787,7 @@ function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setP
           }}>{t.label}</button>
         ))}
       </div>
+      {!isMobile && (
       <div style={{ marginTop: 24 }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, marginBottom: 14 }}>
           <div style={{ position: 'relative' }}>
@@ -4784,6 +4857,7 @@ function Sidebar({ profile, setProfile, tab, setTab, accent, profileSearch, setP
           </>
         )}
       </div>
+      )}
     </aside>
   );
 }
@@ -4939,11 +5013,19 @@ function SidebarItem({ active, onClick, label, count, color, dot, dim, accent, h
 }
 
 function FilterBar({
-  platform, setPlatform, status, setStatus, accent, search, setSearch, onReset, showHidden, setShowHidden,
+  platform, setPlatform, profile, setProfile, profileOptions,
+  status, setStatus, accent, search, setSearch, onReset, showHidden, setShowHidden,
   hiddenPlatforms, onTogglePlatformHidden, platformOptions,
   sortKey, sortOrder, onMetricSort, sortByDelta, onToggleSortByDelta,
 }) {
   const isMobile = useIsMobile(980);
+  const activeProfileMeta = profile === 'all'
+    ? null
+    : profile === 'none'
+      ? { label: 'Без профиля', color: '#525a70' }
+      : (profileOptions || []).find((p) => p.id === profile)
+        || PROFILE_META[profile]
+        || null;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -5008,6 +5090,34 @@ function FilterBar({
           </div>
         ))}
       </div>
+      {isMobile && typeof setProfile === 'function' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', letterSpacing: '0.16em', textTransform: 'uppercase' }}>
+            Профиль
+            {activeProfileMeta?.label ? (
+              <span style={{ marginLeft: 8, color: accent, letterSpacing: '0.06em', textTransform: 'none' }}>
+                · {activeProfileMeta.label}
+              </span>
+            ) : null}
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <Pill active={profile === 'all'} onClick={() => setProfile('all')} title="Все профили">Все</Pill>
+            <Pill active={profile === 'none'} onClick={() => setProfile('none')} title="Без профиля">Без проф.</Pill>
+            {(profileOptions || []).map((p) => (
+              <Pill
+                key={p.id}
+                active={profile === p.id}
+                onClick={() => setProfile(p.id)}
+                dot={p.color}
+                title={`${p.label} (${p.accounts})`}
+                style={{ maxWidth: 'min(100%, 168px)' }}
+              >
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.label}</span>
+              </Pill>
+            ))}
+          </div>
+        </div>
+      )}
       <div style={isMobile && typeof onMetricSort === 'function' ? { display: 'flex', flexDirection: 'column', gap: 14 } : undefined}>
         {isMobile && typeof onMetricSort === 'function' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, order: 2 }}>
@@ -5044,6 +5154,7 @@ function FilterBar({
                 { key: 'likes', short: 'Лайки', title: 'Лайки' },
                 { key: 'posts', short: 'Публ', title: 'Публикации' },
                 { key: 'clicks', short: 'Пер', title: 'Переходы' },
+                { key: 'updated', short: 'Обн', title: 'Обновлён' },
               ].map(({ key, short, title }) => {
                 const active = sortKey === key;
                 const mark = active ? (sortOrder === 'desc' ? ' ↓' : ' ↑') : '';
@@ -5104,7 +5215,7 @@ function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOr
     }
   };
   const sortMark = (key) => (sortKey === key ? (sortOrder === 'desc' ? ' ↓' : ' ↑') : '');
-  const metricBtn = (key, label) => (
+  const metricBtn = (key, label, { showDelta = true } = {}) => (
     <button
       type="button"
       key={key}
@@ -5122,7 +5233,7 @@ function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOr
         maxWidth: '100%',
       }}
     >
-      {label}{sortByDelta ? ' Δ' : ''}{sortMark(key)}
+      {label}{sortByDelta && showDelta ? ' Δ' : ''}{sortMark(key)}
     </button>
   );
   return (
@@ -5144,7 +5255,9 @@ function AccountsTable({ rows, accent, sortKey, sortOrder, setSortKey, setSortOr
         {metricBtn('likes', 'Лайки')}
         {metricBtn('posts', 'Публ.')}
         {metricBtn('clicks', 'Переходы')}
-        <div>Обновлён</div>
+        <div style={{ textAlign: 'right' }}>
+          {metricBtn('updated', 'Обновлён', { showDelta: false })}
+        </div>
         <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, minWidth: 0 }}>
           <span style={{ letterSpacing: '0.18em', textTransform: 'uppercase', fontSize: 11, color: 'var(--ink-mute)', fontFamily: 'JetBrains Mono, monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             Действия
@@ -5249,7 +5362,7 @@ function AccountRow({ a, i, onOpenAccount, onRefreshOne, onDeleteOne, rowBusyId 
           </div>
         )}
       </div>
-      <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{a.updated}</div>
+      <div className="mono" style={{ fontSize: 12, color: 'var(--ink-mute)', textAlign: 'right' }}>{a.updated}</div>
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
         <button onClick={() => onRefreshOne?.(a.id)} disabled={rowBusyId === a.id} style={{ minHeight: isMobile ? 40 : undefined, padding: isMobile ? '8px 10px' : '6px 10px', borderRadius: 8, border: '1px solid var(--line)', background: 'rgba(255,255,255,0.04)', color: 'var(--ink)', cursor: 'pointer', fontSize: 12, opacity: rowBusyId === a.id ? 0.6 : 1 }}>
           {rowBusyId === a.id ? '...' : '↻'}
@@ -6499,6 +6612,10 @@ function PlatformBrowserProfileModal({ platform, accent, onClose }) {
           hide_automation_flags: data?.hide_automation_flags !== false,
           refresh_browser_slot: String(data?.refresh_browser_slot || 'authorized'),
           browser_slots: Array.isArray(data?.browser_slots) ? data.browser_slots : [],
+          sadcaptcha_enabled: data?.sadcaptcha_enabled === true,
+          sadcaptcha_api_key_set: !!data?.sadcaptcha_api_key_set,
+          sadcaptcha_api_key_masked: String(data?.sadcaptcha_api_key_masked || ''),
+          sadcaptcha_api_key: '',
         });
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -6531,7 +6648,14 @@ function PlatformBrowserProfileModal({ platform, accent, onClose }) {
             languages: draft?.languages,
             stealth_enabled: !!draft?.stealth_enabled,
             hide_automation_flags: !!draft?.hide_automation_flags,
-            ...(platform === 'tiktok' ? { refresh_browser_slot: draft?.refresh_browser_slot || 'authorized' } : {}),
+            ...(platform === 'tiktok' ? {
+              refresh_browser_slot: draft?.refresh_browser_slot || 'authorized',
+              sadcaptcha_enabled: !!draft?.sadcaptcha_enabled,
+              ...(String(draft?.sadcaptcha_api_key || '').trim()
+                ? { sadcaptcha_api_key: String(draft.sadcaptcha_api_key).trim() }
+                : {}),
+              ...(draft?.clear_sadcaptcha_api_key ? { clear_sadcaptcha_api_key: true } : {}),
+            } : {}),
           };
       const res = await _patchJson(meta.apiPath, body);
       await uiAlert(String(res?.message || 'Сохранено.'), 'Параметры браузера');
@@ -6702,6 +6826,68 @@ function PlatformBrowserProfileModal({ platform, accent, onClose }) {
                 onChange={(e) => setField('hide_automation_flags', e.target.checked)} />
               Флаг --disable-blink-features=AutomationControlled
             </label>
+            {platform === 'tiktok' && (
+              <div style={{ marginTop: 4, paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)', marginBottom: 6 }}>
+                  SadCaptcha (капча TikTok)
+                </div>
+                <p style={{ margin: '0 0 10px', fontSize: 11, color: 'var(--ink-mute)', lineHeight: 1.45 }}>
+                  Автоматическое решение капчи при входе, прогреве и обновлении. Ключ с{' '}
+                  <a href="https://www.sadcaptcha.com" target="_blank" rel="noopener noreferrer" style={{ color: accent || '#6aa9ff' }}>
+                    sadcaptcha.com
+                  </a>
+                  . Пустое поле при сохранении — ключ не меняется.
+                </p>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--ink-dim)', cursor: 'pointer', marginBottom: 10 }}>
+                  <input
+                    type="checkbox"
+                    checked={!!draft.sadcaptcha_enabled}
+                    onChange={(e) => setField('sadcaptcha_enabled', e.target.checked)}
+                  />
+                  Автоматически проходить капчу
+                </label>
+                <label style={{ fontSize: 11, color: 'var(--ink-mute)' }}>
+                  API-ключ SadCaptcha
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={draft.sadcaptcha_api_key}
+                    onChange={(e) => setField('sadcaptcha_api_key', e.target.value)}
+                    placeholder={
+                      draft.sadcaptcha_api_key_set
+                        ? `Сохранён: ${draft.sadcaptcha_api_key_masked || '••••'}`
+                        : 'Вставьте ключ'
+                    }
+                    style={{ ...inputStyle, marginTop: 4 }}
+                  />
+                </label>
+                {draft.sadcaptcha_api_key_set && (
+                  <button
+                    type="button"
+                    onClick={() => setDraft((d) => (d ? {
+                      ...d,
+                      sadcaptcha_api_key: '',
+                      sadcaptcha_api_key_set: false,
+                      sadcaptcha_api_key_masked: '',
+                      clear_sadcaptcha_api_key: true,
+                      sadcaptcha_enabled: false,
+                    } : d))}
+                    style={{
+                      marginTop: 8,
+                      padding: '6px 10px',
+                      borderRadius: 8,
+                      border: '1px solid var(--line)',
+                      background: 'transparent',
+                      color: 'var(--ink-mute)',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Удалить сохранённый ключ
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: 8, marginTop: 18 }}>
@@ -7206,6 +7392,19 @@ function AddListModal({ accent, onDataChanged, onClose }) {
 const _AUTO_RUN_STATUS_RU = {
   queued: 'В очереди', running: 'Обновляется', done: 'Готово', skipped: 'Пропущен', error: 'Ошибка', cancelled: 'Отменён',
 };
+const _RUN_DETAIL_STATUS_AT = new Set(['done', 'skipped', 'error']);
+function _fmtRunDetailStatusAt(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('ru-RU', {
+    timeZone: 'Europe/Moscow',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).replace(',', '');
+}
 const _WARM_STATUS_RU = {
   queued: 'В очереди', running: 'Прогрев', done: 'Готово', error: 'Ошибка', cancelled: 'Остановлен',
 };
@@ -7298,7 +7497,9 @@ function AutoRefreshRunDetailOverlay({ status, accent, onClose, refreshAutoStatu
         <div style={{ fontSize: 12, color: 'var(--ink-mute)' }}>{emptyHint || '—'}</div>
       ) : (
         <div style={{ maxHeight: 160, overflowY: 'auto', borderRadius: 10, border: '1px solid var(--line)', background: 'rgba(0,0,0,0.2)' }}>
-          {list.map((it) => (
+          {list.map((it) => {
+            const atLabel = _RUN_DETAIL_STATUS_AT.has(it.status) ? _fmtRunDetailStatusAt(it.status_at) : '';
+            return (
             <div key={it.account_id} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '8px 10px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
               <PlatformGlyph id={it.platform} size={14} />
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -7307,10 +7508,12 @@ function AutoRefreshRunDetailOverlay({ status, accent, onClose, refreshAutoStatu
               </div>
               <div style={{ textAlign: 'right', flexShrink: 0 }}>
                 <div style={{ fontSize: 10, fontWeight: 600, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--line)', background: it.status === 'running' ? 'rgba(56,189,248,0.12)' : it.status === 'done' ? 'rgba(74,222,128,0.12)' : 'rgba(255,255,255,0.04)', color: 'var(--ink)' }}>{_AUTO_RUN_STATUS_RU[it.status] || it.status}</div>
+                {atLabel ? <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', marginTop: 4 }} title="Время перехода в этот статус (МСК)">{atLabel}</div> : null}
                 {it.worker != null && it.status === 'running' ? <div className="mono" style={{ fontSize: 10, color: 'var(--ink-mute)', marginTop: 4 }}>слот {Number(it.worker) + 1}</div> : null}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -7503,6 +7706,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const [includeHiddenProfile, setIncludeHiddenProfile] = useStateMd(false);
   const [reportDownloading, setReportDownloading] = useStateMd(false);
   const [runBusy, setRunBusy] = useStateMd(false);
+  const [stopBusy, setStopBusy] = useStateMd(false);
   const [runDetailOpen, setRunDetailOpen] = useStateMd(false);
   const prevRunningRef = React.useRef(false);
 
@@ -7551,10 +7755,10 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   }, []);
 
   useEffect(() => {
-    if (!status?.is_running && !runBusy) return undefined;
-    const timer = setInterval(() => { void refreshAutoStatus(); }, 7500);
+    if (!status?.is_running && !runBusy && !status?.cancel_requested) return undefined;
+    const timer = setInterval(() => { void refreshAutoStatus(); }, status?.cancel_requested ? 2000 : 7500);
     return () => clearInterval(timer);
-  }, [status?.is_running, runBusy]);
+  }, [status?.is_running, status?.cancel_requested, runBusy]);
 
   useEffect(() => {
     const wasRunning = !!prevRunningRef.current;
@@ -7566,9 +7770,9 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
     prevRunningRef.current = isRunning;
   }, [status?.is_running, onDataChanged]);
 
-  const buildSchedulePayload = () => {
+  const buildSchedulePayload = (timesOverride = null) => {
     const times = auto && mode === 'times'
-      ? _sortScheduleTimes(selectedTimes)
+      ? _sortScheduleTimes(timesOverride ?? selectedTimes)
       : [];
     const allPlat = platformOptions.map((p) => p.id);
     const auto_refresh_platforms = selectedPlatforms.size >= allPlat.length
@@ -7596,10 +7800,10 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const platformSummary = _scopePickerSummary(selectedPlatforms.size, platformOptions.length);
   const profileSummary = _scopePickerSummary(selectedProfiles.size, profileOptions.length);
 
-  const saveSchedule = async ({ silent = false } = {}) => {
+  const saveSchedule = async ({ silent = false, timesOverride = null } = {}) => {
     if (!silent) setSaving(true);
     try {
-      await _postJson('/api/accounts/schedule/', buildSchedulePayload());
+      await _postJson('/api/accounts/schedule/', buildSchedulePayload(timesOverride));
       await onDataChanged?.();
       if (!silent) await uiAlert('Расписание сохранено.', 'Расписание');
     } catch (e) {
@@ -7607,6 +7811,15 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
       throw e;
     } finally {
       if (!silent) setSaving(false);
+    }
+  };
+
+  const persistTimeSlots = async (nextTimes) => {
+    if (!auto || mode !== 'times') return;
+    try {
+      await saveSchedule({ silent: true, timesOverride: nextTimes });
+    } catch {
+      await uiAlert('Не удалось сохранить время на сервер. Нажмите «Сохранить» внизу окна.', 'Расписание');
     }
   };
 
@@ -7618,16 +7831,23 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   const toggleTime = (timeValue) => {
     const t = String(timeValue || '').trim();
     if (!/^\d{2}:\d{2}$/.test(t)) return;
-    setSelectedTimes((prev) => {
-      const cur = _sortScheduleTimes(prev);
-      if (cur.includes(t)) return cur.filter((x) => x !== t);
-      return _sortScheduleTimes([...cur, t]);
-    });
+    const cur = _sortScheduleTimes(selectedTimes);
+    const next = cur.includes(t)
+      ? cur.filter((x) => x !== t)
+      : _sortScheduleTimes([...cur, t]);
+    setSelectedTimes(next);
+    void persistTimeSlots(next);
   };
 
   const runNow = async () => {
     setRunBusy(true);
     try {
+      const beforeRun = await refreshAutoStatus().catch(() => null);
+      const beforeStartedAt = beforeRun?.started_at ? String(beforeRun.started_at) : '';
+      if (beforeRun?.is_running) {
+        await uiAlert('Автообновление уже выполняется.', 'Автообновление');
+        return;
+      }
       // Ensure skip/include settings are persisted before manual start.
       await saveSchedule({ silent: true });
       const candidates = _apiBaseCandidates();
@@ -7656,12 +7876,21 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
           lastErr = e;
         }
       }
-      await new Promise((r) => setTimeout(r, 500));
-      await refreshAutoStatus();
       if (alreadyRunning) {
+        await refreshAutoStatus();
         await uiAlert('Автообновление уже выполняется.', 'Автообновление');
       } else if (started) {
-        await uiAlert('Автообновление запущено.', 'Автообновление');
+        let st = null;
+        const deadline = Date.now() + 20000;
+        while (Date.now() < deadline) {
+          st = await refreshAutoStatus();
+          if (st?.is_running) break;
+          const startedAt = st?.started_at ? String(st.started_at) : '';
+          if (startedAt && startedAt !== beforeStartedAt) break;
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        if (st) setStatus(st);
+        // Без модального окна: прогресс и браузеры видны в панели ниже.
       } else if (lastErr) {
         throw new Error(_apiTunnelDeadHint(lastErr instanceof Error ? lastErr : new Error(String(lastErr))));
       }
@@ -7673,24 +7902,39 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
   };
 
   const stopNow = async () => {
+    if (stopBusy) return;
+    setStopBusy(true);
     try {
-      if (status?.active_pipeline === 'refresh_all') {
-        await _postJson('/api/accounts/refresh-all-stop/', {});
+      setStatus((prev) => (prev ? { ...prev, cancel_requested: true } : prev));
+      await _stopActiveRefreshPipeline(status?.active_pipeline);
+      const st = await refreshAutoStatus();
+      if (st?.cancel_requested || st?.is_running) {
+        await uiAlert(
+          'Остановка запрошена. Текущий аккаунт может ещё обрабатываться 1–3 мин — прогресс обновится автоматически.',
+          'Автообновление',
+        );
       } else {
-        await _postJson('/api/accounts/auto-refresh-stop/', {});
+        await uiAlert('Прогон остановлен или уже завершён.', 'Автообновление');
       }
-      const st = await _fetchJson('/api/accounts/auto-refresh-status/').catch(() => null);
-      setStatus(st);
-      await uiAlert('Остановка отправлена.', 'Автообновление');
     } catch (e) {
       const msg = String(e instanceof Error ? e.message : e || '');
+      const st = await refreshAutoStatus().catch(() => null);
       if (msg.includes('HTTP 409')) {
-        const st = await _fetchJson('/api/accounts/auto-refresh-status/').catch(() => null);
-        setStatus(st);
-        await uiAlert('Автообновление сейчас не выполняется.', 'Автообновление');
+        await uiAlert(
+          st?.is_running
+            ? 'Сервер не принял остановку. Обновите страницу или сбросьте состояние: manage.py clear_refresh_run_state --force'
+            : 'Сейчас ничего не выполняется — кнопка «Остановить» активна только во время прогона.',
+          'Автообновление',
+        );
         return;
       }
       await uiAlert(`Не удалось остановить: ${msg}`, 'Ошибка');
+    } finally {
+      setStopBusy(false);
+      const st = await refreshAutoStatus().catch(() => null);
+      if (st && !st.is_running) {
+        setStatus(st);
+      }
     }
   };
 
@@ -7873,7 +8117,7 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
           </div>
           <p style={{ margin: '0 0 18px', fontSize: 12, color: 'var(--ink-mute)', lineHeight: 1.45 }}>
             {auto
-              ? 'Нажмите на время — включить или выключить слот (серый = выключен). Дополнительные слоты — по иконке часов. Не забудьте «Сохранить», чтобы записать на сервер.'
+              ? 'Нажмите на время — включить или выключить слот (серый = выключен); изменения сразу пишутся на сервер. Дополнительные слоты — по иконке часов. Остальные настройки — кнопкой «Сохранить».'
               : 'Слоты неактивны, пока автообновление выключено (как на бродкасте: AUTO · OFF).'}
           </p>
           {timesModalOpen && (
@@ -7891,7 +8135,9 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
                   for (const t of added) {
                     if (!next.includes(t)) next = [...next, t];
                   }
-                  return _sortScheduleTimes(next);
+                  next = _sortScheduleTimes(next);
+                  void persistTimeSlots(next);
+                  return next;
                 });
               }}
             />
@@ -7990,27 +8236,31 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
           {runBusy ? 'Запуск…' : (status?.is_running ? (status.active_pipeline === 'refresh_all' ? 'Сбор всех уже идёт' : 'Уже запущено') : 'Запустить сейчас')}
         </button>
         <button
-          onClick={stopNow}
-          disabled={!status?.is_running}
+          type="button"
+          onClick={() => { void stopNow(); }}
+          disabled={!status?.is_running || stopBusy}
+          title={!status?.is_running ? 'Нет активного прогона — остановка недоступна' : (status?.cancel_requested ? 'Остановка уже запрошена' : 'Остановить текущий прогон')}
           style={{
             flex: 1, padding: 14, borderRadius: 12, background: '#ef4444', color: '#fff', border: 'none', fontSize: 14, fontWeight: 600,
-            cursor: status?.is_running ? 'pointer' : 'default',
-            opacity: status?.is_running ? 1 : 0.45,
+            cursor: status?.is_running && !stopBusy ? 'pointer' : 'default',
+            opacity: status?.is_running && !stopBusy ? 1 : 0.45,
           }}
-        >Остановить</button>
+        >{stopBusy || (status?.cancel_requested && status?.is_running) ? 'Остановка…' : 'Остановить'}</button>
       </div>
-      {status && (
+      {status && status.is_running && (
         <div style={{ marginTop: 12 }}>
           <div className="mono" style={{ fontSize: 11, color: 'var(--ink-mute)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
             <span>
               Статус:{' '}
-              {!status.is_running
-                ? 'не идет'
-                : status.active_pipeline === 'refresh_all'
-                  ? 'идёт сбор всех'
-                  : status.active_pipeline === 'bulk_refresh'
-                    ? 'идёт обновление выбранных'
-                    : 'идёт автообновление'}{' '}
+              {status.cancel_requested && status.is_running
+                ? 'остановка…'
+                : !status.is_running
+                  ? 'остановлено'
+                  : status.active_pipeline === 'refresh_all'
+                    ? 'идёт сбор всех'
+                    : status.active_pipeline === 'bulk_refresh'
+                      ? 'идёт обновление выбранных'
+                      : 'идёт автообновление'}{' '}
               · {status.processed_accounts || 0}/{status.total_accounts || 0}
             </span>
             <span>{Math.max(0, Math.min(100, Number(status.progress_percent || 0)))}%</span>
@@ -8021,14 +8271,16 @@ function ScheduleModal({ accent, onDataChanged, onClose }) {
                 width: `${Math.max(0, Math.min(100, Number(status.progress_percent || 0)))}%`,
                 height: '100%',
                 borderRadius: 999,
-                background: status.is_running ? 'linear-gradient(90deg, #22c55e, #4ade80)' : 'rgba(148,163,184,0.45)',
+                background: status.cancel_requested
+                  ? 'linear-gradient(90deg, #f87171, #ef4444)'
+                  : 'linear-gradient(90deg, #22c55e, #4ade80)',
                 transition: 'width 260ms ease',
               }}
             />
           </div>
           {Number(status.skip_recent_hours_config || 0) > 0 && (
             <div style={{ marginTop: 8, fontSize: 11, color: '#fde68a', lineHeight: 1.45 }}>
-              На сервере включён пропуск недавних: &lt; {status.skip_recent_hours_config} ч — такие аккаунты не дергают браузер. Выберите «Не пропускать» и нажмите «Сохранить» (кнопка «Запустить сейчас» перед запуском тоже сохраняет форму).
+              Пропуск недавних (&lt; {status.skip_recent_hours_config} ч) действует по расписанию. «Запустить сейчас» обновляет все аккаунты, даже недавно обновлённые.
             </div>
           )}
         </div>
@@ -8248,6 +8500,7 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   const [skipRecent, setSkipRecent] = useStateMd(0);
   const [warmEnabled, setWarmEnabled] = useStateMd(true);
   const [runDetailOpen, setRunDetailOpen] = useStateMd(false);
+  const [stopBusy, setStopBusy] = useStateMd(false);
   const [csvImport, setCsvImport] = useStateMd(null);
   const refreshModeRef = React.useRef(null);
   const pendingRunRef = React.useRef(null);
@@ -8304,10 +8557,10 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   }, []);
 
   React.useEffect(() => {
-    if (!runStatus?.is_running) return undefined;
-    const timer = setInterval(() => { void refreshRunStatus(); }, 2000);
+    if (!runStatus?.is_running && !runStatus?.cancel_requested) return undefined;
+    const timer = setInterval(() => { void refreshRunStatus(); }, runStatus?.cancel_requested ? 1500 : 2000);
     return () => clearInterval(timer);
-  }, [runStatus?.is_running]);
+  }, [runStatus?.is_running, runStatus?.cancel_requested]);
 
   const finishBulkRefreshRun = async (pending) => {
     const lastSt = await refreshRunStatus().catch(() => null);
@@ -8591,20 +8844,26 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
   };
 
   const stopRefresh = async () => {
+    if (stopBusy) return;
+    setStopBusy(true);
     try {
       const pipeline = runStatus?.active_pipeline || (
         refreshModeRef.current === 'refresh_all' ? 'refresh_all' : 'bulk_refresh'
       );
-      if (pipeline === 'refresh_all') {
-        await _postJson('/api/accounts/refresh-all-stop/', {});
-        await uiAlert('Остановка сбора всех запрошена. Текущие аккаунты в воркерах завершатся, затем процесс остановится.', 'Остановка обновления');
-      } else {
-        await _postJson('/api/accounts/auto-refresh-stop/', {});
-        await uiAlert('Остановка запрошена. Текущий аккаунт завершится и процесс остановится.', 'Остановка обновления');
-      }
+      setRunStatus((prev) => (prev ? { ...prev, cancel_requested: true } : prev));
+      await _stopActiveRefreshPipeline(pipeline);
       await refreshRunStatus();
+      await uiAlert(
+        pipeline === 'refresh_all'
+          ? 'Остановка сбора всех запрошена. Текущие аккаунты в воркерах завершатся, затем процесс остановится.'
+          : 'Остановка запрошена. Текущий аккаунт завершится и процесс остановится.',
+        'Остановка обновления',
+      );
     } catch (e) {
+      await refreshRunStatus().catch(() => null);
       await uiAlert(`Не удалось остановить: ${e instanceof Error ? e.message : String(e)}`, 'Ошибка');
+    } finally {
+      setStopBusy(false);
     }
   };
 
@@ -8956,9 +9215,19 @@ function RefreshAllModal({ accent, onDataChanged, onClose }) {
             <button
               type="button"
               onClick={() => { void stopRefresh(); }}
-              style={{ padding: '10px 16px', borderRadius: 10, border: '1px solid rgba(239,68,68,0.45)', background: 'rgba(239,68,68,0.12)', color: '#fecaca', fontWeight: 600, cursor: 'pointer' }}
+              disabled={stopBusy || !!runStatus?.cancel_requested}
+              style={{
+                padding: '10px 16px',
+                borderRadius: 10,
+                border: '1px solid rgba(239,68,68,0.45)',
+                background: 'rgba(239,68,68,0.12)',
+                color: '#fecaca',
+                fontWeight: 600,
+                cursor: stopBusy || runStatus?.cancel_requested ? 'default' : 'pointer',
+                opacity: stopBusy || runStatus?.cancel_requested ? 0.65 : 1,
+              }}
             >
-              Остановить
+              {stopBusy || runStatus?.cancel_requested ? 'Остановка…' : 'Остановить'}
             </button>
           )}
           <button

@@ -34,10 +34,9 @@ class AtomicHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def end_headers(self) -> None:
-        # app.html компилируется Babel в браузере — не кэшировать агрессивно
-        if self.path.startswith("/app.html"):
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-            self.send_header("Pragma", "no-cache")
+        # app.html компилируется Babel в браузере — не кэшировать (в т.ч. / и /settings → app.html)
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
         super().end_headers()
 
 

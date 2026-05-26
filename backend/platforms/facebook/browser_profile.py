@@ -195,12 +195,14 @@ def build_stealth_script(languages: list[str]) -> str:
 """
 
 
-def launch_args(profile: dict[str, Any] | None = None) -> list[str]:
+def launch_args(profile: dict[str, Any] | None = None, *, channel: str | None = None) -> list[str]:
+    from platforms.worker_utils import chromium_launch_args
+
     p = profile or load_profile()
-    args: list[str] = []
-    if p.get("hide_automation_flags", True):
-        args.append("--disable-blink-features=AutomationControlled")
-    return args
+    return chromium_launch_args(
+        channel=channel,
+        hide_automation=bool(p.get("hide_automation_flags", True)),
+    )
 
 
 def context_options(profile: dict[str, Any] | None = None) -> dict[str, Any]:

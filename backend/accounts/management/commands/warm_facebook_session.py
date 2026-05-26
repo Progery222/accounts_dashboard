@@ -37,6 +37,23 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         applied = sync_accounts_browser_env()
+        from accounts.refresh_state import clear_stale_refresh_runs_if_needed
+        from accounts.models import AutoRefreshState, RefreshAllState
+
+        cleared = clear_stale_refresh_runs_if_needed()
+        auto = AutoRefreshState.get()
+        rr = RefreshAllState.get()
+        if auto.is_running or rr.is_running:
+            raise CommandError(
+                "Сейчас идёт автообновление или «собрать всех». "
+                "Остановите в UI или: python manage.py clear_refresh_run_state",
+            )
+        if cleared:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"Сброшен зависший прогон: {', '.join(cleared)}",
+                ),
+            )
         state_path = self._resolve_state_path(options.get("state_file") or "")
         if not state_path:
             raise CommandError(

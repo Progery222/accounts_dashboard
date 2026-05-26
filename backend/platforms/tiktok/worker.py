@@ -853,10 +853,15 @@ async def _create_tiktok_context(
     co = context_options(bp)
     _default_channel = "chrome" if sys.platform != "linux" else ""
     channel = os.environ.get("TIKTOK_BROWSER_CHANNEL", _default_channel).strip()
+    from platforms.worker_utils import playwright_ignore_automation_defaults
+
     launch_kwargs: dict = {
         "headless": headless,
-        "args": list(launch_args(bp)),
+        "args": list(launch_args(bp, channel=channel or None)),
         "locale": co.get("locale", "en-US"),
+        **playwright_ignore_automation_defaults(
+            enabled=bool(bp.get("hide_automation_flags", True)),
+        ),
     }
     if co.get("viewport"):
         launch_kwargs["viewport"] = co["viewport"]
@@ -871,11 +876,14 @@ async def _create_tiktok_context(
         file=sys.stderr,
     )
 
+    from platforms.tiktok.sadcaptcha import launch_tiktok_persistent_context
+
     last_exc: BaseException | None = None
     context = None
     for attempt in range(2):
         try:
-            context = await pw.chromium.launch_persistent_context(
+            context = await launch_tiktok_persistent_context(
+                pw,
                 str(ud_dir),
                 **launch_kwargs,
             )

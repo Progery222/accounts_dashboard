@@ -6,10 +6,13 @@ from __future__ import annotations
 import csv
 import io
 import json
-from datetime import datetime, timedelta
-from typing import Any
+import random
+import time
+from datetime import date, datetime, timedelta
+from typing import Any, Callable
 
 from django.db import transaction
+from django.db.utils import OperationalError
 from django.utils import timezone
 
 from .models import (
@@ -29,8 +32,36 @@ SECTION_ACCOUNT_SNAPSHOTS = "ACCOUNT_SNAPSHOTS"
 SECTION_POST_SNAPSHOTS = "POST_SNAPSHOTS"
 SECTION_AUTO_REFRESH_POINTS = "AUTO_REFRESH_POINTS"
 
+POST_SNAPSHOT_IMPORT_CHUNK = 400
+_SNAPSHOT_IMPORT_DEADLOCK_RETRIES = 6
+
 # Ключ поста в CSV: (platform, username lower, external_id)
 PostExportKey = tuple[str, str, str]
+
+
+def _is_deadlock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    if "deadlock" in str(exc).lower():
+        return True
+    cause = getattr(exc, "__cause__", None)
+    pgcode = getattr(cause, "pgcode", None) or getattr(cause, "sqlstate", None)
+    return pgcode == "40P01"
+
+
+def _run_with_deadlock_retry(fn: Callable[[], Any], *, max_attempts: int = _SNAPSHOT_IMPORT_DEADLOCK_RETRIES) -> Any:
+    last: OperationalError | None = None
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except OperationalError as exc:
+            last = exc
+            if not _is_deadlock_error(exc) or attempt >= max_attempts - 1:
+                raise
+            time.sleep(min(2.0, 0.08 * (2 ** attempt)) + random.random() * 0.05)
+    if last is not None:
+        raise last
+    raise RuntimeError("deadlock retry exhausted")  # pragma: no cover
 
 
 def _norm_username(username: str) -> str:
@@ -151,6 +182,79 @@ def _normalize_imported_chart_times(
     return True
 
 
+def _chart_totals_look_flat(rows: list[dict[str, Any]]) -> bool:
+    totals = [int(r.get("view_count_total") or 0) for r in rows]
+    if len(totals) < 2:
+        return False
+    end = max(totals)
+    spread = max(totals) - min(totals)
+    if spread < max(800, end * 0.003):
+        return True
+    # Импорт: десятки точек с одним total и скачок только в конце — spread большой, график всё равно «плоский».
+    from collections import Counter
+
+    _mode, freq = Counter(totals).most_common(1)[0]
+    return freq >= max(3, int(len(rows) * 0.65))
+
+
+def _normalize_imported_chart_totals(
+    rows: list[dict[str, Any]],
+    *,
+    force: bool = False,
+) -> bool:
+    """
+    После импорта CSV все точки часто несут один и тот же view_count_total (срез «сейчас»),
+    а дельты по часам — нули. График Live тогда плоский, а справа — скачок до актуального TOTAL.
+
+    Пересобирает view_count_total по view_delta_from_prev_point / platform_deltas / day_delta.
+    """
+    if not rows or len(rows) < 2:
+        return False
+    rows.sort(key=lambda r: r["measured_at"])
+    if not force and not _chart_totals_look_flat(rows):
+        return False
+
+    end_total = int(rows[-1].get("view_count_total") or 0)
+    day_delta = int(rows[-1].get("view_delta_from_day_start") or 0)
+    if day_delta <= 0:
+        day_delta = sum(max(0, int(r.get("view_delta_from_prev_point") or 0)) for r in rows)
+
+    alloc = [max(0, int(r.get("view_delta_from_prev_point") or 0)) for r in rows]
+    if sum(alloc) <= 0:
+        alloc = []
+        for r in rows:
+            pd = r.get("platform_deltas") or {}
+            if isinstance(pd, dict):
+                alloc.append(sum(max(0, int(v)) for v in pd.values()))
+            else:
+                alloc.append(0)
+
+    if sum(alloc) <= 0 and day_delta > 0:
+        n = len(rows)
+        per = day_delta // n
+        rem = day_delta % n
+        alloc = [per + (1 if i < rem else 0) for i in range(n)]
+
+    if sum(alloc) <= 0:
+        return False
+
+    if day_delta <= 0:
+        day_delta = sum(alloc)
+
+    base = max(0, end_total - day_delta)
+    cum = base
+    prev_total = base
+    for i, row in enumerate(rows):
+        d = max(0, int(alloc[i]))
+        cum += d
+        row["view_count_total"] = cum
+        row["view_delta_from_prev_point"] = d
+        row["view_delta_from_day_start"] = cum - base
+        prev_total = cum
+    rows[0]["view_delta_from_prev_point"] = max(0, int(alloc[0]))
+    return True
+
+
 def _parse_platform_deltas(cell: str) -> dict[str, int]:
     cell = (cell or "").strip()
     if not cell:
@@ -171,6 +275,134 @@ def _parse_platform_deltas(cell: str) -> dict[str, int]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _bulk_upsert_post_snapshots(snaps: list[PostSnapshot]) -> None:
+    if not snaps:
+        return
+    PostSnapshot.objects.bulk_create(
+        snaps,
+        update_conflicts=True,
+        unique_fields=["post", "date"],
+        update_fields=["view_count", "like_count", "comment_count"],
+    )
+
+
+def _import_post_snapshots_rows(
+    post_snap_rows: list[list[str]],
+    *,
+    post_rows_present: bool,
+    result: dict[str, Any],
+    row_err: Callable[[str, int, str], None],
+) -> None:
+    header = [c.strip() for c in post_snap_rows[0]]
+    hmap = {h.lower(): i for i, h in enumerate(header)}
+    missing = [
+        k for k in ("account_platform", "account_username", "post_external_id", "date")
+        if k not in hmap
+    ]
+    if missing:
+        row_err(
+            SECTION_POST_SNAPSHOTS,
+            1,
+            f"В шапке POST_SNAPSHOTS не хватает колонок: {', '.join(missing)}",
+        )
+        return
+
+    parsed: list[tuple[int, str, str, str, date, int, int, int]] = []
+    for rnum, row in enumerate(post_snap_rows[1:], start=2):
+        if not row or not any(c.strip() for c in row):
+            continue
+
+        def col(name: str, default="") -> str:
+            j = hmap.get(name.lower())
+            if j is None or j >= len(row):
+                return default
+            return row[j] if row[j] is not None else default
+
+        pl = col("account_platform").strip().lower()
+        un = _norm_username(col("account_username"))
+        ext = col("post_external_id").strip()
+        snap_date = _parse_date(col("date"))
+        if not pl or not un or not ext or snap_date is None:
+            row_err(
+                SECTION_POST_SNAPSHOTS,
+                rnum,
+                "Пустые/некорректные account_platform, account_username, post_external_id или date",
+            )
+            continue
+        try:
+            vc = _parse_int(col("view_count"))
+            lc = _parse_int(col("like_count"))
+            cc = _parse_int(col("comment_count"))
+        except ValueError as e:
+            row_err(SECTION_POST_SNAPSHOTS, rnum, f"Некорректное число: {e}")
+            continue
+        parsed.append((rnum, pl, un, ext, snap_date, vc, lc, cc))
+
+    if not parsed:
+        return
+
+    # Стабильный порядок блокировок — меньше deadlock с refresh/scheduler.
+    parsed.sort(key=lambda r: (r[1], r[2], r[3], r[4]))
+
+    post_cache: dict[tuple[str, str, str], Post] = {}
+
+    def _ensure_post(pl: str, un: str, ext: str, acc: Account, vc: int, lc: int, cc: int) -> Post:
+        key = (pl, un, ext)
+        cached = post_cache.get(key)
+        if cached is not None:
+            return cached
+
+        def _create() -> Post:
+            post, created = Post.objects.get_or_create(
+                account=acc,
+                external_id=ext,
+                defaults={
+                    "view_count": vc,
+                    "like_count": lc,
+                    "comment_count": cc,
+                },
+            )
+            if created:
+                result["posts_created"] += 1
+            elif not post_rows_present:
+                post.view_count = max(post.view_count, vc)
+                post.like_count = max(post.like_count, lc)
+                post.comment_count = max(post.comment_count, cc)
+                post.save(update_fields=["view_count", "like_count", "comment_count"])
+            post_cache[key] = post
+            return post
+
+        return _run_with_deadlock_retry(_create)
+
+    snap_objs: list[PostSnapshot] = []
+    for rnum, pl, un, ext, snap_date, vc, lc, cc in parsed:
+        try:
+            acc = _resolve_account(pl, un)
+        except Account.DoesNotExist:
+            row_err(SECTION_POST_SNAPSHOTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
+            continue
+        post = _ensure_post(pl, un, ext, acc, vc, lc, cc)
+        snap_objs.append(
+            PostSnapshot(
+                post=post,
+                date=snap_date,
+                view_count=vc,
+                like_count=lc,
+                comment_count=cc,
+            ),
+        )
+
+    for i in range(0, len(snap_objs), POST_SNAPSHOT_IMPORT_CHUNK):
+        chunk = snap_objs[i : i + POST_SNAPSHOT_IMPORT_CHUNK]
+
+        def _upsert_chunk(c=chunk) -> None:
+            with transaction.atomic():
+                _bulk_upsert_post_snapshots(c)
+
+        _run_with_deadlock_retry(_upsert_chunk)
+        result["post_snapshots_upserted"] += len(chunk)
 
 
 def build_snapshot_csv() -> bytes:
@@ -454,6 +686,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
         "post_snapshots_upserted": 0,
         "auto_refresh_points_imported": 0,
         "auto_refresh_chart_times_remapped": False,
+        "auto_refresh_chart_totals_rebuilt": False,
         "errors": [],
     }
 
@@ -478,6 +711,8 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
         return result
 
     today = timezone.now().date()
+    has_post_snapshots_section = bool(post_snap_rows)
+    has_account_snapshots_section = bool(acc_snap_rows)
 
     def row_err(section: str, row_idx: int, msg: str):
         result["errors"].append({"section": section, "row": row_idx, "message": msg})
@@ -624,21 +859,22 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     else:
                         result["accounts_created"] += 1
 
-                    snap, _ = obj.take_snapshot_if_needed()
-                    snap.follower_count = obj.follower_count
-                    snap.like_count = obj.like_count
-                    snap.view_count = obj.view_count
-                    snap.post_count = obj.post_count
-                    snap.link_click_count = obj.link_click_count
-                    snap.save(
-                        update_fields=[
-                            "follower_count",
-                            "like_count",
-                            "view_count",
-                            "post_count",
-                            "link_click_count",
-                        ]
-                    )
+                    if not has_account_snapshots_section:
+                        snap, _ = obj.take_snapshot_if_needed()
+                        snap.follower_count = obj.follower_count
+                        snap.like_count = obj.like_count
+                        snap.view_count = obj.view_count
+                        snap.post_count = obj.post_count
+                        snap.link_click_count = obj.link_click_count
+                        snap.save(
+                            update_fields=[
+                                "follower_count",
+                                "like_count",
+                                "view_count",
+                                "post_count",
+                                "link_click_count",
+                            ]
+                        )
 
     # ── POSTS ──
     if post_rows:
@@ -715,12 +951,13 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     else:
                         result["posts_created"] += 1
 
-                    post.take_snapshot_if_needed()
-                    post.snapshots.filter(date=today).update(
-                        view_count=post.view_count,
-                        like_count=post.like_count,
-                        comment_count=post.comment_count,
-                    )
+                    if not has_post_snapshots_section:
+                        post.take_snapshot_if_needed()
+                        post.snapshots.filter(date=today).update(
+                            view_count=post.view_count,
+                            like_count=post.like_count,
+                            comment_count=post.comment_count,
+                        )
 
     # ── ACCOUNT_SNAPSHOTS ──
     if acc_snap_rows:
@@ -792,85 +1029,12 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
 
     # ── POST_SNAPSHOTS ──
     if post_snap_rows:
-        header = [c.strip() for c in post_snap_rows[0]]
-        hmap = {h.lower(): i for i, h in enumerate(header)}
-        missing = [
-            k for k in ("account_platform", "account_username", "post_external_id", "date")
-            if k not in hmap
-        ]
-        if missing:
-            row_err(
-                SECTION_POST_SNAPSHOTS,
-                1,
-                f"В шапке POST_SNAPSHOTS не хватает колонок: {', '.join(missing)}",
-            )
-        else:
-            with transaction.atomic():
-                for rnum, row in enumerate(post_snap_rows[1:], start=2):
-                    if not row or not any(c.strip() for c in row):
-                        continue
-
-                    def col(name: str, default="") -> str:
-                        j = hmap.get(name.lower())
-                        if j is None or j >= len(row):
-                            return default
-                        return row[j] if row[j] is not None else default
-
-                    pl = col("account_platform").strip().lower()
-                    un = _norm_username(col("account_username"))
-                    ext = col("post_external_id").strip()
-                    snap_date = _parse_date(col("date"))
-                    if not pl or not un or not ext or snap_date is None:
-                        row_err(
-                            SECTION_POST_SNAPSHOTS,
-                            rnum,
-                            "Пустые/некорректные account_platform, account_username, post_external_id или date",
-                        )
-                        continue
-                    try:
-                        acc = _resolve_account(pl, un)
-                    except Account.DoesNotExist:
-                        row_err(SECTION_POST_SNAPSHOTS, rnum, f"Аккаунт не найден: {pl}/@{un}")
-                        continue
-
-                    try:
-                        vc = _parse_int(col("view_count"))
-                        lc = _parse_int(col("like_count"))
-                        cc = _parse_int(col("comment_count"))
-                    except ValueError as e:
-                        row_err(SECTION_POST_SNAPSHOTS, rnum, f"Некорректное число: {e}")
-                        continue
-
-                    post, post_created = Post.objects.get_or_create(
-                        account=acc,
-                        external_id=ext,
-                        defaults={
-                            "view_count": vc,
-                            "like_count": lc,
-                            "comment_count": cc,
-                        },
-                    )
-                    if post_created:
-                        result["posts_created"] += 1
-                    elif not post_rows:
-                        # Секции POSTS нет в файле — подтянуть метрики из снапшота.
-                        post.view_count = max(post.view_count, vc)
-                        post.like_count = max(post.like_count, lc)
-                        post.comment_count = max(post.comment_count, cc)
-                        post.save(
-                            update_fields=["view_count", "like_count", "comment_count"],
-                        )
-
-                    PostSnapshot.objects.update_or_create(
-                        post=post,
-                        date=snap_date,
-                        defaults={
-                            "view_count": vc,
-                            "like_count": lc,
-                            "comment_count": cc,
-                        },
-                    )
-                    result["post_snapshots_upserted"] += 1
+        _import_post_snapshots_rows(
+            post_snap_rows,
+            post_rows_present=bool(post_rows),
+            result=result,
+            row_err=row_err,
+        )
 
     # ── AUTO_REFRESH_POINTS (графики Live / auto-refresh-series) ──
     if auto_refresh_rows:
@@ -930,6 +1094,9 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                 if parsed_rows:
                     parsed_rows.sort(key=lambda r: r["measured_at"])
                     result["auto_refresh_chart_times_remapped"] = _normalize_imported_chart_times(
+                        parsed_rows,
+                    )
+                    result["auto_refresh_chart_totals_rebuilt"] = _normalize_imported_chart_totals(
                         parsed_rows,
                     )
                     with transaction.atomic():

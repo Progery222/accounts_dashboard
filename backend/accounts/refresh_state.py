@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import timedelta
 
 from django.utils import timezone
@@ -90,6 +91,78 @@ def clear_abandoned_cancelled_runs(*, max_minutes: float = 8.0) -> list[str]:
             ),
         )
     return cleared
+
+
+def finalize_auto_refresh_run_detail_cancelled() -> None:
+    """Пометить queued/running в run_detail как cancelled (после «Остановить»)."""
+    from django.db import transaction
+
+    from .models import AutoRefreshState
+
+    try:
+        with transaction.atomic():
+            st = AutoRefreshState.objects.select_for_update().get(pk=1)
+            rd = dict(st.run_detail or {})
+            items = [dict(x) for x in (rd.get("items") or [])]
+            changed = False
+            for it in items:
+                stt = str(it.get("status") or "")
+                if stt in ("queued", "running"):
+                    it["status"] = "cancelled"
+                    it["detail"] = "не обработан (остановка или прерывание)"
+                    it["worker"] = None
+                    changed = True
+            if changed:
+                rd["items"] = items
+                st.run_detail = rd
+                st.save(update_fields=["run_detail", "updated_at"])
+    except Exception as exc:
+        print(f"[refresh_state] finalize run_detail cancelled failed: {exc}", file=sys.stderr)
+
+
+def force_stop_auto_refresh(*, reason: str = "Остановлено пользователем.") -> None:
+    """Сбросить UI сразу; закрытие Playwright — в фоне (не блокировать HTTP)."""
+    import sys
+    import threading
+
+    from .models import AutoRefreshState
+
+    st = AutoRefreshState.get()
+    if not st.is_running and not st.cancel_requested:
+        return
+    now = timezone.now()
+    st.cancel_requested = True
+    st.save(update_fields=["cancel_requested", "updated_at"])
+    finalize_auto_refresh_run_detail_cancelled()
+    if st.is_running:
+        clear_stuck_refresh_run(reason=reason[:500], models=("auto",))
+    st.refresh_from_db()
+    st.is_running = False
+    st.cancel_requested = False
+    st.current_account = ""
+    if not st.finished_at:
+        st.finished_at = now
+    st.last_error = (reason or "")[:500]
+    st.save(
+        update_fields=[
+            "is_running",
+            "cancel_requested",
+            "current_account",
+            "finished_at",
+            "last_error",
+            "updated_at",
+        ],
+    )
+
+    def _interrupt_workers() -> None:
+        try:
+            from .refresh_interrupt import interrupt_refresh_playwright_workers
+
+            interrupt_refresh_playwright_workers(label="auto_refresh_force_stop")
+        except Exception as exc:
+            print(f"[auto_refresh_force_stop] interrupt failed: {exc}", file=sys.stderr)
+
+    threading.Thread(target=_interrupt_workers, daemon=True, name="refresh-force-stop").start()
 
 
 def clear_stale_refresh_runs_if_needed() -> list[str]:

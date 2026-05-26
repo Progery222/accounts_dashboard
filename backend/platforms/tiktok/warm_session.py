@@ -134,8 +134,18 @@ async def _wait_manual_login_if_needed(page, _wu, *, timeout_sec: int = 180) -> 
         raise RuntimeError(
             "Не удалось дождаться входа в TikTok. Войдите вручную и повторите."
         ) from exc
+    await _try_sadcaptcha_on_page(page)
     if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
         await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
+
+
+async def _try_sadcaptcha_on_page(page) -> None:
+    try:
+        from platforms.tiktok.sadcaptcha import solve_tiktok_captcha_for_warm
+
+        await solve_tiktok_captcha_for_warm(page)
+    except Exception as exc:
+        _LOG(f"[warm_tiktok] SadCaptcha: {exc}")
 
 
 def _emit_warm_progress(
@@ -202,10 +212,12 @@ async def warm_tiktok_on_page(
         await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
 
     await _wait_manual_login_if_needed(page, _wu)
+    await _try_sadcaptcha_on_page(page)
     if hasattr(_wu, "wait_for_anti_bot_clear"):
         await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
 
     await page.wait_for_timeout(2000)
+    await _try_sadcaptcha_on_page(page)
     _LOG(
         f"[warm_tiktok] прогрев ~{duration_sec / 60:.1f} мин "
         f"(просмотр: {watch_duration_summary(cfg)}, "
@@ -236,6 +248,7 @@ async def warm_tiktok_on_page(
             _LOG("[warm_tiktok] остановка по запросу пользователя")
             stats["cancelled"] = True
             break
+        await _try_sadcaptcha_on_page(page)
         if hasattr(_wu, "wait_for_anti_bot_clear"):
             try:
                 await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
@@ -310,6 +323,16 @@ async def run_warm_tiktok_session(
     from platforms.tiktok.worker import _create_tiktok_context, _load_worker_utils
 
     sync_accounts_browser_env()
+    from platforms.tiktok.sadcaptcha import sadcaptcha_enabled, sync_sadcaptcha_env
+
+    sync_sadcaptcha_env()
+    if sadcaptcha_enabled():
+        _LOG("[warm_tiktok] SadCaptcha: включён (API + drag)")
+    else:
+        _LOG(
+            "[warm_tiktok] WARNING: SadCaptcha выключен — задайте SADCAPTCHA_API_KEY "
+            "в backend/config/worker_accounts.env",
+        )
     _wu = _load_worker_utils()
     if _wu is None:
         raise RuntimeError("worker_utils недоступен")

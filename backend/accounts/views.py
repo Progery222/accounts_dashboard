@@ -31,7 +31,7 @@ from django.db.models import (
 )
 from django.db.models.functions import Coalesce
 from django.db import transaction
-from django.db.utils import OperationalError, ProgrammingError
+from django.db.utils import InterfaceError, OperationalError, ProgrammingError
 from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, action
 from rest_framework.parsers import JSONParser, MultiPartParser
@@ -59,7 +59,7 @@ from .serializers import (
     PostSerializer,
     ProfileSerializer,
 )
-from .snapshot_io import build_snapshot_csv, import_snapshot_csv
+from .snapshot_io import build_snapshot_csv, import_snapshot_csv, _is_deadlock_error
 from platforms.profile_unavailable import (
     is_profile_unavailable_error,
     user_visible_profile_unavailable_error,
@@ -137,6 +137,11 @@ def _effective_account_delta_period_days(request) -> int:
 
 def _scrape(account: Account) -> dict:
     """Fetch fresh data for any platform. Returns account fields + '_posts' list."""
+    from .refresh_cancel import RefreshCancelledError, raise_if_refresh_cancel_requested
+
+    # Не держим соединение с БД открытым во время Playwright/HTTP (минуты).
+    release_db_for_long_task()
+    raise_if_refresh_cancel_requested()
     username = account.username
     platform = account.platform
 
@@ -385,6 +390,18 @@ def _restore_account_updated_at(account_id: int, preserved) -> None:
     Account.objects.filter(pk=account_id).update(updated_at=preserved)
 
 
+def _account_refresh_baseline(account: Account) -> dict:
+    from .refresh_cancel import account_refresh_baseline
+
+    return account_refresh_baseline(account)
+
+
+def _restore_account_refresh_baseline(account_id: int, baseline: dict | None) -> None:
+    from .refresh_cancel import restore_account_refresh_baseline
+
+    restore_account_refresh_baseline(account_id, baseline)
+
+
 def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -> bool:
     """Успешное обновление для UI «обновлён»: не недоступный профиль и не «обнуление» при ненулевой базе."""
     if bool(getattr(account, "profile_unavailable", False)):
@@ -540,20 +557,46 @@ def _interleave_accounts_by_platform(items: list[Account]) -> list[Account]:
     return out
 
 
+from .db_connections import (  # noqa: E402 — re-export for apps / tests
+    ensure_fresh_db_connections,
+    release_db_for_long_task,
+    run_with_db_reconnect,
+    stale_db_connection_error as _stale_db_connection_error,
+)
+
+
+def humanize_refresh_run_detail(exc: BaseException) -> str:
+    """Короткий текст ошибки для run_detail / CSV (без англ. psycopg по умолчанию)."""
+    if _stale_db_connection_error(exc):
+        return (
+            "Соединение с базой разорвано (долгий запрос или перезапуск Django). "
+            "Запустите обновление снова."
+        )
+    detail = str(exc).replace("\r\n", " ").replace("\n", " ").strip()
+    if len(detail) > 800:
+        detail = detail[:797] + "..."
+    return detail
+
+
 def _format_refresh_error(account: Account, exc: BaseException) -> tuple[str, int]:
     _mark_profile_unavailable_if_applicable(account, exc)
     if isinstance(exc, ValueError):
         return user_visible_profile_unavailable_error(str(exc)), status.HTTP_400_BAD_REQUEST
+    if _stale_db_connection_error(exc):
+        return humanize_refresh_run_detail(exc), status.HTTP_500_INTERNAL_SERVER_ERROR
     # 500: внутренняя ошибка съёма/БД — не «шлюз»; текст в detail для клиента и лог для сервера.
     return f"Ошибка: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
 def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -> tuple[Account | None, str | None, int | None]:
+    from .refresh_cancel import RefreshCancelledError
     from .refresh_priority import account_refresh_priority_session
 
     try:
         with account_refresh_priority_session():
             return _refresh_with_retry(account, scraped=scraped), None, None
+    except RefreshCancelledError:
+        return None, "Остановлено пользователем", None
     except Exception as exc:
         logger.warning(
             "refresh.account_failed",
@@ -577,7 +620,14 @@ def _refresh_link_clicks_for_accounts(accounts: list[Account], *, log_prefix: st
     from integrations.links_client import links_api_configured
     from integrations.links_sync import begin_refresh_all_links, refresh_link_clicks_batch
 
-    if not links_api_configured() or not accounts:
+    if not accounts:
+        return None
+    if not links_api_configured():
+        print(
+            f"[{log_prefix}] link clicks: skip (Links API не настроен)",
+            file=sys.stderr,
+            flush=True,
+        )
         return None
     result = refresh_link_clicks_batch(accounts)
     begin_refresh_all_links(accounts)
@@ -586,6 +636,7 @@ def _refresh_link_clicks_for_accounts(accounts: list[Account], *, log_prefix: st
         f"changed={result.get('changed', 0)} skipped={result.get('skipped', 0)} "
         f"errors={len(result.get('errors') or [])}",
         file=sys.stderr,
+        flush=True,
     )
     return result
 
@@ -630,6 +681,8 @@ def _mark_bulk_refresh_queued_cancelled(state: AutoRefreshState) -> None:
 
 def _run_bulk_refresh_background(account_ids: list[int]) -> None:
     from django.db import close_old_connections
+
+    from .refresh_cancel import RefreshCancelledError
 
     close_old_connections()
     state = AutoRefreshState.get()
@@ -749,11 +802,13 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                     if is_refresh_cancel_requested():
                         stop_requested.set()
                         return
+                    release_db_for_long_task()
                     warm_tracker.wait_warm_before_refresh(account.platform)
                     if is_refresh_cancel_requested():
                         stop_requested.set()
                         return
                     attempted_network = False
+                    refresh_baseline = None
                     try:
                         if stop_requested.is_set():
                             return
@@ -790,6 +845,9 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             if is_refresh_cancel_requested():
                                 stop_requested.set()
                                 return
+                            ensure_fresh_db_connections()
+                            account = Account.objects.select_related("profile").get(pk=account.pk)
+                            refresh_baseline = _account_refresh_baseline(account)
                             with _account_refresh_mutex(account.id):
                                 Account.objects.filter(pk=account.pk).update(
                                     profile_unavailable=False,
@@ -803,11 +861,24 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 refreshed, detail, _ = _refresh_account_for_api(
                                     account, scraped=scraped,
                                 )
+                            if refreshed is not None and is_refresh_cancel_requested():
+                                _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                                refreshed = None
+                                detail = "Остановлено пользователем"
                             if refreshed is not None:
                                 _persist_auto_refresh_run_item(
                                     account.id, status="done", worker=None, detail="",
                                 )
                                 _mark_progress(success=True, failed=False)
+                            elif detail and "Остановлен" in str(detail):
+                                _persist_auto_refresh_run_item(
+                                    account.id,
+                                    status="cancelled",
+                                    worker=None,
+                                    detail=str(detail)[:800],
+                                )
+                                _mark_progress(success=False, failed=False)
+                                stop_requested.set()
                             else:
                                 err_msg = str(detail or "")
                                 _persist_auto_refresh_run_item(
@@ -818,6 +889,17 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 )
                                 _mark_progress(success=False, failed=True, last_error=err_msg)
                                 errors_out.append({"id": account.id, "detail": detail})
+                    except RefreshCancelledError:
+                        if attempted_network:
+                            _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                        _persist_auto_refresh_run_item(
+                            account.id,
+                            status="cancelled",
+                            worker=None,
+                            detail="Остановлено пользователем",
+                        )
+                        _mark_progress(success=False, failed=False)
+                        stop_requested.set()
                     except Exception as e:
                         if account.platform == Platform.FACEBOOK:
                             from platforms.facebook.rate_limit import (
@@ -918,6 +1000,8 @@ def _schedule_skip_recent_cutoff() -> tuple[int, datetime.datetime | None]:
 
 
 def _persist_auto_refresh_run_item(account_id: int, **kwargs) -> None:
+    from .run_detail_items import merge_run_detail_item
+
     try:
         with transaction.atomic():
             st = AutoRefreshState.objects.select_for_update().get(pk=1)
@@ -927,7 +1011,7 @@ def _persist_auto_refresh_run_item(account_id: int, **kwargs) -> None:
             for i, it in enumerate(items):
                 if int(it.get("account_id", -1)) != aid:
                     continue
-                items[i] = {**it, **kwargs}
+                items[i] = merge_run_detail_item(it, kwargs)
                 break
             rd["items"] = items
             st.run_detail = rd
@@ -940,6 +1024,8 @@ def _persist_auto_refresh_run_item(account_id: int, **kwargs) -> None:
 
 
 def _persist_refresh_all_run_item(account_id: int, **kwargs) -> None:
+    from .run_detail_items import merge_run_detail_item
+
     try:
         with transaction.atomic():
             st = RefreshAllState.objects.select_for_update().get(pk=1)
@@ -949,7 +1035,7 @@ def _persist_refresh_all_run_item(account_id: int, **kwargs) -> None:
             for i, it in enumerate(items):
                 if int(it.get("account_id", -1)) != aid:
                     continue
-                items[i] = {**it, **kwargs}
+                items[i] = merge_run_detail_item(it, kwargs)
                 break
             rd["items"] = items
             st.run_detail = rd
@@ -1180,6 +1266,7 @@ def _run_refresh_all_background(
     include_hidden_profiles: bool,
     download_csv: bool,
 ) -> None:
+    from .refresh_cancel import RefreshCancelledError
     from django.db import close_old_connections
 
     close_old_connections()
@@ -1293,6 +1380,7 @@ def _run_refresh_all_background(
                     if is_refresh_cancel_requested():
                         stop_requested.set()
                         return
+                    release_db_for_long_task()
                     warm_tracker.wait_warm_before_refresh(account.platform)
                     if is_refresh_cancel_requested():
                         stop_requested.set()
@@ -1305,6 +1393,7 @@ def _run_refresh_all_background(
                     }
                     row: dict | None = None
                     attempted_network = False
+                    refresh_baseline: dict | None = None
                     try:
                         if stop_requested.is_set():
                             return
@@ -1397,43 +1486,95 @@ def _run_refresh_all_background(
                                     key = (account.username or "").lstrip("@").strip().lower()
                                     scraped = ig_preload.get(key)
                                 attempted_network = True
+                                refresh_baseline = _account_refresh_baseline(account)
                                 with _account_refresh_mutex(account.id):
                                     _refresh_with_retry(account, scraped=scraped)
-                                account.refresh_from_db(
-                                    fields=[
-                                        "follower_count",
-                                        "like_count",
-                                        "view_count",
-                                        "post_count",
-                                        "link_click_count",
-                                        "updated_at",
-                                    ],
-                                )
-                                after = {
-                                    "follower_count": account.follower_count,
-                                    "like_count": account.like_count,
-                                    "view_count": account.view_count,
-                                    "post_count": account.post_count,
-                                }
-                                changed = {k: (after[k] != before[k]) for k in before}
-                                changed_count = sum(1 for v in changed.values() if v)
-                                status_label = "нет обновлений" if changed_count == 0 else "обновилось"
-                                row = {
-                                    "id": account.id,
-                                    "platform": account.platform,
-                                    "username": account.username,
-                                    "status": status_label,
-                                    "follower_count": after["follower_count"],
-                                    "follower_delta": after["follower_count"] - before["follower_count"],
-                                    "like_count": after["like_count"],
-                                    "like_delta": after["like_count"] - before["like_count"],
-                                    "view_count": after["view_count"],
-                                    "view_delta": after["view_count"] - before["view_count"],
-                                    "post_count": after["post_count"],
-                                    "post_delta": after["post_count"] - before["post_count"],
-                                }
-                                _refresh_all_atomic_progress(failed=False)
-                                _persist_refresh_all_run_item(account.id, status="done", worker=None, detail="")
+                                if is_refresh_cancel_requested():
+                                    _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                                    row = {
+                                        "id": account.id,
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "status": "отменён",
+                                        "follower_count": before["follower_count"],
+                                        "follower_delta": 0,
+                                        "like_count": before["like_count"],
+                                        "like_delta": 0,
+                                        "view_count": before["view_count"],
+                                        "view_delta": 0,
+                                        "post_count": before["post_count"],
+                                        "post_delta": 0,
+                                        "detail": "Остановлено пользователем",
+                                    }
+                                    _refresh_all_atomic_progress(failed=False)
+                                    _persist_refresh_all_run_item(
+                                        account.id,
+                                        status="cancelled",
+                                        worker=None,
+                                        detail="Остановлено пользователем",
+                                    )
+                                    stop_requested.set()
+                                else:
+                                    account.refresh_from_db(
+                                        fields=[
+                                            "follower_count",
+                                            "like_count",
+                                            "view_count",
+                                            "post_count",
+                                            "link_click_count",
+                                            "updated_at",
+                                        ],
+                                    )
+                                    after = {
+                                        "follower_count": account.follower_count,
+                                        "like_count": account.like_count,
+                                        "view_count": account.view_count,
+                                        "post_count": account.post_count,
+                                    }
+                                    changed = {k: (after[k] != before[k]) for k in before}
+                                    changed_count = sum(1 for v in changed.values() if v)
+                                    status_label = "нет обновлений" if changed_count == 0 else "обновилось"
+                                    row = {
+                                        "id": account.id,
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "status": status_label,
+                                        "follower_count": after["follower_count"],
+                                        "follower_delta": after["follower_count"] - before["follower_count"],
+                                        "like_count": after["like_count"],
+                                        "like_delta": after["like_count"] - before["like_count"],
+                                        "view_count": after["view_count"],
+                                        "view_delta": after["view_count"] - before["view_count"],
+                                        "post_count": after["post_count"],
+                                        "post_delta": after["post_count"] - before["post_count"],
+                                    }
+                                    _refresh_all_atomic_progress(failed=False)
+                                    _persist_refresh_all_run_item(account.id, status="done", worker=None, detail="")
+                        except RefreshCancelledError:
+                            _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                            row = {
+                                "id": account.id,
+                                "platform": account.platform,
+                                "username": account.username,
+                                "status": "отменён",
+                                "follower_count": before["follower_count"],
+                                "follower_delta": 0,
+                                "like_count": before["like_count"],
+                                "like_delta": 0,
+                                "view_count": before["view_count"],
+                                "view_delta": 0,
+                                "post_count": before["post_count"],
+                                "post_delta": 0,
+                                "detail": "Остановлено пользователем",
+                            }
+                            _refresh_all_atomic_progress(failed=False)
+                            _persist_refresh_all_run_item(
+                                account.id,
+                                status="cancelled",
+                                worker=None,
+                                detail="Остановлено пользователем",
+                            )
+                            stop_requested.set()
                         except Exception as e:
                             if account.platform == Platform.FACEBOOK:
                                 from platforms.facebook.rate_limit import (
@@ -1600,29 +1741,56 @@ def _run_refresh_all_background(
 
 
 def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
-    account.refresh_from_db()
-    preserved_updated_at = account.updated_at
+    from .refresh_cancel import RefreshCancelledError
+
+    def _load_baseline() -> dict:
+        acc = Account.objects.get(pk=account.pk)
+        return _account_refresh_baseline(acc)
+
+    baseline = run_with_db_reconnect(_load_baseline)
     try:
-        return _apply_refresh_inner(account, scraped=scraped)
+        def _snapshot_before_scrape() -> tuple[Account, object]:
+            acc2 = Account.objects.get(pk=account.pk)
+            snap, _ = acc2.take_snapshot_if_needed()
+            logger.info(
+                "refresh.snapshot_before",
+                extra={
+                    "account_id": acc2.id,
+                    "platform": acc2.platform,
+                    "username": acc2.username,
+                    "snapshot_date": str(snap.date),
+                },
+            )
+            return acc2, snap
+
+        acc, snap = run_with_db_reconnect(_snapshot_before_scrape)
+        payload = scraped
+        if payload is None:
+            release_db_for_long_task()
+            from .refresh_cancel import raise_if_refresh_cancel_requested
+
+            raise_if_refresh_cancel_requested()
+            payload = _scrape(acc)
+        ensure_fresh_db_connections()
+        data = dict(payload)
+        snap_pk = snap.pk
+        return run_with_db_reconnect(
+            lambda: _apply_refresh_after_scrape(account.pk, snap_pk, data),
+        )
+    except RefreshCancelledError:
+        _restore_account_refresh_baseline(account.pk, baseline)
+        raise
     except Exception:
-        _restore_account_updated_at(account.pk, preserved_updated_at)
-        account.updated_at = preserved_updated_at
+        _restore_account_updated_at(account.pk, baseline.get("updated_at"))
         raise
 
 
-def _apply_refresh_inner(account: Account, scraped: dict | None = None) -> Account:
-    snap, _ = account.take_snapshot_if_needed()
-    logger.info(
-        "refresh.snapshot_before",
-        extra={
-            "account_id": account.id,
-            "platform": account.platform,
-            "username": account.username,
-            "snapshot_date": str(snap.date),
-        },
-    )
-    # Копия, чтобы .pop() не портил кэш preload при нескольких IG подряд.
-    data = dict(scraped) if scraped is not None else _scrape(account)
+def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Account:
+    from .refresh_cancel import raise_if_refresh_cancel_requested
+
+    raise_if_refresh_cancel_requested()
+    account = Account.objects.select_related("profile").get(pk=account_pk)
+    snap = AccountSnapshot.objects.get(pk=snap_pk)
     logger.info(
         "refresh.scrape_result",
         extra={
@@ -1703,6 +1871,8 @@ def _apply_refresh_inner(account: Account, scraped: dict | None = None) -> Accou
                 "Данные выглядят как ошибка или недоступность: нулевые метрики при ненулевых в базе "
                 "или профиль помечен недоступным. Обновление не применено."
             )
+
+        raise_if_refresh_cancel_requested()
 
         if has_posts_key and posts_authoritative:
             _mark_unseen_posts_missing(account, seen_post_external_ids)
@@ -1789,31 +1959,77 @@ def _apply_refresh_inner(account: Account, scraped: dict | None = None) -> Accou
                 like_count=0,
             ).update(like_count=account.like_count)
 
+    try:
+        from .auto_refresh_pulse import record_account_refresh_platform_delta
+
+        record_account_refresh_platform_delta(
+            account.platform,
+            stats_before["view_count"],
+            int(account.view_count or 0),
+            source="refresh",
+        )
+    except Exception as exc:
+        logger.warning(
+            "refresh.auto_refresh_pulse_failed",
+            extra={"account_id": account.id, "error": str(exc)},
+        )
+
     return account
 
 
 def _refresh_with_retry(account: Account, scraped: dict | None = None) -> Account:
     """
-    Avoid aggressive retry loops on flaky platforms:
-    - profile-not-found style errors fail fast;
-    - transient errors are retried a limited number of times.
+    Скрапинг один раз; запись в БД — с переподключением (после долгого worker).
     """
-    max_attempts = int(getattr(settings, "REFRESH_RETRY_ATTEMPTS", 2) or 2)
-    max_attempts = max(1, min(max_attempts, 3))
+    from .refresh_cancel import RefreshCancelledError, raise_if_refresh_cancel_requested
+
+    pk = account.pk
+    payload = dict(scraped) if scraped is not None else None
+
+    def _snapshot() -> object:
+        acc = Account.objects.get(pk=pk)
+        snap, _ = acc.take_snapshot_if_needed()
+        logger.info(
+            "refresh.snapshot_before",
+            extra={
+                "account_id": acc.id,
+                "platform": acc.platform,
+                "username": acc.username,
+                "snapshot_date": str(snap.date),
+            },
+        )
+        return snap
+
+    snap = run_with_db_reconnect(_snapshot)
+    snap_pk = snap.pk
+    if payload is None:
+        release_db_for_long_task()
+        raise_if_refresh_cancel_requested()
+        acc = Account.objects.get(pk=pk)
+        payload = _scrape(acc)
+
+    db_attempts = int(getattr(settings, "REFRESH_DB_RETRY_ATTEMPTS", 6) or 6)
+    db_attempts = max(3, min(db_attempts, 10))
+    payload_copy = dict(payload)
     last_exc: Exception | None = None
-    for attempt in range(max_attempts):
+    for attempt in range(db_attempts):
+        ensure_fresh_db_connections()
         try:
-            return _apply_refresh(account, scraped=scraped)
+            return run_with_db_reconnect(
+                lambda: _apply_refresh_after_scrape(pk, snap_pk, dict(payload_copy)),
+            )
         except ValueError:
+            raise
+        except RefreshCancelledError:
             raise
         except Exception as exc:
             last_exc = exc
             msg = str(exc).lower()
             if "не найден" in msg or "not found" in msg:
                 raise
-            if attempt >= max_attempts - 1:
+            if not _stale_db_connection_error(exc) or attempt >= db_attempts - 1:
                 raise
-            time.sleep(0.8 + attempt * 0.6)
+            time.sleep(0.4 + attempt * 0.5)
     assert last_exc is not None
     raise last_exc
 
@@ -2080,6 +2296,22 @@ class AccountViewSet(viewsets.ModelViewSet):
             )
         try:
             summary = import_snapshot_csv(upload)
+        except OperationalError as e:
+            if _is_deadlock_error(e):
+                return Response(
+                    {
+                        "detail": (
+                            "Импорт прерван из‑за блокировки в БД (deadlock), "
+                            "обычно это параллельное обновление аккаунтов. "
+                            "Подождите 10–20 с и повторите импорт."
+                        ),
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            return Response(
+                {"detail": f"Ошибка разбора CSV: {e}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except Exception as e:
             return Response(
                 {"detail": f"Ошибка разбора CSV: {e}"},
@@ -2444,6 +2676,8 @@ def summary(request):
     period_days = _effective_account_delta_period_days(request)
     cutoff = today - datetime.timedelta(days=period_days)
     view_delta_sum = 0
+    from .auto_refresh_pulse import clamp_platform_view_delta
+
     for acc in accounts:
         for key in total:
             total[key] += getattr(acc, key)
@@ -2456,13 +2690,13 @@ def summary(request):
             snap_total["post_count"] += snap.post_count
             snap_total["link_click_count"] += snap.link_click_count
             dv = int(acc.view_count or 0) - int(snap.view_count or 0)
-            if acc.platform in (Platform.INSTAGRAM, Platform.THREADS):
-                dv = max(0, dv)
+            dv = clamp_platform_view_delta(acc.platform, dv)
             view_delta_sum += dv
         else:
             # Нет снимка не старше cutoff — считаем baseline нулевым: весь текущий счётчик
             # участвует в дельте (актуально для окна 30д и «молодых» аккаунтов).
-            view_delta_sum += int(acc.view_count or 0)
+            dv = int(acc.view_count or 0)
+            view_delta_sum += dv
 
         p = acc.platform
         if p not in by_platform:
@@ -2475,8 +2709,10 @@ def summary(request):
                 "view_count": 0,
                 "post_count": 0,
                 "link_click_count": 0,
+                "view_delta": 0,
             }
         by_platform[p]["account_count"] += 1
+        by_platform[p]["view_delta"] += dv
         for key in ("follower_count", "like_count", "view_count", "post_count", "link_click_count"):
             by_platform[p][key] += getattr(acc, key)
 
@@ -2939,18 +3175,17 @@ def auto_refresh_stop(request):
         state = AutoRefreshState.get()
         if not state.is_running:
             return Response({"stopped": False, "detail": "Автообновление сейчас не выполняется."}, status=status.HTTP_409_CONFLICT)
-        state.cancel_requested = True
-        state.save(update_fields=["cancel_requested", "updated_at"])
-        from .refresh_interrupt import interrupt_refresh_playwright_workers
+        from .refresh_state import force_stop_auto_refresh
 
-        interrupt_refresh_playwright_workers(label="auto_refresh_stop")
+        force_stop_auto_refresh(reason="Остановлено пользователем.")
+        state.refresh_from_db(fields=["is_running", "cancel_requested", "current_account", "updated_at"])
         return Response(
             {
                 "stopped": True,
+                "is_running": bool(state.is_running),
                 "detail": (
-                    "Остановка запрошена. Текущий scrape может занять до 1–3 мин; "
-                    "если статус не сбросится — обновите страницу или "
-                    "manage.py clear_refresh_run_state --force"
+                    "Остановка принята. Статус сброшен; браузеры закрываются в фоне. "
+                    "Обновите страницу, если кнопка ещё «Остановка…»."
                 ),
             },
         )
