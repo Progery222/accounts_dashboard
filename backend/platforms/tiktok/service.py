@@ -413,6 +413,14 @@ def _is_tiktok_profile_unavailable_html(html: str) -> bool:
     return any(marker in text for marker in markers)
 
 
+def _tiktok_worker_timeout_sec() -> float:
+    raw = (os.environ.get("TIKTOK_WORKER_TIMEOUT_SEC") or "600").strip()
+    try:
+        return max(120.0, min(3600.0, float(raw)))
+    except ValueError:
+        return 600.0
+
+
 def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], dict]:
     # Read browser settings from Django settings so the subprocess
     # always gets the correct values even if os.environ wasn't updated.
@@ -439,7 +447,7 @@ def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], di
         payload = {"url": url, "target_post_count": int(target_post_count or 0)}
         # Всегда используем daemon worker pool: одно окно TikTok переиспользуется
         # между аккаунтами и не закрывается после каждого refresh.
-        data = call_worker(_WORKER, payload)
+        data = call_worker(_WORKER, payload, timeout_sec=_tiktok_worker_timeout_sec())
         if isinstance(data, list):
             # Backward compatibility with old worker payload.
             return _filter_profile_items(data, _extract_username_from_url(url)), {}

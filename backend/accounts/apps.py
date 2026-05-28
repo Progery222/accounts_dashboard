@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import timedelta
+from datetime import datetime, time as dt_time, timedelta
 from zoneinfo import ZoneInfo
 
 from django.apps import AppConfig
@@ -31,6 +31,8 @@ _queued_refresh_requested = False
 _queued_refresh_source = "scheduler"
 _queued_refresh_fast_start = False
 _queued_refresh_runs: list[tuple[str, bool]] = []
+_recovered_schedule_slots: set[tuple[str, str]] = set()
+_last_missed_slot_check_mono: float = 0.0
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +110,94 @@ def sync_schedule_from_db(*, force: bool = False) -> None:
             )
         except Exception as e:
             print(f"[scheduler] sync schedule from DB failed: {e}", file=sys.stderr)
+    try_recover_missed_schedule_slots()
+
+
+def _schedule_catchup_hours() -> float:
+    raw = (os.environ.get("AUTO_REFRESH_SCHEDULE_CATCHUP_HOURS") or "8").strip()
+    try:
+        return max(1.0, min(24.0, float(raw)))
+    except ValueError:
+        return 8.0
+
+
+def try_recover_missed_schedule_slots() -> None:
+    """
+    Если runserver не работал в момент слота (сон ПК, закрытый терминал), догнать
+    пропуск после старта Django в пределах AUTO_REFRESH_SCHEDULE_CATCHUP_HOURS.
+    """
+    global _last_missed_slot_check_mono
+    if _scheduler is None:
+        return
+    now_mono = time.monotonic()
+    if now_mono - _last_missed_slot_check_mono < 25.0:
+        return
+    _last_missed_slot_check_mono = now_mono
+
+    try:
+        from django.utils import timezone
+
+        from .models import AutoRefreshPoint, AutoRefreshState, RefreshAllState, RefreshScheduleConfig
+        from .refresh_state import clear_stale_refresh_runs_if_needed
+
+        cfg = RefreshScheduleConfig.get()
+        if not cfg.enabled or cfg.mode != "times":
+            return
+        clear_stale_refresh_runs_if_needed()
+        if AutoRefreshState.get().is_running or RefreshAllState.get().is_running:
+            return
+
+        now = timezone.now().astimezone(SCHEDULER_TZ)
+        today = now.date()
+        catchup = timedelta(hours=_schedule_catchup_hours())
+
+        for t in cfg.times or []:
+            slot = str(t).strip()
+            if not slot:
+                continue
+            key = (today.isoformat(), slot)
+            if key in _recovered_schedule_slots:
+                continue
+            try:
+                h, m = map(int, slot.split(":"))
+            except Exception:
+                continue
+            slot_dt = datetime.combine(today, dt_time(h, m), tzinfo=SCHEDULER_TZ)
+            if slot_dt > now:
+                continue
+            elapsed = now - slot_dt
+            if elapsed < timedelta(minutes=2):
+                continue
+            if elapsed > catchup:
+                _recovered_schedule_slots.add(key)
+                continue
+
+            slot_label = f"{h:02d}:{m:02d}"
+            already = AutoRefreshPoint.objects.filter(
+                local_date=today,
+                source="scheduler",
+                slot_label=slot_label,
+            ).exists()
+            if already:
+                _recovered_schedule_slots.add(key)
+                continue
+
+            _recovered_schedule_slots.add(key)
+            print(
+                f"[scheduler] пропущен слот {slot_label} (МСК) — запускаем догон "
+                f"({int(elapsed.total_seconds() // 60)} мин назад)",
+                file=sys.stderr,
+                flush=True,
+            )
+            threading.Thread(
+                target=_scheduled_refresh,
+                kwargs={"source": "scheduler", "fast_start": False},
+                daemon=True,
+                name=f"catchup-{slot_label}",
+            ).start()
+            return
+    except Exception as exc:
+        print(f"[scheduler] catch-up check failed: {exc}", file=sys.stderr, flush=True)
 
 
 def schedule_jobs_signature(config) -> tuple:
@@ -226,6 +316,22 @@ def _scheduler_enabled_from_env() -> bool:
     return True
 
 
+def _skip_accounts_startup_on_runserver_parent() -> bool:
+    """
+    При runserver с autoreload ready() вызывается дважды: в родителе-наблюдателе
+    (RUN_MAIN не задан) и в рабочем процессе (RUN_MAIN=true). Планировщик и reconcile
+    нужны только в рабочем процессе.
+
+    С ``runserver --noreload`` один процесс без RUN_MAIN — здесь НЕ пропускаем,
+    иначе APScheduler никогда не стартует и слоты 06:00 / 10:11 не срабатывают.
+    """
+    if "runserver" not in sys.argv:
+        return False
+    if "--noreload" in sys.argv:
+        return False
+    return os.environ.get("RUN_MAIN") != "true"
+
+
 class AccountsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "accounts"
@@ -233,7 +339,7 @@ class AccountsConfig(AppConfig):
     def ready(self):
         from . import signals  # noqa: F401
 
-        if "runserver" in sys.argv and os.environ.get("RUN_MAIN") != "true":
+        if _skip_accounts_startup_on_runserver_parent():
             return
         # При management-командах (migrate, makemigrations, test, ...) scheduler
         # не нужен — может мешать миграциям и валить тесты.
@@ -302,6 +408,7 @@ class AccountsConfig(AppConfig):
             _scheduler.start()
             print("[scheduler] started", file=sys.stderr)
             threading.Timer(2.0, lambda: sync_schedule_from_db(force=True)).start()
+            threading.Timer(5.0, try_recover_missed_schedule_slots).start()
         except Exception as e:
             print(f"[scheduler] failed to start: {e}")
 
@@ -360,16 +467,27 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         )
         return
     try:
-        if AutoRefreshState.get().is_running:
+        from .refresh_state import clear_stale_refresh_runs_if_needed
+
+        cleared = clear_stale_refresh_runs_if_needed()
+        if cleared:
             print(
-                "[scheduled_refresh] skip: уже идёт автообновление",
+                f"[scheduled_refresh] сброшен зависший прогон: {', '.join(cleared)}",
+                file=sys.stderr,
+                flush=True,
+            )
+        if AutoRefreshState.get().is_running:
+            _enqueue_scheduled_refresh(source=source, fast_start=fast_start)
+            print(
+                "[scheduled_refresh] в очереди: ещё идёт автообновление",
                 file=sys.stderr,
                 flush=True,
             )
             return
         if RefreshAllState.get().is_running:
+            _enqueue_scheduled_refresh(source=source, fast_start=fast_start)
             print(
-                "[scheduled_refresh] skip: идёт «Обновить всё»",
+                "[scheduled_refresh] в очереди: идёт «Обновить всё»",
                 file=sys.stderr,
                 flush=True,
             )
@@ -432,34 +550,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
     if not bool(getattr(cfg, "include_unavailable_accounts", False)):
         accounts_qs = accounts_qs.exclude(profile_unavailable=True)
     accounts_qs = apply_auto_refresh_scope(accounts_qs, cfg)
-    accounts = list(accounts_qs)
+    from .refresh_queue import order_accounts_for_refresh, queryset_order_by_staleness
 
-    def _interleave_accounts_by_platform(items: list) -> list:
-        """
-        Round-robin queue by platform to avoid head-of-line blocking
-        when many same-platform accounts are adjacent.
-        """
-        buckets: dict[str, list] = {}
-        platform_order: list[str] = []
-        for acc in items:
-            p = str(acc.platform)
-            if p not in buckets:
-                buckets[p] = []
-                platform_order.append(p)
-            buckets[p].append(acc)
-        out: list = []
-        while True:
-            pushed = False
-            for p in platform_order:
-                arr = buckets.get(p) or []
-                if arr:
-                    out.append(arr.pop(0))
-                    pushed = True
-            if not pushed:
-                break
-        return out
-
-    accounts = _interleave_accounts_by_platform(accounts)
+    accounts = order_accounts_for_refresh(list(queryset_order_by_staleness(accounts_qs)))
     print(
         f"[scheduled_refresh] start source={source} accounts={len(accounts)} "
         f"fast_start={fast_start}",
@@ -512,7 +605,27 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         state.last_error = ""
         state.started_at = timezone.now()
         state.finished_at = None
-        state.run_detail = {}
+        try:
+            worker_count_early = max(
+                1,
+                min(16, int(str(os.environ.get("AUTO_REFRESH_WORKERS", "1")).strip() or "1")),
+            )
+        except Exception:
+            worker_count_early = 1
+        state.run_detail = {
+            "items": [
+                {
+                    "account_id": a.id,
+                    "platform": a.platform,
+                    "username": a.username,
+                    "status": "queued",
+                    "worker": None,
+                    "detail": "в очереди",
+                }
+                for a in accounts
+            ],
+            "worker_count": worker_count_early,
+        }
         state.save(update_fields=[
             "is_running", "source", "cancel_requested", "total_accounts", "processed_accounts",
             "success_accounts", "failed_accounts", "current_account",
@@ -544,14 +657,6 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         # Предзапуск демонов — только если явно включён ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT
         # (иначе по одному окну на платформу при первом реальном запросе, без «шторма» окон).
         from django.conf import settings as dj_settings
-
-        if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
-            print("[scheduled_refresh] prewarm Playwright…", file=sys.stderr, flush=True)
-            try:
-                _prewarm_workers(accounts)
-                print("[scheduled_refresh] prewarm done", file=sys.stderr, flush=True)
-            except Exception as e:
-                print(f"[scheduled_refresh] prewarm workers failed: {e}", file=sys.stderr, flush=True)
 
         ig_preload: dict[str, dict] = {}
 
@@ -774,7 +879,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
                         with state_lock:
                             run_with_db_reconnect(_mark_current_account)
-                        _persist_run_item(account.id, status="running", worker=slot)
+                        _persist_run_item(
+                            account.id,
+                            status="running",
+                            worker=slot,
+                            detail="запуск браузера…",
+                        )
 
                         before = None
                         try:
@@ -863,6 +973,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     scraped = ig_preload.get(key)
                                 attempted_network = True
                                 refresh_baseline = _account_refresh_baseline(account)
+                                _persist_run_item(
+                                    account.id,
+                                    status="running",
+                                    worker=slot,
+                                    detail="съём данных…",
+                                )
                                 try:
                                     _refresh_with_retry(account, scraped=scraped)
                                 except RefreshCancelledError:
@@ -996,6 +1112,22 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             account_queue.finish(idx, account.platform)
 
             from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancel_poll
+
+            if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
+                print(
+                    "[scheduled_refresh] подъём окон Playwright (по платформам)…",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    _prewarm_workers(accounts, wait_browser_ready=True)
+                    print("[scheduled_refresh] окна Playwright готовы", file=sys.stderr, flush=True)
+                except Exception as e:
+                    print(
+                        f"[scheduled_refresh] подъём Playwright не удался: {e}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
             executor = ThreadPoolExecutor(max_workers=worker_count)
             futures = [executor.submit(_worker) for _ in range(worker_count)]

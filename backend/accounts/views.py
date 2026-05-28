@@ -536,25 +536,9 @@ def _refresh_platform_limits(accs: list[Account]) -> dict[str, int]:
 
 
 def _interleave_accounts_by_platform(items: list[Account]) -> list[Account]:
-    buckets: dict[str, list[Account]] = {}
-    platform_order: list[str] = []
-    for acc in items:
-        p = str(acc.platform)
-        if p not in buckets:
-            buckets[p] = []
-            platform_order.append(p)
-        buckets[p].append(acc)
-    out: list[Account] = []
-    while True:
-        pushed = False
-        for p in platform_order:
-            arr = buckets.get(p) or []
-            if arr:
-                out.append(arr.pop(0))
-                pushed = True
-        if not pushed:
-            break
-    return out
+    from .refresh_queue import interleave_accounts_by_platform
+
+    return interleave_accounts_by_platform(items)
 
 
 from .db_connections import (  # noqa: E402 — re-export for apps / tests
@@ -641,7 +625,7 @@ def _refresh_link_clicks_for_accounts(accounts: list[Account], *, log_prefix: st
     return result
 
 
-def _prewarm_workers(accounts: list[Account]) -> None:
+def _prewarm_workers(accounts: list[Account], *, wait_browser_ready: bool = False) -> None:
     """
     Start daemon workers upfront for platforms present in refresh_all batch.
     This opens one browser window per used platform at the beginning.
@@ -657,7 +641,7 @@ def _prewarm_workers(accounts: list[Account]) -> None:
     if not worker_paths:
         return
     try:
-        prewarm_workers(worker_paths)
+        prewarm_workers(worker_paths, wait_browser_ready=wait_browser_ready)
     except Exception as e:
         logger.warning("refresh.prewarm_failed", extra={"error": str(e)})
 
@@ -699,7 +683,9 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
         state.save(update_fields=["is_running", "finished_at", "last_error", "updated_at"])
         return
 
-    accounts = _interleave_accounts_by_platform(ordered)
+    from .refresh_queue import order_accounts_for_refresh
+
+    accounts = order_accounts_for_refresh(ordered)
     skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
     from .refresh_priority import account_refresh_priority_session
 
@@ -1275,14 +1261,15 @@ def _run_refresh_all_background(
     _prev_worker_autoclose = os.environ.get("WORKER_AUTOCLOSE_BROWSER_ON_EXIT")
     os.environ["WORKER_AUTOCLOSE_BROWSER_ON_EXIT"] = "1"
     try:
-        accounts_qs = Account.objects.all().order_by("platform", "id")
+        from .refresh_queue import order_accounts_for_refresh, queryset_order_by_staleness
+
+        accounts_qs = queryset_order_by_staleness(Account.objects.all())
         accounts_qs = _apply_visibility_filters(
             accounts_qs,
             include_hidden_platforms=include_hidden_platforms,
             include_hidden_profiles=include_hidden_profiles,
         )
-        accounts = list(accounts_qs)
-        accounts = _interleave_accounts_by_platform(accounts)
+        accounts = order_accounts_for_refresh(list(accounts_qs))
         worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
         _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
@@ -2947,8 +2934,16 @@ def refresh_schedule(request):
             )
         config.save()
 
-        if get_scheduler():
+        sched = get_scheduler()
+        if sched is not None:
             sync_schedule_from_db(force=True)
+        else:
+            print(
+                "[scheduler] POST /schedule/: планировщик не запущен — "
+                "слоты по времени не сработают. Перезапустите runserver.",
+                file=sys.stderr,
+                flush=True,
+            )
 
         return Response(_schedule_to_dict(config))
     except (ProgrammingError, OperationalError) as exc:

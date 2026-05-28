@@ -5,7 +5,8 @@ Invoked by Django через worker_pool как ``python .../worker.py --daemon`
 Отладка вручную: ``python platforms/facebook/worker.py --once path/to/payload.json``
 или ``--once '{"username":"pagename"}'``; либо ``python .../worker.py --daemon`` со строками JSON в stdin;
 
-Uses the shared persistent Chrome profile (force_persistent=True).
+Если есть ``facebook_state.json`` (импорт cookies в Настройках) — сессия из него;
+иначе persistent-профиль ``…/facebook_persistent`` или общий каталог AccountsStats.
 Runs headless=False with the window placed off-screen.
 
 Публичный скрапинг без обязательного входа: при «стене» логина всё равно
@@ -2509,11 +2510,8 @@ async def run_once(arg: dict) -> None:
     _wu = _load_worker_utils()
     try:
         async with async_playwright() as pw:
-            context, _browser = await _wu.launch_context(
-                pw, platform="facebook",
-                locale="ru-RU", force_persistent=True,
-            )
-            page = context.pages[0] if context.pages else await context.new_page()
+            context, _browser = await _launch_facebook_context(pw, _wu)
+            page = await _facebook_refresh_page(context)
             try:
                 result = await _run_with_page(username, page, _wu)
             except (KeyboardInterrupt, SystemExit):
@@ -2545,14 +2543,83 @@ def _payload_refresh_warm_enabled(payload: dict) -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _facebook_state_path(_wu) -> Path:
+    return _wu.state_file_path("facebook", _wu.default_profile_dir())
+
+
+async def _collapse_extra_facebook_pages(context) -> None:
+    """Одна вкладка: лишние about:blank после restore / сбойного перезапуска."""
+    while len(context.pages) > 1:
+        try:
+            await context.pages[-1].close()
+        except Exception:
+            break
+
+
+async def _launch_facebook_context(pw, _wu):
+    """
+    Один Chromium на демон: cookies из facebook_state.json, если файл есть.
+    force_persistent=True только без state — иначе «второе» окно без авторизации.
+    """
+    sf = _facebook_state_path(_wu)
+    force_persistent = not sf.exists()
+    if sf.exists():
+        print(
+            f"[facebook_worker] сессия из {sf.name} (импорт в Настройках → Facebook)",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            "[facebook_worker] WARNING: facebook_state.json нет — persistent-профиль "
+            "может быть без входа. Импортируйте cookies в Настройках.",
+            file=sys.stderr,
+            flush=True,
+        )
+    context, browser = await _wu.launch_context(
+        pw,
+        platform="facebook",
+        locale="ru-RU",
+        force_persistent=force_persistent,
+    )
+    await _collapse_extra_facebook_pages(context)
+    page = await _facebook_refresh_page(context)
+    try:
+        u = (page.url or "").strip().lower()
+        if not u or u.startswith("about:"):
+            await page.goto(
+                "https://www.facebook.com/",
+                wait_until="domcontentloaded",
+                timeout=NAV_TIMEOUT,
+            )
+    except Exception as exc:
+        print(
+            f"[facebook_worker] не удалось открыть facebook.com при старте: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return context, browser
+
+
+async def _facebook_refresh_page(context):
+    pages = list(context.pages)
+    if not pages:
+        return await context.new_page()
+    for p in pages:
+        try:
+            u = (p.url or "").strip().lower()
+            if u and u not in ("about:blank", "about:home", "about:newtab"):
+                return p
+        except Exception:
+            pass
+    return pages[0]
+
+
 async def daemon_main(*, cli_first_json: str | None = None) -> None:
     _wu = _load_worker_utils()
     async with async_playwright() as pw:
-        context, _browser = await _wu.launch_context(
-            pw, platform="facebook",
-            locale="ru-RU", force_persistent=True,
-        )
-        refresh_page = context.pages[0] if context.pages else await context.new_page()
+        context, _browser = await _launch_facebook_context(pw, _wu)
+        refresh_page = await _facebook_refresh_page(context)
         warm_page = None
         warm_task: asyncio.Task | None = None
         warm_progress_path: Path | None = None

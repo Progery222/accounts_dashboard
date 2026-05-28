@@ -219,17 +219,43 @@ async def _run_with_context(
 
             # Navigate to the profile page (без двойного goto: сразу стабилизация URL)
             if profile_username and "/@" in (url or ""):
-                from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+                from platforms.tiktok.audience_scrape import (
+                    _tiktok_goto_profile_with_redirect_recovery,
+                    _tiktok_profile_url_regex,
+                )
 
                 u0 = url.split("#")[0]
-                if not await _tiktok_goto_profile_with_redirect_recovery(
-                    page, profile_username, u0, _wu, rounds=4, dwell_s=9.0,
-                ):
-                    print(
-                        f"[tiktok_worker] не удалось удержать страницу профиля @{profile_username}, "
-                        f"url={page.url!r}",
-                        file=sys.stderr,
+                try:
+                    await page.bring_to_front()
+                except Exception:
+                    pass
+                pat_prof = _tiktok_profile_url_regex(profile_username)
+
+                async def _land_on_profile(*, rounds: int, dwell_s: float) -> bool:
+                    return await _tiktok_goto_profile_with_redirect_recovery(
+                        page, profile_username, u0, _wu, rounds=rounds, dwell_s=dwell_s,
                     )
+
+                landed = await _land_on_profile(rounds=5, dwell_s=10.0)
+                if not landed:
+                    landed = await _land_on_profile(rounds=6, dwell_s=12.0)
+                if not landed and _wu is not None and hasattr(_wu, "tiktok_goto_with_403_recovery"):
+                    await _wu.tiktok_goto_with_403_recovery(page, u0, timeout_ms=60_000)
+                    if hasattr(_wu, "wait_for_anti_bot_clear"):
+                        await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
+                    await asyncio.sleep(1.5)
+                    landed = bool(pat_prof.search((page.url or "").split("#")[0]))
+                if not landed:
+                    raise ValueError(
+                        f"Не удалось открыть профиль TikTok @{profile_username} "
+                        f"(браузер остался на {page.url!r}). "
+                        "Закройте лишние окна TikTok и повторите обновление."
+                    )
+                print(
+                    f"[tiktok_worker] профиль @{profile_username}: {page.url!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             else:
                 if _wu is not None and hasattr(_wu, "tiktok_goto_with_403_recovery"):
                     await _wu.tiktok_goto_with_403_recovery(page, url, timeout_ms=30_000)
@@ -913,6 +939,13 @@ async def _create_tiktok_context(
             file=sys.stderr,
         )
 
+    headless = bool(launch_kwargs.get("headless", False))
+    print(
+        f"[tiktok_worker] launch_context headless={headless}",
+        file=sys.stderr,
+        flush=True,
+    )
+
     return context, None, sp
 
 
@@ -955,7 +988,14 @@ def _run_daemon() -> None:
             context, _browser, state_path = await _create_tiktok_context(pw, _wu)
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
-                await _wu.warm_playwright_page_home(page, "tiktok")
+                # Не открываем tiktok.com/For You при старте демона — иначе goto на @profile
+                # часто не удерживается и автообновление «застревает» на ленте.
+                try:
+                    cur = (page.url or "").strip().lower()
+                    if cur and "tiktok.com" in cur and "/@" not in cur:
+                        await page.goto("about:blank", wait_until="domcontentloaded", timeout=20_000)
+                except Exception:
+                    pass
                 for line in sys.stdin:
                     line = line.strip()
                     if not line:

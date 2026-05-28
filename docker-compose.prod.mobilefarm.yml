@@ -1,0 +1,8 @@
+# Mobile Farm GPU: Atomic UI (new_frontend) вместо Vite frontend/.
+# Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --build
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: deploy/nginx-atomic/Dockerfile

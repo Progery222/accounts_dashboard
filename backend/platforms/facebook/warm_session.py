@@ -464,14 +464,10 @@ async def run_warm_facebook_session(
         _LOG(f"[warm_facebook] WARNING: {sp.name} нет — войдите через Настройки → Facebook")
 
     async with async_playwright() as pw:
-        context, browser = await _wu.launch_context(
-            pw,
-            platform="facebook",
-            headless=False,
-            locale="ru-RU",
-            force_persistent=True,
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
+        from platforms.facebook.worker import _launch_facebook_context, _facebook_refresh_page
+
+        context, browser = await _launch_facebook_context(pw, _wu)
+        page = await _facebook_refresh_page(context)
         try:
             await page.bring_to_front()
         except Exception:

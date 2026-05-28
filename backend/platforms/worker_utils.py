@@ -398,6 +398,113 @@ def find_dashboard_worker_daemon_pids(
     return sorted(set(pids))
 
 
+def win32_parent_process_id(pid: int) -> int | None:
+    if os.name != "nt" or pid <= 0:
+        return None
+    try:
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\" "
+                "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty ParentProcessId)",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+        line = (proc.stdout or "").strip().splitlines()[0].strip() if (proc.stdout or "").strip() else ""
+        return int(line) if line.isdigit() else None
+    except Exception:
+        return None
+
+
+def pid_is_descendant_of(child_pid: int, ancestor_pid: int, *, max_depth: int = 16) -> bool:
+    """True, если child_pid в дереве процессов ancestor_pid."""
+    if child_pid <= 0 or ancestor_pid <= 0:
+        return False
+    current = int(child_pid)
+    for _ in range(max_depth):
+        if current == int(ancestor_pid):
+            return True
+        parent = win32_parent_process_id(current) if os.name == "nt" else None
+        if parent is None or parent <= 0:
+            if os.name != "nt":
+                try:
+                    import psutil  # optional
+
+                    p = psutil.Process(current)
+                    parent = int(p.ppid())
+                except Exception:
+                    return False
+            else:
+                return False
+        current = int(parent)
+    return False
+
+
+def live_dashboard_runserver_pids(backend_root: Path) -> set[int]:
+    """Живые manage.py runserver этого backend (не убивать их дочерние worker --daemon)."""
+    root = backend_root.expanduser().resolve()
+    root_norm = str(root).replace("\\", "/").lower()
+    pids: set[int] = set()
+    if os.name == "nt":
+        escaped = str(root).replace("'", "''")
+        ps = (
+            f"$root = '{escaped}'.ToLower().Replace('\\','/'); "
+            "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+            "Where-Object { "
+            "$cl = $_.CommandLine; "
+            "if (-not $cl) { return $false }; "
+            "$low = $cl.ToLower().Replace('\\','/'); "
+            "if (-not $low.Contains($root)) { return $false }; "
+            "if ($low -notlike '*manage.py*runserver*') { return $false }; "
+            "return $true } | Select-Object -ExpandProperty ProcessId"
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                check=False,
+            )
+            for line in (proc.stdout or "").splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.add(int(line))
+        except Exception:
+            pass
+        return pids
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+        for line in (out.stdout or "").splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) < 2 or not parts[0].isdigit():
+                continue
+            args = parts[1].replace("\\", "/").lower()
+            if root_norm in args and "manage.py" in args and "runserver" in args:
+                pids.add(int(parts[0]))
+    except Exception:
+        pass
+    return pids
+
+
 def kill_worker_process_pids(pids: list[int]) -> int:
     """Завершить процессы воркеров по PID. Возвращает число успешных kill."""
     killed = 0
@@ -743,6 +850,39 @@ async def launch_context(
         all_args.append("--start-maximized")
 
     use_storage_state = sf.exists() and not force_persistent and not ig_state_broken
+
+    if use_storage_state and platform == "facebook":
+        # Persistent-каталог в AccountsStats-профиле: его видит kill при пересоздании
+        # демона (в отличие от временного user-data-dir у chromium.launch).
+        launch_dir = base / "facebook_from_state"
+        launch_dir.mkdir(parents=True, exist_ok=True)
+        print(
+            f"[{platform}_worker] loading state from {sf.name} → {launch_dir.name}/",
+            file=sys.stderr,
+        )
+        hide_infobar = bool(bp.get("hide_automation_flags", True))
+        context = await pw.chromium.launch_persistent_context(
+            str(launch_dir),
+            headless=headless,
+            args=all_args,
+            locale=locale,
+            viewport=viewport,
+            user_agent=user_agent,
+            channel=browser_channel,
+            **playwright_ignore_automation_defaults(enabled=hide_infobar),
+        )
+        await context.add_init_script(init_script)
+        try:
+            state_data = json.loads(sf.read_text(encoding="utf-8"))
+            cookies = state_data.get("cookies") or []
+            if cookies:
+                await context.add_cookies(cookies)
+        except Exception as exc:
+            print(
+                f"[{platform}_worker] не удалось подставить cookies из {sf.name}: {exc}",
+                file=sys.stderr,
+            )
+        return context, None
 
     if use_storage_state:
         print(f"[{platform}_worker] loading state from {sf.name}", file=sys.stderr)

@@ -139,6 +139,14 @@ def _kill_chromium_after_worker(chrome_roots: list[Path] | None = None) -> None:
         pass
 
 
+def _worker_daemon_ready_timeout_sec() -> float:
+    raw = (os.environ.get("WORKER_DAEMON_READY_TIMEOUT_SEC") or "120").strip()
+    try:
+        return max(30.0, min(600.0, float(raw)))
+    except ValueError:
+        return 120.0
+
+
 class _WorkerHandle:
     def __init__(
         self,
@@ -149,6 +157,7 @@ class _WorkerHandle:
         self.worker_path = worker_path
         self._chrome_roots_on_close = chrome_roots_on_close
         self.lock = threading.Lock()
+        self._browser_ready = threading.Event()
         self._cwd = str(_backend_dir_for_worker(worker_path))
         child_env = _compose_worker_env(self._cwd)
         self.proc = subprocess.Popen(
@@ -175,6 +184,32 @@ class _WorkerHandle:
         for line in self.proc.stderr:
             if line:
                 print(line, end="", file=sys.stderr)
+                if (
+                    "_worker] launch_context" in line
+                    or "[tiktok_worker] launch_context" in line
+                    or "[tiktok_worker] slot=" in line
+                ):
+                    self._browser_ready.set()
+
+    def wait_until_browser_ready(self, *, timeout_sec: float | None = None) -> None:
+        """Дождаться launch_context в демоне (иначе stdin-запрос зависнет до открытия Chrome)."""
+        if self._browser_ready.is_set():
+            return
+        limit = float(timeout_sec if timeout_sec is not None else _worker_daemon_ready_timeout_sec())
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            if self.proc.poll() is not None:
+                raise ValueError(
+                    "Фоновый worker завершился при запуске браузера. "
+                    "Закройте зависший Chrome (профиль TikStatsChromeProfile) и повторите."
+                )
+            if self._browser_ready.is_set():
+                return
+            time.sleep(0.2)
+        raise ValueError(
+            f"Таймаут запуска браузера ({int(limit)} с). "
+            "Закройте Chrome с профилем TikStatsChromeProfile (Диспетчер задач) и повторите."
+        )
 
     def _drain_stdout(self) -> None:
         if self.proc.stdout is None:
@@ -286,6 +321,8 @@ def reconcile_orphan_worker_daemons(worker_path: Path | None = None) -> int:
     from platforms.worker_utils import (
         find_dashboard_worker_daemon_pids,
         kill_worker_process_pids,
+        live_dashboard_runserver_pids,
+        pid_is_descendant_of,
     )
 
     backend_root = (
@@ -294,14 +331,18 @@ def reconcile_orphan_worker_daemons(worker_path: Path | None = None) -> int:
         else _dashboard_backend_root()
     )
     keep = _pool_tracked_pids()
-    orphans = [
-        pid
-        for pid in find_dashboard_worker_daemon_pids(
-            backend_root,
-            worker_script=worker_path.resolve() if worker_path is not None else None,
-        )
-        if pid not in keep
-    ]
+    live_servers = live_dashboard_runserver_pids(backend_root)
+    orphans: list[int] = []
+    for pid in find_dashboard_worker_daemon_pids(
+        backend_root,
+        worker_script=worker_path.resolve() if worker_path is not None else None,
+    ):
+        if pid in keep:
+            continue
+        # Воркер другого (или этого) runserver — не «зомби» для чужого процесса Django.
+        if any(pid_is_descendant_of(pid, srv) for srv in live_servers):
+            continue
+        orphans.append(pid)
     if not orphans:
         return 0
     killed = kill_worker_process_pids(orphans)
@@ -338,7 +379,7 @@ def _chrome_roots_for_worker(worker_path: Path) -> list[Path] | None:
         from platforms.worker_utils import accounts_profile_roots
 
         base = accounts_profile_roots()[0]
-        roots = [base, base / "facebook_persistent"]
+        roots = [base, base / "facebook_persistent", base / "facebook_from_state"]
         return [p for p in roots if p.is_dir() or not p.exists()]
     return None
 
@@ -358,8 +399,16 @@ def _is_recoverable_playwright_error(message: str) -> bool:
         "worker завершился",
         "worker не вернул ответ",
         "таймаут ожидания ответа worker",
+        "таймаут запуска браузера",
     )
     return any(m in msg for m in markers)
+
+
+def _prepare_worker_spawn(worker_path: Path) -> None:
+    """Освободить профиль Chrome и снять зомби-воркеры перед новым демоном."""
+    _kill_chromium_after_worker(_chrome_roots_for_worker(worker_path))
+    time.sleep(0.45)
+    reconcile_orphan_worker_daemons(worker_path)
 
 
 def release_worker(worker_path: Path) -> None:
@@ -432,7 +481,9 @@ def call_worker(
     key = pool_storage_key(worker_path)
     last_exc: BaseException | None = None
     for _attempt in range(3):
-        closed_dead_worker = False
+        spawned = False
+        handle = None
+        need_prepare = False
         with _GLOBAL_LOCK:
             handle = _HANDLES.get(key)
             dead = handle is None or handle.proc.poll() is not None
@@ -442,14 +493,25 @@ def call_worker(
                         handle.close()
                     except Exception:
                         pass
-                    closed_dead_worker = True
-                if closed_dead_worker or _attempt > 0:
-                    _kill_chromium_after_worker(_chrome_roots_for_worker(worker_path))
-                    time.sleep(0.45)
-                reconcile_orphan_worker_daemons(worker_path)
-                roots = _chrome_roots_for_worker(worker_path)
-                handle = _WorkerHandle(worker_path, chrome_roots_on_close=roots)
-                _HANDLES[key] = handle
+                    _HANDLES.pop(key, None)
+                need_prepare = True
+        if need_prepare:
+            # Не держим GLOBAL_LOCK во время kill Chrome / reconcile — иначе
+            # параллельные платформы «зависают» на съёме без окон.
+            _prepare_worker_spawn(worker_path)
+            with _GLOBAL_LOCK:
+                handle = _HANDLES.get(key)
+                if handle is None or handle.proc.poll() is not None:
+                    roots = _chrome_roots_for_worker(worker_path)
+                    handle = _WorkerHandle(worker_path, chrome_roots_on_close=roots)
+                    _HANDLES[key] = handle
+                    spawned = True
+                else:
+                    handle = _HANDLES.get(key)
+        if handle is None:
+            raise ValueError("Worker недоступен")
+        if spawned or not handle._browser_ready.is_set():
+            handle.wait_until_browser_ready()
         try:
             return handle.call(payload, timeout_sec=timeout_sec)
         except Exception as exc:
@@ -492,7 +554,10 @@ def _spawn_worker_daemon(worker_path: Path, *, reconcile: bool = True) -> None:
     if not need_spawn:
         return
     if reconcile:
-        reconcile_orphan_worker_daemons(worker_path)
+        _prepare_worker_spawn(worker_path)
+    else:
+        _kill_chromium_after_worker(_chrome_roots_for_worker(worker_path))
+        time.sleep(0.45)
     with _GLOBAL_LOCK:
         handle = _HANDLES.get(key)
         if handle is None or handle.proc.poll() is not None:
@@ -518,7 +583,11 @@ def ensure_worker(worker_path: Path) -> None:
     _spawn_worker_daemon(worker_path)
 
 
-def prewarm_workers(worker_paths: list[Path]) -> None:
+def prewarm_workers(
+    worker_paths: list[Path],
+    *,
+    wait_browser_ready: bool = False,
+) -> None:
     """
     Поднять несколько Playwright-демонов подряд.
 
@@ -532,8 +601,34 @@ def prewarm_workers(worker_paths: list[Path]) -> None:
     reconcile_orphan_worker_daemons()
     stagger = float((os.environ.get("ACCOUNTS_PREWARM_STAGGER_SEC") or "1.5").strip() or "1.5")
     stagger = max(0.5, min(8.0, stagger))
+    ready_timeout = _worker_daemon_ready_timeout_sec()
+    if wait_browser_ready:
+        raw = (os.environ.get("ACCOUNTS_PREWARM_READY_TIMEOUT_SEC") or "").strip()
+        if raw:
+            try:
+                ready_timeout = max(60.0, min(600.0, float(raw)))
+            except ValueError:
+                pass
     for worker_path in paths:
         _spawn_worker_daemon(worker_path, reconcile=False)
+        if wait_browser_ready:
+            plat = worker_path.resolve().parent.name
+            with _GLOBAL_LOCK:
+                handle = _HANDLES.get(pool_storage_key(worker_path))
+            if handle is not None:
+                try:
+                    handle.wait_until_browser_ready(timeout_sec=ready_timeout)
+                    print(
+                        f"[worker_pool] prewarm {plat}: браузер готов",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[worker_pool] prewarm {plat}: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         time.sleep(stagger)
 
 
