@@ -39,7 +39,7 @@ for raw in example.splitlines():
     elif line.startswith("RUN_SCHEDULER="):
         line = "RUN_SCHEDULER=true"
     elif line.startswith("BROWSER_HEADLESS="):
-        line = "BROWSER_HEADLESS=true"
+        line = "BROWSER_HEADLESS=false"
     elif line.startswith("BROWSER_PROFILE_DIR="):
         line = "BROWSER_PROFILE_DIR=/app/.browser-profile"
     elif line.startswith("INSTAGRAM_USERNAME="):
@@ -53,6 +53,9 @@ extra = [
     "# --- Mobile Farm GPU (сгенерировано при деплое) ---",
     f"DASHBOARD_HTTP_PORT={http_port}",
     f"DASHBOARD_PUBLIC_URL={public_http}",
+    "# DISPLAY для видимых окон Playwright в Docker (уточните в RDP: echo $DISPLAY)",
+    "MOBILEFARM_DISPLAY=:0",
+    "MOBILEFARM_HEADED_BROWSER=1",
 ]
 out = "\n".join(lines) + "\n" + "\n".join(extra) + "\n"
 env_path = root / ".env"
@@ -62,7 +65,7 @@ env_path.chmod(0o600)
 wa = root / "backend/config/worker_accounts.env"
 ex = root / "backend/config/worker_accounts.env.example"
 if ex.exists() and not wa.exists():
-    text = ex.read_text(encoding="utf-8") + "\nACCOUNTS_BROWSER_HEADLESS=true\n"
+    text = ex.read_text(encoding="utf-8") + "\nACCOUNTS_BROWSER_HEADLESS=false\n"
     wa.write_text(text, encoding="utf-8")
     wa.chmod(0o600)
 

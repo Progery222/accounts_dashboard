@@ -160,12 +160,20 @@ fi
         Invoke-DeployCommand "$sshBase `"$composeCmd`""
     }
 
+    Write-Step "Upload enable-mobilefarm-headed-browser.sh"
+    $enableSh = Join-Path $repoRoot "scripts\enable-mobilefarm-headed-browser.sh"
+    if ((Test-Path $enableSh) -and -not $DryRun) {
+        Invoke-DeployCommand "$scpBase `"$enableSh`" ${remote}:${RemoteRoot}/enable-mobilefarm-headed-browser.sh"
+    }
+
     if (-not $SkipBuild -and -not $DryRun) {
         Write-Step "Health check"
         Start-Sleep -Seconds 8
         Invoke-DeployCommand "$sshBase `"curl -sf http://127.0.0.1:9080/healthz/`""
         Write-Host ""
         Write-Host "Deploy OK: http://${SshHost}:9080/" -ForegroundColor Green
+        Write-Host "На сервере (RDP-терминал): bash ~/dashboard/enable-mobilefarm-headed-browser.sh" -ForegroundColor DarkGray
+        Write-Host "Секреты/cookies с Windows: .\scripts\sync-mobilefarm-secrets.ps1" -ForegroundColor DarkGray
     }
     elseif ($DryRun) {
         Write-Host "Dry run finished." -ForegroundColor Yellow

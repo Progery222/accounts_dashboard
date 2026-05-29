@@ -417,6 +417,10 @@ def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -
         # полная проверка как у «обычных» платформ давала ложный отказ и HTTP 400 без сохранения.
         # Защищаемся от подозрительного обнуления по просмотрам и числу постов.
         fields = ["view_count", "post_count"]
+    elif account.platform == Platform.TIKTOK:
+        # TikTok: в UI профиль живой (ролики на месте), а follower/like с парсера часто 0
+        # (антибот, гость, урезанный SSR) — иначе refresh откатывается, хотя посты обновились.
+        fields = ["view_count", "post_count"]
     elif account.platform == Platform.FACEBOOK:
         # Сумма лайков по постам может закономерно обнулиться (все посты ≤ MIN_VIEWS для детальных лайков).
         # Подписчики со скрапа часто 0 при той же живой странице (DOM / headless / язык блока) —

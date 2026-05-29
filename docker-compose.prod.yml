@@ -53,7 +53,7 @@ services:
       CSRF_EXTRA_ORIGINS: "${CSRF_EXTRA_ORIGINS:-http://146.103.120.54:9080}"
       DB_HOST: postgres
       DB_PORT: "5432"
-      BROWSER_HEADLESS: "true"
+      BROWSER_HEADLESS: "${BROWSER_HEADLESS:-true}"
       RUN_SCHEDULER: "true"
       BROWSER_PROFILE_DIR: /app/.browser-profile
       PORT: "8000"

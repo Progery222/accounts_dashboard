@@ -1,8 +1,10 @@
-# Mobile Farm GPU: Atomic UI (new_frontend) вместо Vite frontend/.
+# Mobile Farm GPU: Atomic UI (new_frontend) + видимые окна Playwright (как локальная Windows).
 # Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --build
 #
-# Секреты и worker_accounts.env монтируются с хоста — после
-# scripts/sync-mobilefarm-secrets.ps1 достаточно: docker compose … up -d backend
+# Перед первым headed-запуском из RDP-сессии на сервере:
+#   ./scripts/enable-mobilefarm-headed-browser.sh
+#
+# Секреты: scripts/sync-mobilefarm-secrets.ps1
 
 services:
   frontend:
@@ -11,6 +13,14 @@ services:
       dockerfile: deploy/nginx-atomic/Dockerfile
 
   backend:
+    ipc: host
+    environment:
+      BROWSER_HEADLESS: "${BROWSER_HEADLESS:-false}"
+      DISPLAY: "${MOBILEFARM_DISPLAY:-:0}"
+      # Путь внутри контейнера (volume ниже); на хосте — XAUTHORITY из RDP-сессии.
+      XAUTHORITY: /root/.Xauthority
     volumes:
       - browser_profile:/app/.browser-profile
       - ./backend/config/worker_accounts.env:/app/config/worker_accounts.env:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-/home/atom/.Xauthority}:/root/.Xauthority:ro

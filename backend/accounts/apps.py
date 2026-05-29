@@ -4,7 +4,7 @@ import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from datetime import datetime, time as dt_time, timedelta
+from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 from django.apps import AppConfig
@@ -31,8 +31,6 @@ _queued_refresh_requested = False
 _queued_refresh_source = "scheduler"
 _queued_refresh_fast_start = False
 _queued_refresh_runs: list[tuple[str, bool]] = []
-_recovered_schedule_slots: set[tuple[str, str]] = set()
-_last_missed_slot_check_mono: float = 0.0
 
 logger = logging.getLogger(__name__)
 
@@ -110,94 +108,6 @@ def sync_schedule_from_db(*, force: bool = False) -> None:
             )
         except Exception as e:
             print(f"[scheduler] sync schedule from DB failed: {e}", file=sys.stderr)
-    try_recover_missed_schedule_slots()
-
-
-def _schedule_catchup_hours() -> float:
-    raw = (os.environ.get("AUTO_REFRESH_SCHEDULE_CATCHUP_HOURS") or "8").strip()
-    try:
-        return max(1.0, min(24.0, float(raw)))
-    except ValueError:
-        return 8.0
-
-
-def try_recover_missed_schedule_slots() -> None:
-    """
-    Если runserver не работал в момент слота (сон ПК, закрытый терминал), догнать
-    пропуск после старта Django в пределах AUTO_REFRESH_SCHEDULE_CATCHUP_HOURS.
-    """
-    global _last_missed_slot_check_mono
-    if _scheduler is None:
-        return
-    now_mono = time.monotonic()
-    if now_mono - _last_missed_slot_check_mono < 25.0:
-        return
-    _last_missed_slot_check_mono = now_mono
-
-    try:
-        from django.utils import timezone
-
-        from .models import AutoRefreshPoint, AutoRefreshState, RefreshAllState, RefreshScheduleConfig
-        from .refresh_state import clear_stale_refresh_runs_if_needed
-
-        cfg = RefreshScheduleConfig.get()
-        if not cfg.enabled or cfg.mode != "times":
-            return
-        clear_stale_refresh_runs_if_needed()
-        if AutoRefreshState.get().is_running or RefreshAllState.get().is_running:
-            return
-
-        now = timezone.now().astimezone(SCHEDULER_TZ)
-        today = now.date()
-        catchup = timedelta(hours=_schedule_catchup_hours())
-
-        for t in cfg.times or []:
-            slot = str(t).strip()
-            if not slot:
-                continue
-            key = (today.isoformat(), slot)
-            if key in _recovered_schedule_slots:
-                continue
-            try:
-                h, m = map(int, slot.split(":"))
-            except Exception:
-                continue
-            slot_dt = datetime.combine(today, dt_time(h, m), tzinfo=SCHEDULER_TZ)
-            if slot_dt > now:
-                continue
-            elapsed = now - slot_dt
-            if elapsed < timedelta(minutes=2):
-                continue
-            if elapsed > catchup:
-                _recovered_schedule_slots.add(key)
-                continue
-
-            slot_label = f"{h:02d}:{m:02d}"
-            already = AutoRefreshPoint.objects.filter(
-                local_date=today,
-                source="scheduler",
-                slot_label=slot_label,
-            ).exists()
-            if already:
-                _recovered_schedule_slots.add(key)
-                continue
-
-            _recovered_schedule_slots.add(key)
-            print(
-                f"[scheduler] пропущен слот {slot_label} (МСК) — запускаем догон "
-                f"({int(elapsed.total_seconds() // 60)} мин назад)",
-                file=sys.stderr,
-                flush=True,
-            )
-            threading.Thread(
-                target=_scheduled_refresh,
-                kwargs={"source": "scheduler", "fast_start": False},
-                daemon=True,
-                name=f"catchup-{slot_label}",
-            ).start()
-            return
-    except Exception as exc:
-        print(f"[scheduler] catch-up check failed: {exc}", file=sys.stderr, flush=True)
 
 
 def schedule_jobs_signature(config) -> tuple:
@@ -408,7 +318,6 @@ class AccountsConfig(AppConfig):
             _scheduler.start()
             print("[scheduler] started", file=sys.stderr)
             threading.Timer(2.0, lambda: sync_schedule_from_db(force=True)).start()
-            threading.Timer(5.0, try_recover_missed_schedule_slots).start()
         except Exception as e:
             print(f"[scheduler] failed to start: {e}")
 

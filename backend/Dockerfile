@@ -1,7 +1,8 @@
 # Django + Playwright (Chromium) + gunicorn для headless деплоя (Railway/VPS).
 # База Microsoft Playwright уже содержит Chromium и системные зависимости.
 # requirements.txt экспортирован под Python 3.12 (Poetry); jammy-образ — 3.10.
-FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+# Должно совпадать с playwright в requirements.txt (сейчас 1.59.x).
+FROM mcr.microsoft.com/playwright/python:v1.59.0-noble
 
 # APScheduler и Django USE_TZ используют zoneinfo; без tzdata в образе:
 # «No time zone found with key Europe/Moscow».

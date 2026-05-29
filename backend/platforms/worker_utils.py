@@ -70,8 +70,12 @@ def _playwright_root_has_chromium(root: Path) -> bool:
     for child in root.iterdir():
         if not child.is_dir() or not child.name.startswith("chromium"):
             continue
-        for sub in ("chrome-win64", "chrome-win"):
-            exe = child / sub / "chrome.exe"
+        for sub, exe_name in (
+            ("chrome-linux64", "chrome"),
+            ("chrome-win64", "chrome.exe"),
+            ("chrome-win", "chrome.exe"),
+        ):
+            exe = child / sub / exe_name
             if exe.is_file():
                 return True
     return False
@@ -725,22 +729,14 @@ def _env_bool(name: str, default: bool = False) -> bool | None:
     return default
 
 
-def resolve_headless(
+def _resolve_headless_windows(
     *,
-    platform: str | None = None,
-    fallback: bool = False,
+    platform: str | None,
+    fallback: bool,
 ) -> bool:
     """
-    Решить, запускать ли Chromium в headless для воркера.
-
-    Приоритет:
-      1. Платформенный override `<PLATFORM>_HEADLESS` (например, `TELEGRAM_HEADLESS`).
-      2. Глобальный `BROWSER_HEADLESS`.
-      3. `fallback` (по умолчанию False — как было до правок).
-
-    Это даёт возможность на проде включить headless глобально
-    (`BROWSER_HEADLESS=true`), а отдельные платформы вернуть в headed
-    через `<PLATFORM>_HEADLESS=false` (под Xvfb).
+    Локальная Windows — как на последнем рабочем коммите:
+    BROWSER_HEADLESS из .env, затем ACCOUNTS_BROWSER_HEADLESS из worker_accounts.env.
     """
     if platform:
         per_platform = _env_bool(f"{platform.upper()}_HEADLESS")
@@ -758,6 +754,57 @@ def resolve_headless(
     except Exception:
         pass
     return fallback
+
+
+def _resolve_headless_linux(
+    *,
+    platform: str | None,
+    fallback: bool,
+) -> bool:
+    """
+    Linux-сервер (Docker / RDP): worker_accounts.env важнее compose BROWSER_HEADLESS=true.
+    Без явных env на Mobile Farm с DISPLAY — headed, если MOBILEFARM_DISPLAY задан.
+    """
+    if platform:
+        per_platform = _env_bool(f"{platform.upper()}_HEADLESS")
+        if per_platform is not None:
+            return per_platform
+    try:
+        from django.conf import settings as dj_settings
+
+        acc = getattr(dj_settings, "ACCOUNTS_BROWSER_HEADLESS", None)
+        if acc is not None:
+            return bool(acc)
+    except Exception:
+        pass
+    glob = _env_bool("BROWSER_HEADLESS")
+    if glob is not None:
+        return glob
+    try:
+        from platforms.host_os import linux_prefers_headed_browser
+
+        if linux_prefers_headed_browser():
+            return False
+    except Exception:
+        pass
+    if fallback is not False:
+        return fallback
+    return True
+
+
+def resolve_headless(
+    *,
+    platform: str | None = None,
+    fallback: bool = False,
+) -> bool:
+    """Headless для Playwright: отдельная логика Windows vs Linux."""
+    from platforms.host_os import is_linux, is_windows
+
+    if is_windows():
+        return _resolve_headless_windows(platform=platform, fallback=fallback)
+    if is_linux():
+        return _resolve_headless_linux(platform=platform, fallback=fallback)
+    return _resolve_headless_windows(platform=platform, fallback=fallback)
 
 
 async def launch_context(

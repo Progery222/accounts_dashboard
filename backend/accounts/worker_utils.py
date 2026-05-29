@@ -99,14 +99,9 @@ def _env_bool(name: str) -> bool | None:
 
 def resolve_headless(*, platform: str | None = None, fallback: bool = False) -> bool:
     """См. platforms/worker_utils.resolve_headless."""
-    if platform:
-        per_platform = _env_bool(f"{platform.upper()}_HEADLESS")
-        if per_platform is not None:
-            return per_platform
-    glob = _env_bool("BROWSER_HEADLESS")
-    if glob is not None:
-        return glob
-    return fallback
+    from platforms.worker_utils import resolve_headless as _resolve
+
+    return _resolve(platform=platform, fallback=fallback)
 
 # Injected before every page load to remove automation fingerprints.
 _STEALTH_SCRIPT = """
