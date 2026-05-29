@@ -12,6 +12,9 @@
 
 .EXAMPLE
   .\scripts\deploy-mobilefarm.ps1 -IdentityFile "$env:USERPROFILE\.ssh\id_ed25519"
+
+  После деплоя, чтобы refresh работал как локально (ключи API, cookies):
+  .\scripts\sync-mobilefarm-secrets.ps1
 #>
 [CmdletBinding()]
 param(

@@ -1,8 +1,16 @@
 # Mobile Farm GPU: Atomic UI (new_frontend) вместо Vite frontend/.
 # Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --build
+#
+# Секреты и worker_accounts.env монтируются с хоста — после
+# scripts/sync-mobilefarm-secrets.ps1 достаточно: docker compose … up -d backend
 
 services:
   frontend:
     build:
       context: .
       dockerfile: deploy/nginx-atomic/Dockerfile
+
+  backend:
+    volumes:
+      - browser_profile:/app/.browser-profile
+      - ./backend/config/worker_accounts.env:/app/config/worker_accounts.env:ro
