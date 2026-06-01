@@ -23,10 +23,12 @@ def is_refresh_cancel_requested() -> bool:
     """Остановка из bulk_refresh, refresh_all или автообновления."""
     # Не вызывать close_old_connections() здесь: проверка идёт из transaction.atomic()
     # при сохранении аккаунта — закрытие соединения даёт «the connection is closed».
+    # cancel_requested остаётся True до завершения потока scheduled_refresh (даже если is_running
+    # уже сброшен для UI в force_stop_auto_refresh).
     try:
-        if RefreshAllState.objects.filter(pk=1, is_running=True, cancel_requested=True).exists():
+        if RefreshAllState.objects.filter(pk=1, cancel_requested=True).exists():
             return True
-        if AutoRefreshState.objects.filter(pk=1, is_running=True, cancel_requested=True).exists():
+        if AutoRefreshState.objects.filter(pk=1, cancel_requested=True).exists():
             return True
     except Exception:
         return False

@@ -121,38 +121,44 @@ def finalize_auto_refresh_run_detail_cancelled() -> None:
 
 
 def force_stop_auto_refresh(*, reason: str = "Остановлено пользователем.") -> None:
-    """Сбросить UI сразу; закрытие Playwright — в фоне (не блокировать HTTP)."""
+    """Сбросить UI сразу; флаг cancel_requested держим до выхода потока scheduled_refresh."""
     import sys
     import threading
 
-    from .models import AutoRefreshState
+    from .models import AutoRefreshState, RefreshAllState
 
-    st = AutoRefreshState.get()
-    if not st.is_running and not st.cancel_requested:
-        return
     now = timezone.now()
-    st.cancel_requested = True
-    st.save(update_fields=["cancel_requested", "updated_at"])
-    finalize_auto_refresh_run_detail_cancelled()
-    if st.is_running:
-        clear_stuck_refresh_run(reason=reason[:500], models=("auto",))
-    st.refresh_from_db()
-    st.is_running = False
-    st.cancel_requested = False
-    st.current_account = ""
-    if not st.finished_at:
-        st.finished_at = now
-    st.last_error = (reason or "")[:500]
-    st.save(
-        update_fields=[
-            "is_running",
-            "cancel_requested",
-            "current_account",
-            "finished_at",
-            "last_error",
-            "updated_at",
-        ],
-    )
+    msg = (reason or "")[:500]
+
+    auto = AutoRefreshState.get()
+    if not auto.is_running and not auto.cancel_requested:
+        auto = None
+    else:
+        auto.cancel_requested = True
+        finalize_auto_refresh_run_detail_cancelled()
+        auto.is_running = False
+        auto.current_account = ""
+        if not auto.finished_at:
+            auto.finished_at = now
+        auto.last_error = msg
+        auto.save(
+            update_fields=[
+                "cancel_requested",
+                "is_running",
+                "current_account",
+                "finished_at",
+                "last_error",
+                "updated_at",
+            ],
+        )
+
+    rr = RefreshAllState.get()
+    if rr.is_running:
+        rr.cancel_requested = True
+        rr.save(update_fields=["cancel_requested", "updated_at"])
+
+    if auto is None and not rr.is_running:
+        return
 
     def _interrupt_workers() -> None:
         try:

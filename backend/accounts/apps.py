@@ -767,10 +767,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     ensure_fresh_db_connections()
                     with state_lock:
                         def _read_cancel_flag() -> None:
-                            state.refresh_from_db(fields=["cancel_requested"])
+                            state.refresh_from_db(fields=["cancel_requested", "is_running"])
 
                         run_with_db_reconnect(_read_cancel_flag)
-                        if bool(state.cancel_requested):
+                        if bool(state.cancel_requested) or not bool(state.is_running):
                             run_flags["cancelled"] = True
                             state.last_error = "Автообновление остановлено пользователем."
 
