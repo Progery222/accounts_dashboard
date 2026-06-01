@@ -1881,6 +1881,13 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
                         continue
             setattr(account, field, value)
 
+    if account.platform == Platform.TIKTOK:
+        # Apify/парсер могут занизить heart относительно UI; не роняем лайки профиля при refresh.
+        account.like_count = max(
+            int(stats_before.get("like_count", 0) or 0),
+            int(account.like_count or 0),
+        )
+
     seen_post_external_ids: set[str] = set()
     with transaction.atomic():
         if has_posts_key and (posts_authoritative or posts):

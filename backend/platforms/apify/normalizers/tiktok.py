@@ -54,12 +54,16 @@ def normalize_tiktok(items: list[dict], *, run_succeeded: bool = True) -> dict[s
 
     expected = int(author.get("video") or 0)
     partial = bool(expected and len(posts) < max(1, expected * 0.5))
+    profile_likes = int(author.get("heart") or author.get("heartCount") or 0)
+    posts_likes_sum = sum(p["like_count"] for p in posts)
+    # Clockworks иногда отдаёт heart на 1 ниже суммы diggCount и UI TikTok (см. @yllazenlive).
+    like_count = max(profile_likes, posts_likes_sum) if posts else profile_likes
     return {
         "display_name": str(author.get("nickName") or author.get("nickname") or ""),
         "avatar_url": author.get("avatar") or author.get("avatarMedium") or None,
         "bio": str(author.get("signature") or ""),
         "follower_count": int(author.get("fans") or author.get("followerCount") or 0),
-        "like_count": int(author.get("heart") or author.get("heartCount") or 0),
+        "like_count": like_count,
         "post_count": int(author.get("video") or len(posts)),
         "_posts": posts,
         "_posts_authoritative": run_succeeded,
