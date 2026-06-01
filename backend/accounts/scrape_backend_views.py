@@ -52,4 +52,8 @@ def scrape_backend(request):
             )
         setattr(cfg, field, val)
     cfg.save()
-    return Response(_scrape_backend_to_dict(cfg))
+    out = _scrape_backend_to_dict(cfg)
+    from accounts.apify_completion import count_active_apify_jobs
+
+    out["apify_active_jobs"] = count_active_apify_jobs()
+    return Response(out)

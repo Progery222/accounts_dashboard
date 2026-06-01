@@ -258,7 +258,14 @@ class ScrapeBackendConfig(models.Model):
 
     @classmethod
     def get(cls):
-        obj, _ = cls.objects.get_or_create(pk=1)
+        obj, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "facebook_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "tiktok_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "instagram_backend": ScrapeBackendChoice.PLAYWRIGHT,
+            },
+        )
         return obj
 
     def get_backend(self, platform: str) -> str:
