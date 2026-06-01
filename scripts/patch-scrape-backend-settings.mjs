@@ -15,12 +15,12 @@ if (b.includes("function ScrapeBackendSettingsPanel")) {
 
 const insertAfterMarker = `${marker}
 function ScrapeBackendSettingsPanel(){
-  const [cfg,setCfg]=useStateApp(null);
-  const [draft,setDraft]=useStateApp({facebook_backend:'playwright',tiktok_backend:'playwright',instagram_backend:'playwright'});
-  const [saving,setSaving]=useStateApp(false);
-  const [err,setErr]=useStateApp('');
-  const load=useCallbackApp(async()=>{try{const d=await _fetchJson('/api/accounts/scrape-backend/');setCfg(d);setDraft({facebook_backend:d.facebook_backend||'playwright',tiktok_backend:d.tiktok_backend||'playwright',instagram_backend:d.instagram_backend||'playwright'});setErr('');}catch(e){setErr(e?.message||String(e));}},[]);
-  useEffectApp(()=>{void load();},[load]);
+  const [cfg,setCfg]=React.useState(null);
+  const [draft,setDraft]=React.useState({facebook_backend:'playwright',tiktok_backend:'playwright',instagram_backend:'playwright'});
+  const [saving,setSaving]=React.useState(false);
+  const [err,setErr]=React.useState('');
+  const load=React.useCallback(async()=>{try{const d=await _fetchJson('/api/accounts/scrape-backend/');setCfg(d);setDraft({facebook_backend:d.facebook_backend||'playwright',tiktok_backend:d.tiktok_backend||'playwright',instagram_backend:d.instagram_backend||'playwright'});setErr('');}catch(e){setErr(e?.message||String(e));}},[]);
+  React.useEffect(()=>{void load();},[load]);
   const apifyOk=!!(cfg&&cfg.apify_enabled);
   const rows=[['Facebook','facebook_backend'],['TikTok','tiktok_backend'],['Instagram','instagram_backend']];
   const save=async()=>{setSaving(true);setErr('');try{const d=await _fetchJson('/api/accounts/scrape-backend/',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(draft)});setCfg(d);setDraft({facebook_backend:d.facebook_backend,tiktok_backend:d.tiktok_backend,instagram_backend:d.instagram_backend});}catch(e){setErr(e?.message||String(e));}finally{setSaving(false);}};
