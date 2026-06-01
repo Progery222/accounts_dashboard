@@ -228,6 +228,112 @@ class RefreshAllState(models.Model):
         return obj
 
 
+class ScrapeBackendChoice(models.TextChoices):
+    PLAYWRIGHT = "playwright", "Playwright"
+    APIFY = "apify", "Apify"
+
+
+class ScrapeBackendConfig(models.Model):
+    """Singleton (pk=1). Backend сбора данных по платформе (MVP: FB, TT, IG)."""
+
+    facebook_backend = models.CharField(
+        max_length=16,
+        choices=ScrapeBackendChoice.choices,
+        default=ScrapeBackendChoice.PLAYWRIGHT,
+    )
+    tiktok_backend = models.CharField(
+        max_length=16,
+        choices=ScrapeBackendChoice.choices,
+        default=ScrapeBackendChoice.PLAYWRIGHT,
+    )
+    instagram_backend = models.CharField(
+        max_length=16,
+        choices=ScrapeBackendChoice.choices,
+        default=ScrapeBackendChoice.PLAYWRIGHT,
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Способ сбора данных"
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def get_backend(self, platform: str) -> str:
+        key = str(platform or "").strip().lower()
+        if key == "facebook":
+            return self.facebook_backend
+        if key == "tiktok":
+            return self.tiktok_backend
+        if key == "instagram":
+            return self.instagram_backend
+        return ScrapeBackendChoice.PLAYWRIGHT
+
+
+class ApifyRefreshJobStatus(models.TextChoices):
+    QUEUED = "queued", "В очереди"
+    STARTING = "starting", "Запуск"
+    RUNNING = "running", "Выполняется"
+    SUCCEEDED = "succeeded", "Успех"
+    FAILED = "failed", "Ошибка"
+    ABORTED = "aborted", "Отменён"
+
+
+class ApifyRefreshJobTrigger(models.TextChoices):
+    MANUAL = "manual", "Ручной"
+    REFRESH_ALL = "refresh_all", "Сбор всех"
+    BULK = "bulk", "Массовый"
+    SCHEDULER = "scheduler", "Расписание"
+
+
+class ApifyRefreshJob(models.Model):
+    """История и состояние асинхронного refresh через Apify."""
+
+    account = models.ForeignKey(
+        "Account",
+        on_delete=models.CASCADE,
+        related_name="apify_refresh_jobs",
+    )
+    platform = models.CharField(max_length=32)
+    username_snapshot = models.CharField(max_length=255)
+    status = models.CharField(
+        max_length=16,
+        choices=ApifyRefreshJobStatus.choices,
+        default=ApifyRefreshJobStatus.QUEUED,
+        db_index=True,
+    )
+    apify_run_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    apify_actor_id = models.CharField(max_length=255, blank=True, default="")
+    apify_dataset_id = models.CharField(max_length=64, blank=True, default="")
+    apify_stages = models.JSONField(blank=True, default=list)
+    trigger = models.CharField(
+        max_length=32,
+        choices=ApifyRefreshJobTrigger.choices,
+        default=ApifyRefreshJobTrigger.MANUAL,
+    )
+    parent_batch_id = models.UUIDField(null=True, blank=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+    run_detail_extra = models.JSONField(blank=True, default=dict)
+    normalized_preview = models.JSONField(blank=True, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-started_at", "-id"]
+        indexes = [
+            models.Index(fields=["account", "-started_at"]),
+            models.Index(fields=["status"]),
+        ]
+        verbose_name = "Задача Apify refresh"
+
+    def __str__(self):
+        return f"ApifyJob#{self.pk} {self.platform}/@{self.username_snapshot} [{self.status}]"
+
+
 class Platform(models.TextChoices):
     TIKTOK    = "tiktok",    "TikTok"
     INSTAGRAM = "instagram", "Instagram"

@@ -257,6 +257,12 @@ class AccountsConfig(AppConfig):
             "migrate", "makemigrations", "collectstatic", "shell",
             "test", "createsuperuser", "loaddata", "dumpdata",
         )):
+            try:
+                from platforms.apify.poller import start_apify_poller
+
+                start_apify_poller()
+            except Exception as exc:
+                print(f"[apify] poller start skipped: {exc}", file=sys.stderr)
             return
         try:
             from platforms.worker_pool import reconcile_orphan_worker_daemons
@@ -264,6 +270,12 @@ class AccountsConfig(AppConfig):
             reconcile_orphan_worker_daemons()
         except Exception as exc:
             print(f"[worker_pool] reconcile at startup failed: {exc}", file=sys.stderr)
+        try:
+            from platforms.apify.poller import start_apify_poller
+
+            start_apify_poller()
+        except Exception as exc:
+            print(f"[apify] poller start failed: {exc}", file=sys.stderr)
         if not _scheduler_enabled_from_env():
             print("[scheduler] disabled via RUN_SCHEDULER env")
             return
@@ -324,6 +336,8 @@ class AccountsConfig(AppConfig):
 
 def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
     global _queued_refresh_requested, _queued_refresh_source, _queued_refresh_fast_start
+    import uuid
+
     from django.utils import timezone
     from .auto_refresh_csv import build_auto_refresh_report_csv
     from .models import (
@@ -624,7 +638,16 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "detail": detail,
             }
 
-        has_facebook = any(a.platform == "facebook" for a in accounts)
+        from .scrape_backend import (
+            accounts_needing_playwright,
+            dispatch_apify_for_batch_account,
+            facebook_playwright_warm_needed,
+            should_use_apify_for_account,
+        )
+        from .models import ApifyRefreshJobTrigger
+
+        apify_batch_id = uuid.uuid4()
+        has_facebook = facebook_playwright_warm_needed(accounts)
         fb_batch_guard = None
         if has_facebook:
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
@@ -835,6 +858,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             elif (
                                 account.platform == "facebook"
                                 and fb_batch_guard is not None
+                                and not should_use_apify_for_account(account)
                                 and fb_batch_guard.is_tripped()
                             ):
                                 account.refresh_from_db()
@@ -867,6 +891,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     status="skipped",
                                     worker=None,
                                     detail=skip_detail,
+                                )
+                            elif should_use_apify_for_account(account):
+                                dispatch_apify_for_batch_account(
+                                    account,
+                                    trigger=ApifyRefreshJobTrigger.SCHEDULER,
+                                    parent_batch_id=apify_batch_id,
                                 )
                             else:
                                 if is_refresh_cancel_requested():
@@ -1026,14 +1056,15 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
             from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancel_poll
 
-            if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
+            pw_accounts = accounts_needing_playwright(accounts)
+            if pw_accounts and bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
                 print(
                     "[scheduled_refresh] подъём окон Playwright (по платформам)…",
                     file=sys.stderr,
                     flush=True,
                 )
                 try:
-                    _prewarm_workers(accounts, wait_browser_ready=True)
+                    _prewarm_workers(pw_accounts, wait_browser_ready=True)
                     print("[scheduled_refresh] окна Playwright готовы", file=sys.stderr, flush=True)
                 except Exception as e:
                     print(

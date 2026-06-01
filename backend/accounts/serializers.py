@@ -37,6 +37,9 @@ class AccountSerializer(serializers.ModelSerializer):
     is_platform_hidden = serializers.SerializerMethodField()
     is_profile_hidden = serializers.SerializerMethodField()
     audience_members_count = serializers.SerializerMethodField()
+    refresh_pipeline = serializers.SerializerMethodField()
+    refresh_pipeline_label = serializers.SerializerMethodField()
+    apify_job_id = serializers.SerializerMethodField()
 
     class Meta:
         model = Account
@@ -51,6 +54,7 @@ class AccountSerializer(serializers.ModelSerializer):
             "audience_members_count",
             "follower_delta", "like_delta", "view_delta", "post_delta", "link_click_delta",
             "is_platform_hidden", "is_profile_hidden",
+            "refresh_pipeline", "refresh_pipeline_label", "apify_job_id",
             "created_at", "updated_at",
         ]
         read_only_fields = [
@@ -193,6 +197,48 @@ class AccountSerializer(serializers.ModelSerializer):
 
     def get_is_profile_hidden(self, obj):
         return bool(getattr(obj.profile, "is_hidden", False))
+
+    def _active_apify_job(self, obj):
+        cache = getattr(self, "_apify_jobs_cache", None)
+        if cache is None:
+            from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus
+
+            ids = []
+            if isinstance(self.parent, serializers.ListSerializer):
+                ids = [o.pk for o in self.parent.instance]
+            elif obj.pk:
+                ids = [obj.pk]
+            cache = {}
+            if ids:
+                qs = ApifyRefreshJob.objects.filter(
+                    account_id__in=ids,
+                    status__in=[
+                        ApifyRefreshJobStatus.QUEUED,
+                        ApifyRefreshJobStatus.STARTING,
+                        ApifyRefreshJobStatus.RUNNING,
+                    ],
+                ).order_by("-id")
+                for job in qs:
+                    if job.account_id not in cache:
+                        cache[job.account_id] = job
+            self._apify_jobs_cache = cache
+        return cache.get(obj.pk)
+
+    def get_refresh_pipeline(self, obj):
+        job = self._active_apify_job(obj)
+        return "apify" if job else None
+
+    def get_refresh_pipeline_label(self, obj):
+        job = self._active_apify_job(obj)
+        if not job:
+            return None
+        if job.status == "queued":
+            return "В очереди Apify"
+        return "Сбор Apify…"
+
+    def get_apify_job_id(self, obj):
+        job = self._active_apify_job(obj)
+        return job.pk if job else None
 
     def get_audience_members_count(self, obj):
         ann = getattr(obj, "audience_members_count", None)

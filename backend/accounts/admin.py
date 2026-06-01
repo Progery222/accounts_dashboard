@@ -1,5 +1,13 @@
 from django.contrib import admin
-from .models import Account, Post, AccountSnapshot, PostSnapshot, Profile
+from .models import (
+    Account,
+    Post,
+    AccountSnapshot,
+    PostSnapshot,
+    Profile,
+    ScrapeBackendConfig,
+    ApifyRefreshJob,
+)
 
 
 @admin.register(Profile)
@@ -67,3 +75,26 @@ class PostSnapshotAdmin(admin.ModelAdmin):
     list_display = ["post", "date", "view_count", "like_count", "comment_count"]
     list_filter = ["date"]
     ordering = ["-date"]
+
+
+@admin.register(ScrapeBackendConfig)
+class ScrapeBackendConfigAdmin(admin.ModelAdmin):
+    list_display = ["facebook_backend", "tiktok_backend", "instagram_backend", "updated_at"]
+
+
+@admin.register(ApifyRefreshJob)
+class ApifyRefreshJobAdmin(admin.ModelAdmin):
+    list_display = [
+        "id",
+        "platform",
+        "username_snapshot",
+        "status",
+        "trigger",
+        "apify_run_id",
+        "started_at",
+        "finished_at",
+    ]
+    list_filter = ["status", "platform", "trigger"]
+    search_fields = ["username_snapshot", "apify_run_id"]
+    raw_id_fields = ["account"]
+    readonly_fields = ["created_at", "updated_at"]

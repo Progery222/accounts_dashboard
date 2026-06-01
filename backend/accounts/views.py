@@ -728,8 +728,18 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                 state.last_error = "Обновление остановлено пользователем."
                 state.save(update_fields=["last_error", "updated_at"])
             errors_out: list[dict] = []
+            import uuid
 
-            has_facebook = any(a.platform == Platform.FACEBOOK for a in accounts)
+            from accounts.models import ApifyRefreshJobTrigger
+            from .scrape_backend import (
+                accounts_needing_playwright,
+                dispatch_apify_for_batch_account,
+                facebook_playwright_warm_needed,
+                should_use_apify_for_account,
+            )
+
+            apify_batch_id = uuid.uuid4()
+            has_facebook = facebook_playwright_warm_needed(accounts)
             fb_batch_guard = None
             if has_facebook:
                 from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
@@ -739,8 +749,11 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
             if not stop_requested.is_set():
                 from django.conf import settings as dj_settings
 
-                if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
-                    _prewarm_workers(accounts)
+                pw_accounts = accounts_needing_playwright(accounts)
+                if pw_accounts and bool(
+                    getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
+                ):
+                    _prewarm_workers(pw_accounts)
                 preload: dict[str, dict] = {}
             else:
                 preload = {}
@@ -834,6 +847,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         elif (
                             account.platform == Platform.FACEBOOK
                             and fb_batch_guard is not None
+                            and not should_use_apify_for_account(account)
                             and fb_batch_guard.is_tripped()
                         ):
                             skip_detail = fb_batch_guard.skip_detail()
@@ -844,6 +858,12 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 detail=skip_detail,
                             )
                             _mark_progress(success=True, failed=False)
+                        elif should_use_apify_for_account(account):
+                            dispatch_apify_for_batch_account(
+                                account,
+                                trigger=ApifyRefreshJobTrigger.BULK,
+                                parent_batch_id=apify_batch_id,
+                            )
                         else:
                             if is_refresh_cancel_requested():
                                 stop_requested.set()
@@ -1269,11 +1289,14 @@ def _run_refresh_all_background(
     include_hidden_profiles: bool,
     download_csv: bool,
 ) -> None:
+    import uuid
+
     from .refresh_cancel import RefreshCancelledError
     from django.db import close_old_connections
 
     close_old_connections()
     state = RefreshAllState.get()
+    apify_batch_id = uuid.uuid4()
 
     _prev_worker_autoclose = os.environ.get("WORKER_AUTOCLOSE_BROWSER_ON_EXIT")
     os.environ["WORKER_AUTOCLOSE_BROWSER_ON_EXIT"] = "1"
@@ -1318,7 +1341,15 @@ def _run_refresh_all_background(
 
         ig_preload: dict[str, dict] = {}
 
-        has_facebook = any(a.platform == Platform.FACEBOOK for a in accounts)
+        from .scrape_backend import (
+            accounts_needing_playwright,
+            dispatch_apify_for_batch_account,
+            facebook_playwright_warm_needed,
+            should_use_apify_for_account,
+        )
+        from accounts.models import ApifyRefreshJobTrigger
+
+        has_facebook = facebook_playwright_warm_needed(accounts)
         fb_batch_guard = None
         if has_facebook:
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
@@ -1337,8 +1368,11 @@ def _run_refresh_all_background(
 
             from django.conf import settings as dj_settings
 
-            if bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
-                _prewarm_workers(accounts)
+            pw_accounts = accounts_needing_playwright(accounts)
+            if pw_accounts and bool(
+                getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
+            ):
+                _prewarm_workers(pw_accounts)
 
             from .parallel_account_queue import ParallelAccountQueue
             from .refresh_all_warm import RefreshAllWarmTracker
@@ -1456,6 +1490,7 @@ def _run_refresh_all_background(
                             elif (
                                 account.platform == Platform.FACEBOOK
                                 and fb_batch_guard is not None
+                                and not should_use_apify_for_account(account)
                                 and fb_batch_guard.is_tripped()
                             ):
                                 skip_detail = fb_batch_guard.skip_detail()
@@ -1480,6 +1515,12 @@ def _run_refresh_all_background(
                                     status="skipped",
                                     worker=None,
                                     detail=skip_detail,
+                                )
+                            elif should_use_apify_for_account(account):
+                                dispatch_apify_for_batch_account(
+                                    account,
+                                    trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
+                                    parent_batch_id=apify_batch_id,
                                 )
                             else:
                                 if is_refresh_cancel_requested():
@@ -2188,6 +2229,23 @@ class AccountViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def refresh(self, request, pk=None):
         account = self.get_object()
+        from accounts.scrape_backend import should_use_apify_for_account
+
+        if should_use_apify_for_account(account):
+            from accounts.models import ApifyRefreshJobTrigger
+            from platforms.apify.dispatch import dispatch_apify_refresh
+
+            with _account_refresh_mutex(account.id):
+                job = dispatch_apify_refresh(account, trigger=ApifyRefreshJobTrigger.MANUAL)
+            return Response(
+                {
+                    "job_id": job.pk,
+                    "apify_run_id": job.apify_run_id or None,
+                    "status": job.status,
+                    "detail": "Запущен сбор Apify",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
         with _account_refresh_mutex(account.id):
             refreshed, detail, code = _refresh_account_for_api(account)
             if refreshed is not None:
@@ -3324,8 +3382,10 @@ def auto_refresh_stop(request):
         if not state.is_running:
             return Response({"stopped": False, "detail": "Автообновление сейчас не выполняется."}, status=status.HTTP_409_CONFLICT)
         from .refresh_state import force_stop_auto_refresh
+        from platforms.apify.abort import abort_active_apify_jobs
 
         force_stop_auto_refresh(reason="Остановлено пользователем.")
+        abort_active_apify_jobs()
         state.refresh_from_db(fields=["is_running", "cancel_requested", "current_account", "updated_at"])
         return Response(
             {
@@ -3443,8 +3503,10 @@ def refresh_all_stop(request):
         st.cancel_requested = True
         st.save(update_fields=["cancel_requested", "updated_at"])
         from .refresh_interrupt import interrupt_refresh_playwright_workers
+        from platforms.apify.abort import abort_active_apify_jobs
 
         interrupt_refresh_playwright_workers(label="refresh_all_stop")
+        abort_active_apify_jobs()
         return Response({"stopped": True})
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)

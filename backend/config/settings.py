@@ -356,6 +356,27 @@ TELEGRAM_AUTO_REFRESH_CHAT_ID = os.getenv("TELEGRAM_AUTO_REFRESH_CHAT_ID", "")
 REFRESH_ALL_DELAY_MIN = float(os.getenv("REFRESH_ALL_DELAY_MIN", "0") or "0")
 REFRESH_ALL_DELAY_MAX = float(os.getenv("REFRESH_ALL_DELAY_MAX", "0") or "0")
 
+# ── Apify (альтернатива Playwright для refresh FB / TT / IG) ─────────────────
+APIFY_TOKEN = os.getenv("APIFY_TOKEN", "").strip()
+APIFY_ENABLED = os.getenv("APIFY_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+APIFY_ACTOR_TIKTOK = os.getenv("APIFY_ACTOR_TIKTOK", "clockworks/tiktok-profile-scraper").strip()
+APIFY_ACTOR_FACEBOOK_PROFILE = os.getenv(
+    "APIFY_ACTOR_FACEBOOK_PROFILE", "crowdpull/facebook-profile-scraper"
+).strip()
+APIFY_ACTOR_FACEBOOK_PLAYCOUNT = os.getenv(
+    "APIFY_ACTOR_FACEBOOK_PLAYCOUNT", "social_developer/facebook-playcount-scraper"
+).strip()
+APIFY_ACTOR_INSTAGRAM_PROFILE = os.getenv(
+    "APIFY_ACTOR_INSTAGRAM_PROFILE", "apify/instagram-profile-scraper"
+).strip()
+APIFY_ACTOR_INSTAGRAM_POSTS = os.getenv("APIFY_ACTOR_INSTAGRAM_POSTS", "apify/instagram-scraper").strip()
+APIFY_MAX_CONCURRENT_RUNS = max(1, int(os.getenv("APIFY_MAX_CONCURRENT_RUNS", "3") or "3"))
+APIFY_POLL_INTERVAL_SEC = max(5, int(os.getenv("APIFY_POLL_INTERVAL_SEC", "15") or "15"))
+APIFY_POLL_MAX_WAIT_SEC = int(os.getenv("APIFY_POLL_MAX_WAIT_SEC", "0") or "0") or None
+APIFY_WEBHOOK_SECRET = os.getenv("APIFY_WEBHOOK_SECRET", "").strip()
+APIFY_WEBHOOK_BASE_URL = os.getenv("APIFY_WEBHOOK_BASE_URL", "").strip()
+FACEBOOK_MAX_POSTS = max(1, int(os.getenv("FACEBOOK_MAX_POSTS", "80") or "80"))
+
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_AUTHENTICATION_CLASSES": [],

@@ -22,6 +22,7 @@ from accounts.settings_views import (
     reddit_start_auth,
     reddit_import_cookies,
 )
+from accounts.apify_webhook_views import apify_webhook
 from accounts.views import account_avatar, post_thumbnail
 from .health import healthz, healthz_ready
 
@@ -32,6 +33,7 @@ urlpatterns = [
     path("healthz/ready", healthz_ready),
     path("healthz/ready/", healthz_ready),
     path("admin/", admin.site.urls),
+    path("api/internal/apify/webhook/", apify_webhook),
     path("api/accounts/", include("accounts.urls")),
     path("api/tiktok/", include("tiktok_app.urls")),
     # Avatar proxy (bypasses CDN expiry / hotlink issues)
