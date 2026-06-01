@@ -2895,12 +2895,18 @@ def tv_emu_config(request):
     Настройки TV-эмуляции (Atomic): общий JSON для всех браузеров/устройств.
     GET — { "config": object | null }; POST — { "config": object }.
     """
-    from .tv_emu_config import load_tv_emu_config, save_tv_emu_config
+    from .tv_emu_config import (
+        bump_tv_emu_runtime_epoch,
+        load_tv_emu_config,
+        load_tv_emu_runtime_epoch,
+        save_tv_emu_config,
+    )
 
     if request.method == "GET":
         stored = load_tv_emu_config()
         return Response({
             "config": stored,
+            "runtime_epoch": load_tv_emu_runtime_epoch(),
             "source": "server",
             "updated": bool(stored),
         })
@@ -2916,10 +2922,14 @@ def tv_emu_config(request):
         path = save_tv_emu_config(config)
     except ValueError as exc:
         return Response({"error": str(exc)}, status=drf_status.HTTP_400_BAD_REQUEST)
+    runtime_epoch = load_tv_emu_runtime_epoch()
+    if data.get("restart") is True:
+        runtime_epoch = bump_tv_emu_runtime_epoch()
     return Response({
         "ok": True,
         "message": "Настройки эмуляции сохранены на сервере",
         "config_path": str(path),
+        "runtime_epoch": runtime_epoch,
     })
 
 
