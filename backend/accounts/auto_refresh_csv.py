@@ -9,6 +9,24 @@ from typing import Any
 
 from django.utils import timezone
 
+STATUS_OK_CHANGED = "успешно"
+STATUS_OK_UNCHANGED = "успешно (данные без изменений)"
+STATUS_SKIPPED = "пропущен"
+STATUS_ERROR = "ошибка"
+STATUS_NOT_RUN = "не выполнено"
+
+
+def extract_auto_refresh_status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Счётчики статусов строк отчёта (ключи — канонические status из report_rows)."""
+    raw = Counter(str(r.get("status") or "").strip() for r in rows)
+    return {
+        "ok_changed": int(raw.get(STATUS_OK_CHANGED, 0)),
+        "ok_unchanged": int(raw.get(STATUS_OK_UNCHANGED, 0)),
+        "skipped": int(raw.get(STATUS_SKIPPED, 0)),
+        "error": int(raw.get(STATUS_ERROR, 0)),
+        "not_run": int(raw.get(STATUS_NOT_RUN, 0)),
+    }
+
 
 def _format_duration_human(seconds: int) -> str:
     total = max(0, int(seconds))
@@ -62,7 +80,7 @@ def build_auto_refresh_report_csv(
             return ""
         return timezone.localtime(dt).strftime("%Y-%m-%d %H:%M:%S")
 
-    status_counts = Counter(r.get("status", "") for r in rows)
+    status_counts = extract_auto_refresh_status_counts(rows)
 
     def _to_float(v: Any) -> float:
         try:
@@ -79,11 +97,11 @@ def build_auto_refresh_report_csv(
     w.writerow(["Длительность (сек)", duration_sec])
     w.writerow(["Источник", source or ""])
     w.writerow(["Всего аккаунтов в списке", str(total_accounts)])
-    w.writerow(["Успешно (данные изменились)", str(status_counts.get("успешно", 0))])
-    w.writerow(["Успешно (данные без изменений)", str(status_counts.get("успешно (данные без изменений)", 0))])
-    w.writerow(["Ошибок", str(status_counts.get("ошибка", 0))])
-    w.writerow(["Пропущено", str(status_counts.get("пропущен", 0))])
-    w.writerow(["Не выполнено", str(status_counts.get("не выполнено", 0))])
+    w.writerow(["Успешно (данные изменились)", str(status_counts["ok_changed"])])
+    w.writerow(["Успешно (данные без изменений)", str(status_counts["ok_unchanged"])])
+    w.writerow(["Ошибок", str(status_counts["error"])])
+    w.writerow(["Пропущено", str(status_counts["skipped"])])
+    w.writerow(["Не выполнено", str(status_counts["not_run"])])
     if run_note:
         w.writerow(["Примечание к прогону", run_note.replace("\n", " ").strip()[:2000]])
 

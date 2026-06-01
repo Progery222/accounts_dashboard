@@ -596,24 +596,28 @@ def _parse_profile_id(v: str) -> int | None:
 
 
 def _resolve_profile(*, profile_id_raw: str, profile_name_raw: str, profile_color_raw: str) -> int | None:
+    """
+    Привязка профиля при импорте CSV.
+
+    Имя профиля важнее числового id: на другой БД те же pk означают другой профиль
+    (локально id=4 «Фил», на сервере после импорта PROFILES id=4 может быть «AI FARM»).
+    """
+    name = (profile_name_raw or "").strip()
+    color = (profile_color_raw or "").strip() or "#71717a"
+
+    if name:
+        existing = Profile.objects.filter(name=name).order_by("id").first()
+        if existing:
+            if color and existing.color != color:
+                existing.color = color
+                existing.save(update_fields=["color"])
+            return existing.id
+        return Profile.objects.create(name=name, color=color).id
+
     pid = _parse_profile_id(profile_id_raw)
     if pid is not None:
         return pid
-
-    name = (profile_name_raw or "").strip()
-    if not name:
-        return None
-    color = (profile_color_raw or "").strip() or "#71717a"
-
-    existing = Profile.objects.filter(name=name).order_by("id").first()
-    if existing:
-        if color and existing.color != color:
-            existing.color = color
-            existing.save(update_fields=["color"])
-        return existing.id
-
-    created = Profile.objects.create(name=name, color=color)
-    return created.id
+    return None
 
 
 def _parse_hashtags(cell: str) -> list[str]:

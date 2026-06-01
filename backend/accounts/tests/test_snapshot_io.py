@@ -232,6 +232,30 @@ class SnapshotIoRoundTripTests(TestCase):
         self.assertIn("DXwHZKjqHk7", text)
         self.assertIn("# POST_SNAPSHOTS", text)
 
+    def test_import_uses_profile_name_when_local_id_differs_on_target_db(self):
+        """Имитация импорта с локали на сервер: pk профилей не совпадают."""
+        phil = Profile.objects.create(name="Фил", color="#22c55e")
+        farm = Profile.objects.create(name="AI FARM", color="#eab308")
+        Account.objects.create(
+            username="phil_user",
+            platform=Platform.TIKTOK,
+            profile=phil,
+            follower_count=1,
+        )
+        csv_bytes = build_snapshot_csv()
+        Profile.objects.all().delete()
+        Account.objects.all().delete()
+        # На «сервере» те же имена, но id перепутаны относительно экспорта.
+        Profile.objects.create(name="AI FARM", color="#eab308")  # pk=1
+        Profile.objects.create(name="Фил", color="#22c55e")  # pk=2
+
+        summary = import_snapshot_csv(BytesIO(csv_bytes))
+        self.assertEqual(summary["errors"], [])
+
+        acc = Account.objects.get(username="phil_user", platform=Platform.TIKTOK)
+        self.assertEqual(acc.profile.name, "Фил")
+        self.assertEqual(Profile.objects.get(name="AI FARM").accounts.count(), 0)
+
 
 class SnapshotIoApiTests(APITestCase):
     def test_export_and_import_endpoints(self):

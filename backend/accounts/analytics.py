@@ -111,6 +111,7 @@ def _post_dict(p) -> dict:
         "description": p.description[:200],
         "hashtags": p.hashtags,
         "thumbnail_url": p.thumbnail_url,
+        "thumbnail_missing": bool(p.thumbnail_missing),
         "post_url": p.post_url,
         "posted_at": p.posted_at,
         "account": {

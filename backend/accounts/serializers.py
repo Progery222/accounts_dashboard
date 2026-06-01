@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework.validators import UniqueTogetherValidator
 import re
 from .models import Account, Platform, Post, Profile, AudienceMember, AudienceMemberPost
 
@@ -63,6 +64,25 @@ class AccountSerializer(serializers.ModelSerializer):
     def validate_username(self, value):
         value = str(value).strip().lstrip("@")
         return value
+
+    def run_validators(self, value):
+        """Существующий аккаунт при импорте — upsert в AccountViewSet.create, не unique-error."""
+        if self.instance is None:
+            uname = value.get("username")
+            plat = value.get("platform")
+            if (
+                uname is not None
+                and plat is not None
+                and Account.objects.filter(username=uname, platform=plat).exists()
+            ):
+                for validator in self.validators:
+                    if isinstance(validator, UniqueTogetherValidator):
+                        fields = getattr(validator, "fields", ())
+                        if fields == ("username", "platform"):
+                            continue
+                    validator(value, self)
+                return
+        super().run_validators(value)
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
@@ -196,8 +216,15 @@ class PostSerializer(serializers.ModelSerializer):
             "view_count", "like_count", "comment_count", "share_count",
             "view_delta", "like_delta", "comment_delta",
             "posted_at", "updated_at", "missing_from_scrape_at", "scrape_not_found",
+            "thumbnail_missing",
         ]
-        read_only_fields = ["id", "updated_at", "missing_from_scrape_at", "scrape_not_found"]
+        read_only_fields = [
+            "id",
+            "updated_at",
+            "missing_from_scrape_at",
+            "scrape_not_found",
+            "thumbnail_missing",
+        ]
 
     def get_scrape_not_found(self, obj) -> bool:
         return obj.missing_from_scrape_at is not None

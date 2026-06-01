@@ -428,6 +428,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "include_hidden_profile_accounts",
                 "include_unavailable_accounts",
                 "auto_refresh_csv_report",
+                "auto_refresh_telegram_enabled",
+                "auto_refresh_telegram_chat_id",
                 "auto_refresh_platforms",
                 "auto_refresh_profile_ids",
             ],
@@ -502,6 +504,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
     with account_refresh_priority_session(), refresh_pulse_batch():
         report_rows: list[dict] = []
+        run_flags = {"cancelled": False}
         state = AutoRefreshState.get()
         state.is_running = True
         state.source = source
@@ -745,6 +748,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
                         run_with_db_reconnect(_read_cancel_flag)
                         if bool(state.cancel_requested):
+                            run_flags["cancelled"] = True
                             state.last_error = "Автообновление остановлено пользователем."
 
                             def _save_stop_msg() -> None:
@@ -1061,6 +1065,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             pass
             finally:
                 if stop_requested.is_set() or _refresh_cancel_poll():
+                    run_flags["cancelled"] = True
                     executor.shutdown(wait=False, cancel_futures=True)
                     _finalize_run_detail_stale()
                 else:
@@ -1120,35 +1125,77 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 )
             except Exception as e:
                 print(f"[scheduled_refresh] failed to persist run finished (is_running): {e}")
-            if cfg.auto_refresh_csv_report:
-                try:
-                    note = (state.last_error or "").strip()
-                    batch_post_total = sum(int(getattr(a, "post_count", 0) or 0) for a in accounts)
-                    qs_dash = _apply_visibility_filters(
-                        Account.objects.all(),
-                        include_hidden_platforms=False,
-                        include_hidden_profile_accounts=False,
-                    )
-                    dash_agg = qs_dash.aggregate(Sum("post_count"))
-                    dashboard_post_total = int(dash_agg.get("post_count__sum") or 0)
-                    dashboard_account_count = int(qs_dash.count())
-                    state.last_report_csv = build_auto_refresh_report_csv(
-                        rows=report_rows,
-                        started_at=state.started_at,
-                        finished_at=finished,
-                        source=state.source or source,
-                        total_accounts=len(accounts),
-                        run_note=note,
-                        batch_post_total=batch_post_total,
-                        dashboard_post_total=dashboard_post_total,
-                        dashboard_account_count=dashboard_account_count,
-                    )
-                    state.last_report_generated_at = finished
-                    state.save(
-                        update_fields=["last_report_csv", "last_report_generated_at", "updated_at"],
-                    )
-                except Exception as e:
-                    print(f"[scheduled_refresh] CSV report build/save failed: {e}")
+            csv_body = ""
+            try:
+                note = (state.last_error or "").strip()
+                batch_post_total = sum(int(getattr(a, "post_count", 0) or 0) for a in accounts)
+                qs_dash = _apply_visibility_filters(
+                    Account.objects.all(),
+                    include_hidden_platforms=False,
+                    include_hidden_profiles=False,
+                )
+                dash_agg = qs_dash.aggregate(Sum("post_count"))
+                dashboard_post_total = int(dash_agg.get("post_count__sum") or 0)
+                dashboard_account_count = int(qs_dash.count())
+                csv_body = build_auto_refresh_report_csv(
+                    rows=report_rows,
+                    started_at=state.started_at,
+                    finished_at=finished,
+                    source=state.source or source,
+                    total_accounts=len(accounts),
+                    run_note=note,
+                    batch_post_total=batch_post_total,
+                    dashboard_post_total=dashboard_post_total,
+                    dashboard_account_count=dashboard_account_count,
+                )
+                state.last_report_csv = csv_body
+                state.last_report_generated_at = finished
+                state.save(
+                    update_fields=["last_report_csv", "last_report_generated_at", "updated_at"],
+                )
+            except Exception as e:
+                print(f"[scheduled_refresh] CSV report build/save failed: {e}", file=sys.stderr)
+
+            if cfg.auto_refresh_telegram_enabled and csv_body:
+                from .telegram_report import (
+                    auto_refresh_report_filename,
+                    build_auto_refresh_telegram_text,
+                    send_auto_refresh_telegram_report,
+                    should_send_auto_refresh_telegram,
+                )
+
+                if should_send_auto_refresh_telegram(
+                    run_was_cancelled=bool(run_flags.get("cancelled")),
+                    last_error=(state.last_error or "").strip(),
+                ):
+                    try:
+                        text = build_auto_refresh_telegram_text(
+                            rows=report_rows,
+                            started_at=state.started_at,
+                            finished_at=finished,
+                            total_accounts=len(accounts),
+                        )
+                        send_auto_refresh_telegram_report(
+                            config=cfg,
+                            text=text,
+                            csv_body=csv_body,
+                            filename=auto_refresh_report_filename(finished_at=finished),
+                        )
+                        state.last_telegram_error = ""
+                        state.last_telegram_sent_at = finished
+                        state.save(
+                            update_fields=[
+                                "last_telegram_error",
+                                "last_telegram_sent_at",
+                                "updated_at",
+                            ],
+                        )
+                    except Exception as e:
+                        err_msg = f"Не удалось отправить отчёт в Telegram: {e}"
+                        logger.exception("scheduled_refresh.telegram_failed")
+                        print(f"[scheduled_refresh] {err_msg}", file=sys.stderr)
+                        state.last_telegram_error = err_msg[:2000]
+                        state.save(update_fields=["last_telegram_error", "updated_at"])
             try:
                 create_auto_refresh_point_from_report_rows(
                     report_rows,

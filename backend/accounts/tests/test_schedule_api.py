@@ -20,7 +20,7 @@ class RefreshScheduleApiTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertFalse(response.data["enabled"])
 
-    def test_auto_refresh_csv_report_toggle(self):
+    def test_auto_refresh_csv_report_always_enabled(self):
         RefreshScheduleConfig.objects.update_or_create(
             pk=1,
             defaults={
@@ -34,16 +34,33 @@ class RefreshScheduleApiTests(APITestCase):
 
         r = self.client.get("/api/accounts/schedule/")
         self.assertEqual(r.status_code, status.HTTP_200_OK)
-        self.assertIn("auto_refresh_csv_report", r.data)
-        self.assertFalse(r.data["auto_refresh_csv_report"])
+        self.assertTrue(r.data["auto_refresh_csv_report"])
 
         r2 = self.client.post(
             "/api/accounts/schedule/",
-            {"auto_refresh_csv_report": True},
+            {"auto_refresh_csv_report": False},
             format="json",
         )
         self.assertEqual(r2.status_code, status.HTTP_200_OK)
         self.assertTrue(r2.data["auto_refresh_csv_report"])
+        cfg = RefreshScheduleConfig.get()
+        self.assertTrue(cfg.auto_refresh_csv_report)
+
+    def test_auto_refresh_telegram_settings(self):
+        RefreshScheduleConfig.objects.update_or_create(pk=1, defaults={"enabled": False})
+
+        r = self.client.post(
+            "/api/accounts/schedule/",
+            {
+                "auto_refresh_telegram_enabled": True,
+                "auto_refresh_telegram_chat_id": "123456",
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertTrue(r.data["auto_refresh_telegram_enabled"])
+        self.assertEqual(r.data["auto_refresh_telegram_chat_id"], "123456")
+        self.assertIn("telegram_bot_configured", r.data)
 
     def test_auto_refresh_scope_platforms_and_profiles(self):
         RefreshScheduleConfig.objects.update_or_create(

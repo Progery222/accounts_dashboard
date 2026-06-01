@@ -188,6 +188,9 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 # Манифест-хранилище WhiteNoise требует выполненного collectstatic и хеширует
 # имена файлов. На локалке (DEBUG=True) collectstatic не запускают, поэтому
 # подключаем его только в проде, иначе админка падает с "Missing staticfiles
@@ -341,6 +344,10 @@ TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
 # Session file created by: python manage.py setup_telegram_auth
 TELEGRAM_SESSION_FILE = os.getenv("TELEGRAM_SESSION_FILE", "telegram.session")
+
+# Bot API (@BotFather) — отчёт автообновления (не путать с Telethon выше).
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_AUTO_REFRESH_CHAT_ID = os.getenv("TELEGRAM_AUTO_REFRESH_CHAT_ID", "")
 
 # Глобальные границы паузы между аккаунтами в refresh_all / автообновлении (секунды).
 # 0,0 — не задавать глобальный clamp (остаются паузы по платформе, см. accounts.views._refresh_all_delay_seconds).

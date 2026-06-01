@@ -4,6 +4,8 @@ backend/config/worker_accounts.env
 backend/config/worker_subs.env
 # Профили Chromium для subs-воркеров (по умолчанию под backend/var/)
 backend/var/
+# Локальные аватары аккаунтов (MEDIA_ROOT)
+backend/media/
 # MCP с секретами (скопируйте из .cursor/mcp.json.example)
 .cursor/mcp.json
 __pycache__/

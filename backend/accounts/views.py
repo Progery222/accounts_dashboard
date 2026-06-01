@@ -264,9 +264,13 @@ def _sync_posts(
         )
         # Ensure today's snapshot exists before updating
         post.take_snapshot_if_needed()
+        scrape_included_thumbnail = "thumbnail_url" in pd
+        scraped_thumbnail_url = pd.get("thumbnail_url") if scrape_included_thumbnail else None
         # Update content fields
         for field in ("description", "thumbnail_url", "post_url", "posted_at"):
             if field in pd and pd[field] is not None:
+                if field == "thumbnail_url" and isinstance(pd[field], str) and not pd[field].strip():
+                    continue
                 setattr(post, field, pd[field])
         # Update numeric fields with resilient coercion + fallback aliases
         parsed_views = _to_int(pd.get("view_count", pd.get("play_count", 0)))
@@ -300,6 +304,15 @@ def _sync_posts(
         # Extract and store hashtags from description
         post.hashtags = _extract_hashtags(post.description)
         post.save()
+        from .post_thumbnail_storage import ensure_post_thumbnail_after_sync
+
+        post.refresh_from_db(fields=["thumbnail_url", "thumbnail_file", "thumbnail_missing"])
+        ensure_post_thumbnail_after_sync(
+            post,
+            account,
+            scrape_included_thumbnail=scrape_included_thumbnail,
+            scraped_thumbnail_url=scraped_thumbnail_url,
+        )
         # Keep today's post snapshot current — correct baseline for tomorrow's delta.
         # Also fixes zero snapshots left over from before the first real scrape.
         post.snapshots.filter(date=today).update(
@@ -1802,6 +1815,8 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
     posts_authoritative = data.pop("_posts_authoritative", True)
     has_posts_key = "_posts" in data
     posts = data.pop("_posts", [])
+    scrape_included_avatar = "avatar_url" in data
+    scraped_avatar_url = data.get("avatar_url") if scrape_included_avatar else None
     for field, value in data.items():
         if not hasattr(account, field):
             # Some scrapers return extra fields (e.g. following_count) that are
@@ -1880,6 +1895,15 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
 
         account.updated_at = timezone.now()
         account.save(update_fields=list(_ACCOUNT_REFRESH_SAVE_FIELDS))
+
+        from .avatar_storage import ensure_account_avatar_after_refresh
+
+        account.refresh_from_db(fields=["avatar_url", "avatar_file", "avatar_missing"])
+        ensure_account_avatar_after_refresh(
+            account,
+            scrape_included_avatar=scrape_included_avatar,
+            scraped_avatar_url=scraped_avatar_url,
+        )
 
         # Keep today's snapshot up-to-date with the freshly-scraped/aggregated values.
         # This is the baseline used by tomorrow's delta calculation.
@@ -2128,6 +2152,38 @@ class AccountViewSet(viewsets.ModelViewSet):
         ctx["hidden_platforms"] = _get_hidden_platforms()
         ctx["account_delta_period_days"] = _effective_account_delta_period_days(self.request)
         return ctx
+
+    def create(self, request, *args, **kwargs):
+        """
+        Импорт списка: существующий аккаунт — только смена профиля (статистика не трогаем).
+        Тот же профиль — без изменений.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        username = validated["username"]
+        platform = validated["platform"]
+        profile = validated.get("profile")
+        new_profile_id = profile.pk if profile else None
+
+        existing = Account.objects.filter(username=username, platform=platform).first()
+        if existing is not None:
+            ctx = self.get_serializer_context()
+            if existing.profile_id == new_profile_id:
+                data = self.get_serializer(existing, context=ctx).data
+                data["import_action"] = "unchanged"
+                return Response(data, status=status.HTTP_200_OK)
+            existing.profile = profile
+            existing.save(update_fields=["profile", "updated_at"])
+            data = self.get_serializer(existing, context=ctx).data
+            data["import_action"] = "profile_updated"
+            return Response(data, status=status.HTTP_200_OK)
+
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        data = dict(serializer.data)
+        data["import_action"] = "created"
+        return Response(data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=True, methods=["post"])
     def refresh(self, request, pk=None):
@@ -2755,6 +2811,18 @@ def _clamp_max_audience_followers_saved(raw) -> int:
     return max(1, min(cap, v))
 
 
+def _telegram_bot_configured() -> bool:
+    from .telegram_report import telegram_bot_configured
+
+    return telegram_bot_configured()
+
+
+def _telegram_default_chat_id() -> str:
+    from django.conf import settings
+
+    return (getattr(settings, "TELEGRAM_AUTO_REFRESH_CHAT_ID", None) or "").strip()
+
+
 def _schedule_to_dict(config) -> dict:
     from .auto_refresh_scope import (
         normalize_auto_refresh_platforms,
@@ -2773,8 +2841,17 @@ def _schedule_to_dict(config) -> dict:
         "auto_refresh_profile_ids": normalize_auto_refresh_profile_ids(
             getattr(config, "auto_refresh_profile_ids", None),
         ),
-        "auto_refresh_csv_report": bool(
-            getattr(config, "auto_refresh_csv_report", False),
+        "auto_refresh_csv_report": True,
+        "auto_refresh_telegram_enabled": bool(
+            getattr(config, "auto_refresh_telegram_enabled", False),
+        ),
+        "auto_refresh_telegram_chat_id": (
+            getattr(config, "auto_refresh_telegram_chat_id", None) or ""
+        ).strip(),
+        "telegram_bot_configured": _telegram_bot_configured(),
+        "telegram_chat_configured": bool(
+            (getattr(config, "auto_refresh_telegram_chat_id", None) or "").strip()
+            or _telegram_default_chat_id()
         ),
         "include_hidden_platform_accounts": bool(
             getattr(config, "include_hidden_platform_accounts", False),
@@ -2810,6 +2887,40 @@ def _coerce_bool(value) -> bool:
     if s in {"0", "false", "no", "off"}:
         return False
     return bool(value)
+
+
+@api_view(["GET", "POST"])
+def tv_emu_config(request):
+    """
+    Настройки TV-эмуляции (Atomic): общий JSON для всех браузеров/устройств.
+    GET — { "config": object | null }; POST — { "config": object }.
+    """
+    from .tv_emu_config import load_tv_emu_config, save_tv_emu_config
+
+    if request.method == "GET":
+        stored = load_tv_emu_config()
+        return Response({
+            "config": stored,
+            "source": "server",
+            "updated": bool(stored),
+        })
+
+    data = request.data if isinstance(request.data, dict) else {}
+    config = data.get("config")
+    if not isinstance(config, dict):
+        return Response(
+            {"error": "Ожидается JSON-объект в поле config"},
+            status=drf_status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        path = save_tv_emu_config(config)
+    except ValueError as exc:
+        return Response({"error": str(exc)}, status=drf_status.HTTP_400_BAD_REQUEST)
+    return Response({
+        "ok": True,
+        "message": "Настройки эмуляции сохранены на сервере",
+        "config_path": str(path),
+    })
 
 
 @api_view(["GET", "POST"])
@@ -2899,8 +3010,15 @@ def refresh_schedule(request):
             config.skip_recent_hours = max(0, min(168, int(data["skip_recent_hours"])))
         if "refresh_warm_enabled" in data:
             config.refresh_warm_enabled = _coerce_bool(data["refresh_warm_enabled"])
-        if "auto_refresh_csv_report" in data:
-            config.auto_refresh_csv_report = _coerce_bool(data["auto_refresh_csv_report"])
+        config.auto_refresh_csv_report = True
+        if "auto_refresh_telegram_enabled" in data:
+            config.auto_refresh_telegram_enabled = _coerce_bool(
+                data["auto_refresh_telegram_enabled"],
+            )
+        if "auto_refresh_telegram_chat_id" in data:
+            config.auto_refresh_telegram_chat_id = str(
+                data.get("auto_refresh_telegram_chat_id") or "",
+            ).strip()[:32]
         if "include_hidden_platform_accounts" in data:
             config.include_hidden_platform_accounts = _coerce_bool(data["include_hidden_platform_accounts"])
         if "include_hidden_profile_accounts" in data:
@@ -2952,6 +3070,25 @@ def refresh_schedule(request):
         return Response(_schedule_to_dict(config))
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)
+
+
+@api_view(["POST"])
+def auto_refresh_telegram_test(request):
+    """Проверка TELEGRAM_BOT_TOKEN и chat_id (тестовое сообщение)."""
+    try:
+        from .models import RefreshScheduleConfig
+        from .telegram_report import send_telegram_test_message
+
+        config = RefreshScheduleConfig.get()
+        data = request.data if isinstance(request.data, dict) else {}
+        chat_id = str(data.get("chat_id") or "").strip() or None
+        send_telegram_test_message(config=config, chat_id=chat_id)
+        return Response({"ok": True, "detail": "Сообщение отправлено в Telegram."})
+    except Exception as exc:
+        return Response(
+            {"ok": False, "detail": str(exc)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 @api_view(["GET"])
@@ -3111,6 +3248,8 @@ def auto_refresh_status(request):
             "updated_at": state.updated_at,
             "has_csv_report": bool(report_csv),
             "report_generated_at": auto.last_report_generated_at,
+            "last_telegram_error": (getattr(auto, "last_telegram_error", None) or "").strip() or None,
+            "last_telegram_sent_at": getattr(auto, "last_telegram_sent_at", None),
             "run_detail": rd,
             "skip_recent_hours_config": skip_cfg,
         })
@@ -3350,88 +3489,19 @@ def refresh_all_report_download(request):
 
 def account_avatar(request, pk: int):
     """
-    Proxy an account's avatar from its CDN URL.
-    Avoids CDN expiry and hotlink issues on the frontend.
+    Аватар: локальный файл, иначе прокси avatar_url (CDN).
     GET /api/accounts/<pk>/avatar/
     """
-    try:
-        account = Account.objects.get(pk=pk)
-    except Account.DoesNotExist:
-        return HttpResponse(status=404)
+    from .avatar_storage import serve_account_avatar_response
 
-    url = account.avatar_url
-    if not url and account.platform == Platform.TIKTOK:
-        # Не подставляем thumbnail поста как аватар: это приводит к ложной "аватарке"
-        # из видео. Для TikTok держим только профильные источники.
-        try:
-            from platforms.tiktok.service import _extract_avatar_from_html
+    return serve_account_avatar_response(pk)
 
-            profile_url = f"https://www.tiktok.com/@{account.username}"
-            r_prof = httpx.get(
-                profile_url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    ),
-                    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-                    "Accept": (
-                        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-                        "*/*;q=0.8"
-                    ),
-                },
-                follow_redirects=True,
-                timeout=15.0,
-            )
-            if r_prof.status_code == 200 and r_prof.text:
-                url = _extract_avatar_from_html(r_prof.text)
-        except Exception:
-            pass
-    if not url and account.platform == Platform.THREADS:
-        # Meta CDN для аватара иногда пустой в DOM; превью первого поста обычно доступно.
-        first_post = account.posts.exclude(thumbnail_url="").order_by("-id").first()
-        if first_post:
-            url = first_post.thumbnail_url
-    if not url:
-        return HttpResponse(status=404)
 
-    referer_by_platform = {
-        Platform.TIKTOK: "https://www.tiktok.com/",
-        Platform.INSTAGRAM: "https://www.instagram.com/",
-        Platform.YOUTUBE: "https://www.youtube.com/",
-        Platform.TELEGRAM: "https://t.me/",
-        Platform.X: "https://x.com/",
-        Platform.THREADS: "https://www.threads.com/",
-        Platform.FACEBOOK: "https://www.facebook.com/",
-        Platform.RUMBLE: "https://rumble.com/",
-        Platform.REDDIT: "https://www.reddit.com/",
-    }
+def post_thumbnail(request, pk: int):
+    """
+    Превью поста: локальный файл, иначе прокси thumbnail_url (CDN).
+    GET /api/posts/<pk>/thumbnail/
+    """
+    from .post_thumbnail_storage import serve_post_thumbnail_response
 
-    try:
-        r = httpx.get(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                "Referer": referer_by_platform.get(account.platform, "https://www.google.com/"),
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            },
-            follow_redirects=True,
-            timeout=10.0,
-        )
-    except Exception:
-        return HttpResponse(status=502)
-
-    if r.status_code != 200:
-        return HttpResponse(status=404)
-
-    content_type = r.headers.get("content-type", "image/jpeg").split(";")[0]
-    response = HttpResponse(r.content, content_type=content_type)
-    # Cache for 2 hours in the browser; CDN tokens typically last days
-    response["Cache-Control"] = "max-age=7200, public"
-    response["X-Content-Type-Options"] = "nosniff"
-    return response
+    return serve_post_thumbnail_response(pk)

@@ -15,16 +15,34 @@ class ProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Account)
 class AccountAdmin(admin.ModelAdmin):
-    list_display = ["username", "platform", "display_name", "follower_count", "post_count", "updated_at"]
-    list_filter = ["platform"]
+    list_display = [
+        "username",
+        "platform",
+        "display_name",
+        "avatar_missing",
+        "follower_count",
+        "post_count",
+        "updated_at",
+    ]
+    list_filter = ["platform", "avatar_missing"]
     search_fields = ["username", "display_name"]
-    readonly_fields = ["created_at", "updated_at"]
+    readonly_fields = ["created_at", "updated_at", "avatar_file"]
     ordering = ["-created_at"]
 
 
 @admin.register(Post)
 class PostAdmin(admin.ModelAdmin):
-    list_display = ["external_id", "account", "description_short", "view_count", "like_count", "comment_count", "posted_at", "updated_at"]
+    list_display = [
+        "external_id",
+        "account",
+        "thumbnail_missing",
+        "description_short",
+        "view_count",
+        "like_count",
+        "comment_count",
+        "posted_at",
+        "updated_at",
+    ]
     list_filter = ["account__platform"]
     search_fields = ["external_id", "description", "account__username"]
     readonly_fields = ["created_at", "updated_at"]

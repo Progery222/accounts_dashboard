@@ -18,6 +18,9 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("NEW_FRONTEND_PORT", "5174") or "5174")
 ROOT = Path(__file__).resolve().parent
 
+# Префикс на проде (nginx); локально run_server.py отдаёт те же файлы из корня.
+DEPLOY_PREFIXES = ("/accounts-stats",)
+
 # Явные SPA-маршруты (без расширения файла)
 SPA_PATHS = frozenset({
     "/",
@@ -39,14 +42,24 @@ class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 class AtomicHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     """Статика с диска; остальные GET → app.html (SPA, в т.ч. /emu)."""
 
+    @staticmethod
+    def _strip_deploy_prefix(url_path: str) -> str:
+        path = url_path or "/"
+        for prefix in DEPLOY_PREFIXES:
+            if path == prefix:
+                return "/"
+            if path.startswith(prefix + "/"):
+                return path[len(prefix) :] or "/"
+        return path
+
     def _url_path(self) -> str:
         return urlparse(self.path).path
 
     def _clean_path(self) -> str:
-        return self._url_path().rstrip("/") or "/"
+        return self._strip_deploy_prefix(self._url_path()).rstrip("/") or "/"
 
     def _local_file(self, url_path: str) -> Path | None:
-        rel = url_path.lstrip("/")
+        rel = self._strip_deploy_prefix(url_path).lstrip("/")
         if not rel or rel.endswith("/"):
             return None
         candidate = (ROOT / rel.replace("/", os.sep)).resolve()
@@ -65,10 +78,16 @@ class AtomicHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
-        clean = parsed.path.rstrip("/") or "/"
-        if self._local_file(parsed.path) is None and self._should_spa(clean):
-            qs = f"?{parsed.query}" if parsed.query else ""
+        fs_path = self._strip_deploy_prefix(parsed.path)
+        clean = fs_path.rstrip("/") or "/"
+        qs = f"?{parsed.query}" if parsed.query else ""
+        if self._local_file(fs_path) is None and clean.startswith("/api"):
+            self.path = fs_path + qs
+            return super().do_GET()
+        if self._local_file(fs_path) is None and self._should_spa(clean):
             self.path = f"/app.html{qs}"
+        else:
+            self.path = fs_path + qs
         return super().do_GET()
 
     def end_headers(self) -> None:

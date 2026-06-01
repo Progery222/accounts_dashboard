@@ -22,7 +22,7 @@ from accounts.settings_views import (
     reddit_start_auth,
     reddit_import_cookies,
 )
-from accounts.views import account_avatar
+from accounts.views import account_avatar, post_thumbnail
 from .health import healthz, healthz_ready
 
 urlpatterns = [
@@ -36,6 +36,7 @@ urlpatterns = [
     path("api/tiktok/", include("tiktok_app.urls")),
     # Avatar proxy (bypasses CDN expiry / hotlink issues)
     path("api/accounts/<int:pk>/avatar/", account_avatar),
+    path("api/posts/<int:pk>/thumbnail/", post_thumbnail),
     # Settings / auth management
     path("api/settings/status/", auth_status),
     path("api/settings/<slug:platform>/logout/", auth_logout),

@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from django.test import TestCase
 
-from accounts.models import Account, AccountSnapshot, Platform
+from accounts.models import Account, AccountSnapshot, Platform, Profile
 from accounts.serializers import AccountSerializer
 
 
@@ -120,3 +120,57 @@ class AccountDeltaSerializerTests(TestCase):
         payload = AccountSerializer(account).data
         self.assertEqual(payload["view_delta"], 0)
         self.assertEqual(payload["follower_delta"], 0)
+
+    def test_import_create_unchanged_when_same_profile(self):
+        from rest_framework.test import APIRequestFactory
+
+        profile = Profile.objects.create(name="P1", color="#6366f1")
+        Account.objects.create(
+            username="move_user",
+            platform=Platform.TIKTOK,
+            profile=profile,
+            view_count=999,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {"username": "move_user", "platform": "tiktok", "profile_id": profile.id},
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.get("import_action"), "unchanged")
+        self.assertEqual(
+            Account.objects.get(username="move_user", platform=Platform.TIKTOK).view_count,
+            999,
+        )
+
+    def test_import_create_updates_profile_only(self):
+        from rest_framework.test import APIRequestFactory
+
+        old = Profile.objects.create(name="Old", color="#111111")
+        new = Profile.objects.create(name="New", color="#222222")
+        Account.objects.create(
+            username="move_user2",
+            platform=Platform.TIKTOK,
+            profile=old,
+            view_count=500,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {"username": "move_user2", "platform": "tiktok", "profile_id": new.id},
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.get("import_action"), "profile_updated")
+        acc = Account.objects.get(username="move_user2", platform=Platform.TIKTOK)
+        self.assertEqual(acc.profile_id, new.id)
+        self.assertEqual(acc.view_count, 500)

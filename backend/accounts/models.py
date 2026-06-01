@@ -38,8 +38,18 @@ class RefreshScheduleConfig(models.Model):
         help_text="Прогрев Facebook при refresh_all, bulk и автообновлении.",
     )
     auto_refresh_csv_report = models.BooleanField(
-        default=False,
+        default=True,
         help_text="После завершения автообновления сохранять CSV-отчёт для скачивания в интерфейсе.",
+    )
+    auto_refresh_telegram_enabled = models.BooleanField(
+        default=False,
+        help_text="После успешного автообновления отправлять отчёт в Telegram.",
+    )
+    auto_refresh_telegram_chat_id = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Chat ID получателя (личный чат с ботом).",
     )
     include_hidden_platform_accounts = models.BooleanField(
         default=False,
@@ -89,7 +99,9 @@ class RefreshScheduleConfig(models.Model):
                 "interval_hours": 6,
                 "skip_recent_hours": 0,
                 "refresh_warm_enabled": True,
-                "auto_refresh_csv_report": False,
+                "auto_refresh_csv_report": True,
+                "auto_refresh_telegram_enabled": False,
+                "auto_refresh_telegram_chat_id": "",
                 "include_hidden_platform_accounts": False,
                 "include_hidden_profile_accounts": False,
                 "include_unavailable_accounts": False,
@@ -136,6 +148,8 @@ class AutoRefreshState(models.Model):
     last_error = models.TextField(blank=True, default="")
     last_report_csv = models.TextField(blank=True, default="")
     last_report_generated_at = models.DateTimeField(null=True, blank=True)
+    last_telegram_error = models.TextField(blank=True, default="")
+    last_telegram_sent_at = models.DateTimeField(null=True, blank=True)
     # ID аккаунтов со статусом «ошибка» в последнем завершённом автообновлении (по расписанию / «запустить сейчас»).
     last_auto_refresh_error_account_ids = models.JSONField(blank=True, default=list)
     # Прогресс текущего/последнего автообновления: { "worker_count": int, "items": [...] }
@@ -234,7 +248,21 @@ class Account(models.Model):
         null=True, blank=True, related_name="accounts",
     )
     display_name = models.CharField(max_length=255, blank=True)
-    avatar_url = models.URLField(max_length=1024, blank=True)
+    avatar_url = models.URLField(
+        max_length=1024,
+        blank=True,
+        help_text="CDN-URL с площадки; fallback, если локальный файл ещё не скачан.",
+    )
+    avatar_file = models.FileField(
+        upload_to="accounts/avatars/%Y/%m/",
+        blank=True,
+        max_length=512,
+        help_text="Локальная копия аватара (скачивается один раз при refresh).",
+    )
+    avatar_missing = models.BooleanField(
+        default=False,
+        help_text="На площадке нет аватара; не пытаться скачивать при автообновлении.",
+    )
     bio = models.TextField(blank=True)
     follower_count = models.BigIntegerField(default=0)
     like_count = models.BigIntegerField(default=0)
@@ -303,7 +331,21 @@ class Post(models.Model):
     external_id = models.CharField(max_length=255)
     description = models.TextField(blank=True)
     hashtags = models.JSONField(default=list, blank=True)
-    thumbnail_url = models.URLField(max_length=2048, blank=True)
+    thumbnail_url = models.URLField(
+        max_length=2048,
+        blank=True,
+        help_text="CDN-URL превью; fallback, если локальный файл ещё не скачан.",
+    )
+    thumbnail_file = models.FileField(
+        upload_to="posts/thumbnails/%Y/%m/",
+        blank=True,
+        max_length=512,
+        help_text="Локальная копия превью (скачивается один раз при sync постов).",
+    )
+    thumbnail_missing = models.BooleanField(
+        default=False,
+        help_text="У поста нет превью на площадке; не пытаться скачивать при обновлении.",
+    )
     post_url = models.URLField(max_length=2048, blank=True)
     view_count = models.BigIntegerField(default=0)
     like_count = models.BigIntegerField(default=0)
