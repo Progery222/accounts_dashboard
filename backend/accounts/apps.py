@@ -452,9 +452,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         pass
     skip_recent_hours = max(0, int(getattr(cfg, "skip_recent_hours", 0) or 0))
     cutoff = timezone.now() - timedelta(hours=skip_recent_hours) if skip_recent_hours > 0 else None
-    # «Запустить сейчас» — явный полный прогон; пропуск недавних только для cron/очереди.
-    if source == "manual":
-        cutoff = None
+    # «Запустить сейчас» использует те же фильтры skip_recent_hours, что и запуск по расписанию.
     from .auto_refresh_scope import apply_auto_refresh_scope
 
     accounts_qs = Account.objects.select_related("profile").all()

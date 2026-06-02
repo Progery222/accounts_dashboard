@@ -475,6 +475,57 @@ Playwright IG: сессия + `/reels/` DOM — **минуты** на аккау
 
 **Статус в MVP:** переключатель `youtube_backend` в UI **не показывать** (API остаётся default); зафиксировать Apify как **запасной** путь.
 
+### Reddit — результаты тестов (добавлено 2026-06-02)
+
+Прогон на `https://www.reddit.com/r/classicwow/` с одинаковой целью: получить ленту постов сабреддита и базовые метрики для нормализации в `_posts`.
+
+#### Три actor’а Apify
+
+| Actor | Время | Постов | Метрики вовлечённости | Комментарий |
+|-------|-------|--------|------------------------|-------------|
+| [trudax/reddit-scraper-lite](https://apify.com/trudax/reddit-scraper-lite) | ~64s | 10 post + 1 community | Ограниченно (в прогоне без score/comments) | Работает, но неполные engagement-поля |
+| [harshmaur/reddit-scraper](https://apify.com/harshmaur/reddit-scraper) | ~5.8s | 10 | Есть (`upVotes`, `commentsCount`, `authorName`) | Качественная структура постов |
+| [automation-lab/reddit-scraper](https://apify.com/automation-lab/reddit-scraper) | ~4.6s | **30** | Есть поля (`score`, `numComments`), но часто 0 из-за ограничений Reddit | Лучший охват ленты |
+
+#### Зафиксированный выбор №1
+
+| | |
+|---|---|
+| **Actor** | [`automation-lab/reddit-scraper`](https://apify.com/automation-lab/reddit-scraper) |
+| **Почему №1** | Максимальная полнота по постам (30/30 в тесте), быстрый run, удобная схема (`id/title/author/subreddit/score/numComments/permalink/createdAt`) |
+| **Input (ориентир)** | `{ "urls": ["https://www.reddit.com/r/{subreddit}/"], "maxPostsPerSource": 30, "sort": "hot", "includeComments": false }` |
+| **Env (если добавлять в код)** | `APIFY_ACTOR_REDDIT=automation-lab/reddit-scraper` |
+| **Политика качества** | `score/numComments` считать условно-надёжными (возможны нули из-за ограничений Reddit), при необходимости enrich/fallback вторым run |
+
+#### Запасной вариант №2
+
+- `harshmaur/reddit-scraper` — использовать как fallback/enrich, когда важнее качество `upVotes/comments` и author-полей, чем максимальный охват постов.
+
+### Rumble — выбор для `PhilGodlewski` (добавлено 2026-06-02)
+
+Цель: сбор данных аккаунта `https://rumble.com/c/PhilGodlewski` и его постов (видео) для refresh-пайплайна.
+
+#### Зафиксированный выбор №1
+
+| | |
+|---|---|
+| **Actor** | [`thescrapelab/apify-rumble-scraper`](https://apify.com/thescrapelab/apify-rumble-scraper) |
+| **Почему №1** | Лучший баланс по устойчивости и покрытию: channel + videos + shorts/livestreams, есть признаки антиблок-логики (fallback), удобные поля для нормализации и диагностики (`detailFetchFailed`, `source*`) |
+| **Input (ориентир)** | `{ "queries": ["https://rumble.com/c/PhilGodlewski"], "contentTypes": ["videos"], "maxItems": 200 }` |
+| **Цена (витрина)** | от ~$1.79 / 1k results |
+| **Env (если добавлять в код)** | `APIFY_ACTOR_RUMBLE=thescrapelab/apify-rumble-scraper` |
+
+#### Запасные варианты
+
+1. [`azzouzana/rumble-all-inclusive-scraper`](https://apify.com/azzouzana/rumble-all-inclusive-scraper) — универсальный actor (канал/видео/плейлисты/search), удобно для единого входа.
+2. [`dltik/rumble-scraper`](https://apify.com/dltik/rumble-scraper) — бюджетный metadata-only режим на базе `yt-dlp` для массового дешёвого сбора.
+
+#### Политика применения
+
+- Для задачи «аккаунт + посты» использовать №1 как основной.
+- Если №1 даёт нестабильный результат на канале, переключаться на `azzouzana/*` как fallback.
+- Для эконом-режима без расширенной структуры канала использовать `dltik/*`.
+
 ---
 
 ## 4. Архитектура backend
@@ -805,6 +856,9 @@ POST /api/internal/apify/webhook/?token=<APIFY_WEBHOOK_SECRET>
 - [Threads Scraper (makework36) — отклонён (followers null)](https://apify.com/makework36/threads-scraper)
 - [Meta Threads Profile Posts (khadinakbar) — отклонён (дубль)](https://apify.com/khadinakbar/meta-threads-profile-posts-scraper)
 - [Meta Threads Scraper (constructive_calm) — без viewCount на постах](https://apify.com/constructive_calm/threads-scraper)
+- [Reddit Scraper (automation-lab) — **выбран №1**](https://apify.com/automation-lab/reddit-scraper)
+- [Reddit Scraper (harshmaur) — запасной №2 для enrich](https://apify.com/harshmaur/reddit-scraper)
+- [Reddit Scraper Lite (trudax) — протестирован, ограниченные engagement-поля](https://apify.com/trudax/reddit-scraper-lite)
 - [YouTube Scraper (streamers) — **кандидат, watch URLs**](https://apify.com/streamers/youtube-scraper)
 - [Fast YouTube Channel Scraper (streamers) — крупные каналы; NO_RESULTS на micro](https://apify.com/streamers/youtube-channel-scraper)
 - [X Profile Posts (scraper_one) — кандидат, без views](https://apify.com/scraper_one/x-profile-posts-scraper)
