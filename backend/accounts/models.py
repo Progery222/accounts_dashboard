@@ -234,7 +234,7 @@ class ScrapeBackendChoice(models.TextChoices):
 
 
 class ScrapeBackendConfig(models.Model):
-    """Singleton (pk=1). Backend сбора данных по платформе (MVP: FB, TT, IG)."""
+    """Singleton (pk=1). Backend сбора данных по платформе."""
 
     facebook_backend = models.CharField(
         max_length=16,
@@ -247,6 +247,21 @@ class ScrapeBackendConfig(models.Model):
         default=ScrapeBackendChoice.PLAYWRIGHT,
     )
     instagram_backend = models.CharField(
+        max_length=16,
+        choices=ScrapeBackendChoice.choices,
+        default=ScrapeBackendChoice.PLAYWRIGHT,
+    )
+    youtube_backend = models.CharField(
+        max_length=16,
+        choices=ScrapeBackendChoice.choices,
+        default=ScrapeBackendChoice.PLAYWRIGHT,
+    )
+    reddit_backend = models.CharField(
+        max_length=16,
+        choices=ScrapeBackendChoice.choices,
+        default=ScrapeBackendChoice.PLAYWRIGHT,
+    )
+    rumble_backend = models.CharField(
         max_length=16,
         choices=ScrapeBackendChoice.choices,
         default=ScrapeBackendChoice.PLAYWRIGHT,
@@ -264,6 +279,9 @@ class ScrapeBackendConfig(models.Model):
                 "facebook_backend": ScrapeBackendChoice.PLAYWRIGHT,
                 "tiktok_backend": ScrapeBackendChoice.PLAYWRIGHT,
                 "instagram_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "youtube_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "reddit_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "rumble_backend": ScrapeBackendChoice.PLAYWRIGHT,
             },
         )
         return obj
@@ -276,6 +294,12 @@ class ScrapeBackendConfig(models.Model):
             return self.tiktok_backend
         if key == "instagram":
             return self.instagram_backend
+        if key == "youtube":
+            return self.youtube_backend
+        if key == "reddit":
+            return self.reddit_backend
+        if key == "rumble":
+            return self.rumble_backend
         return ScrapeBackendChoice.PLAYWRIGHT
 
 

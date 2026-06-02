@@ -5,7 +5,9 @@ from django.conf import settings
 
 from accounts.models import ScrapeBackendChoice, ScrapeBackendConfig
 
-APIFY_MVP_PLATFORMS = frozenset({"facebook", "tiktok", "instagram"})
+APIFY_MVP_PLATFORMS = frozenset(
+    {"facebook", "tiktok", "instagram", "youtube", "reddit", "rumble"}
+)
 
 
 def apify_enabled() -> bool:
@@ -53,6 +55,12 @@ def actor_for_stage(platform: str, stage: str) -> str:
             "APIFY_ACTOR_INSTAGRAM_PROFILE",
             "apify/instagram-profile-scraper",
         )
+    if plat == "youtube":
+        return getattr(settings, "APIFY_ACTOR_YOUTUBE", "streamers/youtube-scraper")
+    if plat == "reddit":
+        return getattr(settings, "APIFY_ACTOR_REDDIT", "automation-lab/reddit-scraper")
+    if plat == "rumble":
+        return getattr(settings, "APIFY_ACTOR_RUMBLE", "thescrapelab/apify-rumble-scraper")
     raise ValueError(f"Нет actor Apify для платформы {platform!r}")
 
 
@@ -67,4 +75,10 @@ def poll_max_wait_sec(platform: str) -> int:
         return 300
     if plat == "instagram":
         return 120
+    if plat == "youtube":
+        return 240
+    if plat == "reddit":
+        return 180
+    if plat == "rumble":
+        return 240
     return 600

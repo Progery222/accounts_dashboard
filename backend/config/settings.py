@@ -370,6 +370,9 @@ APIFY_ACTOR_INSTAGRAM_PROFILE = os.getenv(
     "APIFY_ACTOR_INSTAGRAM_PROFILE", "apify/instagram-profile-scraper"
 ).strip()
 APIFY_ACTOR_INSTAGRAM_POSTS = os.getenv("APIFY_ACTOR_INSTAGRAM_POSTS", "apify/instagram-scraper").strip()
+APIFY_ACTOR_YOUTUBE = os.getenv("APIFY_ACTOR_YOUTUBE", "streamers/youtube-scraper").strip()
+APIFY_ACTOR_REDDIT = os.getenv("APIFY_ACTOR_REDDIT", "automation-lab/reddit-scraper").strip()
+APIFY_ACTOR_RUMBLE = os.getenv("APIFY_ACTOR_RUMBLE", "thescrapelab/apify-rumble-scraper").strip()
 APIFY_MAX_CONCURRENT_RUNS = max(1, int(os.getenv("APIFY_MAX_CONCURRENT_RUNS", "3") or "3"))
 APIFY_POLL_INTERVAL_SEC = max(5, int(os.getenv("APIFY_POLL_INTERVAL_SEC", "15") or "15"))
 APIFY_POLL_MAX_WAIT_SEC = int(os.getenv("APIFY_POLL_MAX_WAIT_SEC", "0") or "0") or None

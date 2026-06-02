@@ -16,6 +16,9 @@ def _scrape_backend_to_dict(cfg: ScrapeBackendConfig) -> dict:
         "facebook_backend": cfg.facebook_backend,
         "tiktok_backend": cfg.tiktok_backend,
         "instagram_backend": cfg.instagram_backend,
+        "youtube_backend": cfg.youtube_backend,
+        "reddit_backend": cfg.reddit_backend,
+        "rumble_backend": cfg.rumble_backend,
         "apify_enabled": apify_enabled(),
         "apify_configured": bool((getattr(settings, "APIFY_TOKEN", "") or "").strip()),
     }
@@ -32,7 +35,14 @@ def scrape_backend(request):
         return Response(data)
 
     data = request.data or {}
-    for field in ("facebook_backend", "tiktok_backend", "instagram_backend"):
+    for field in (
+        "facebook_backend",
+        "tiktok_backend",
+        "instagram_backend",
+        "youtube_backend",
+        "reddit_backend",
+        "rumble_backend",
+    ):
         if field not in data:
             continue
         val = str(data[field] or "").strip().lower()

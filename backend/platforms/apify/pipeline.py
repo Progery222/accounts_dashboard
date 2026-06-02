@@ -22,7 +22,14 @@ from accounts.models import (
 from . import client
 from .apply import apply_normalized_refresh
 from .config import actor_for_stage, poll_max_wait_sec
-from .normalizers import normalize_facebook, normalize_instagram, normalize_tiktok
+from .normalizers import (
+    normalize_facebook,
+    normalize_instagram,
+    normalize_reddit,
+    normalize_rumble,
+    normalize_tiktok,
+    normalize_youtube,
+)
 from .pool import acquire_run_slot, release_run_slot
 
 logger = logging.getLogger(__name__)
@@ -87,6 +94,33 @@ def _build_input(job: ApifyRefreshJob, stage: str) -> dict[str, Any]:
                 "resultsLimit": 80,
             }
         return {"usernames": [handle]}
+    if plat == Platform.YOUTUBE:
+        return {
+            "startUrls": [f"https://www.youtube.com/@{uname.lstrip('@')}"],
+            "maxResult": 30,
+            "maxResults": 30,
+        }
+    if plat == Platform.REDDIT:
+        sub = re.sub(r"^https?://(?:www\.)?reddit\.com/", "", uname.strip(), flags=re.I)
+        sub = sub.split("?", 1)[0].split("#", 1)[0].strip("/")
+        if sub.lower().startswith("r/"):
+            sub = sub[2:]
+        sub = sub.split("/", 1)[0].strip()
+        return {
+            "urls": [f"https://www.reddit.com/r/{sub}/"],
+            "maxPostsPerSource": 30,
+            "sort": "hot",
+            "includeComments": False,
+        }
+    if plat == Platform.RUMBLE:
+        rumble_input = uname.strip()
+        if not re.match(r"^https?://", rumble_input, flags=re.I):
+            rumble_input = f"https://rumble.com/c/{rumble_input.lstrip('@')}"
+        return {
+            "queries": [rumble_input],
+            "contentTypes": ["videos"],
+            "maxItems": 200,
+        }
 
     raise ValueError(f"Неподдерживаемая платформа Apify: {plat}")
 
@@ -103,11 +137,13 @@ def _next_stage(job: ApifyRefreshJob, completed_stage: str) -> str | None:
         if completed_stage == "profile":
             return "posts"
         return None
+    if plat in (Platform.YOUTUBE, Platform.REDDIT, Platform.RUMBLE):
+        return None
     return None
 
 
 def _first_stage(platform: str) -> str:
-    if platform == Platform.TIKTOK:
+    if platform in (Platform.TIKTOK, Platform.YOUTUBE, Platform.REDDIT, Platform.RUMBLE):
         return "scrape"
     return "profile"
 
@@ -244,6 +280,18 @@ def _normalize_and_apply(job: ApifyRefreshJob) -> None:
             posts_succeeded=posts_ok,
             existing_likes=existing_likes,
         )
+    elif plat == Platform.YOUTUBE:
+        ds = stages[-1].get("dataset_id") if stages else job.apify_dataset_id
+        items = client.fetch_dataset_items(str(ds))
+        payload = normalize_youtube(items, username=account.username or "")
+    elif plat == Platform.REDDIT:
+        ds = stages[-1].get("dataset_id") if stages else job.apify_dataset_id
+        items = client.fetch_dataset_items(str(ds))
+        payload = normalize_reddit(items, username=account.username or "")
+    elif plat == Platform.RUMBLE:
+        ds = stages[-1].get("dataset_id") if stages else job.apify_dataset_id
+        items = client.fetch_dataset_items(str(ds))
+        payload = normalize_rumble(items, username=account.username or "")
     else:
         raise ValueError(f"Платформа {plat} не поддерживается")
 
