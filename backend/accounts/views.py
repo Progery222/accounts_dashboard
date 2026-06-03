@@ -36,7 +36,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, action
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
-from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT
+from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT, NEW_ACCOUNT_UPDATED_AT
 from .audience import AUDIENCE_SYNC_SUPPORTED_PLATFORMS
 from .models import (
     Account,
@@ -409,6 +409,11 @@ def _restore_account_updated_at(account_id: int, preserved) -> None:
     if preserved is None:
         return
     Account.objects.filter(pk=account_id).update(updated_at=preserved)
+
+
+def _stamp_new_account_updated_at(account_id: int) -> None:
+    """Новый аккаунт: фиксированная дата вместо now, чтобы выделять «ещё не обновлялись»."""
+    Account.objects.filter(pk=account_id).update(updated_at=NEW_ACCOUNT_UPDATED_AT)
 
 
 def _account_refresh_baseline(account: Account) -> dict:
@@ -2454,6 +2459,11 @@ class AccountViewSet(viewsets.ModelViewSet):
             include_hidden_platforms=include_hidden_platforms,
             include_hidden_profiles=include_hidden_profiles,
         )
+
+    def perform_create(self, serializer):
+        super().perform_create(serializer)
+        _stamp_new_account_updated_at(serializer.instance.pk)
+        serializer.instance.refresh_from_db(fields=["updated_at"])
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()

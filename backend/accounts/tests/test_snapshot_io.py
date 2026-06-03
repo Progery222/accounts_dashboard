@@ -16,6 +16,7 @@ from accounts.models import (
     PostSnapshot,
     Profile,
 )
+from accounts.constants import NEW_ACCOUNT_UPDATED_AT
 from accounts.snapshot_io import build_snapshot_csv, import_snapshot_csv
 
 
@@ -82,6 +83,34 @@ class SnapshotIoRoundTripTests(TestCase):
         post2 = Post.objects.get(account=acc2, external_id="vid1")
         self.assertIsNotNone(post2.posted_at)
         self.assertEqual(post2.posted_at.date(), posted.date())
+
+    def test_export_import_preserves_updated_at(self):
+        marker = timezone.now() - timedelta(hours=5)
+        acc = Account.objects.create(
+            username="time_user",
+            platform=Platform.YOUTUBE,
+            follower_count=1,
+        )
+        Account.objects.filter(pk=acc.pk).update(updated_at=marker)
+        acc.refresh_from_db()
+
+        csv_bytes = build_snapshot_csv()
+        Account.objects.filter(username="time_user", platform=Platform.YOUTUBE).delete()
+        summary = import_snapshot_csv(BytesIO(csv_bytes))
+        self.assertEqual(summary["errors"], [])
+        acc2 = Account.objects.get(username="time_user", platform=Platform.YOUTUBE)
+        self.assertEqual(acc2.updated_at, acc.updated_at)
+
+    def test_import_sets_marker_updated_at_from_csv(self):
+        csv = (
+            "# ACCOUNTS\n"
+            "username,platform,follower_count,like_count,view_count,post_count,updated_at\n"
+            f"fresh,telegram,0,0,0,0,{NEW_ACCOUNT_UPDATED_AT.isoformat()}\n"
+        ).encode("utf-8")
+        summary = import_snapshot_csv(BytesIO(csv))
+        self.assertEqual(summary["errors"], [])
+        acc = Account.objects.get(username="fresh", platform=Platform.TELEGRAM)
+        self.assertEqual(acc.updated_at, NEW_ACCOUNT_UPDATED_AT)
 
     def test_legacy_csv_without_new_columns_keeps_link_clicks_on_update(self):
         acc = Account.objects.create(

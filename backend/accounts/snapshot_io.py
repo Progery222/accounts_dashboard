@@ -430,7 +430,7 @@ def build_snapshot_csv() -> bytes:
         "id", "username", "platform", "profile_id", "profile_name", "profile_color",
         "display_name", "avatar_url", "bio",
         "follower_count", "like_count", "view_count", "post_count",
-        "link_click_count", "profile_unavailable",
+        "link_click_count", "profile_unavailable", "updated_at",
     ]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(acc_headers)
@@ -451,6 +451,7 @@ def build_snapshot_csv() -> bytes:
             a.post_count,
             a.link_click_count,
             _bool_csv(a.profile_unavailable),
+            timezone.localtime(a.updated_at).isoformat() if a.updated_at else "",
         ])
 
     out.write(f"\n# {SECTION_POSTS}\n")
@@ -826,6 +827,14 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     profile_unavailable = (
                         _parse_bool(col("profile_unavailable")) if has_col("profile_unavailable") else False
                     )
+                    updated_at_parsed = None
+                    if has_col("updated_at"):
+                        raw_updated = (col("updated_at") or "").strip()
+                        if raw_updated:
+                            updated_at_parsed = _parse_iso_datetime(raw_updated)
+                            if updated_at_parsed is None:
+                                row_err(SECTION_ACCOUNTS, rnum, f"Некорректный updated_at: {raw_updated!r}")
+                                continue
 
                     defaults = {
                         "profile_id": prof,
@@ -862,6 +871,9 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         result["accounts_updated"] += 1
                     else:
                         result["accounts_created"] += 1
+
+                    if updated_at_parsed is not None:
+                        Account.objects.filter(pk=obj.pk).update(updated_at=updated_at_parsed)
 
                     if not has_account_snapshots_section:
                         snap, _ = obj.take_snapshot_if_needed()

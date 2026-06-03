@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.utils import timezone
 from django.test import TestCase
 
+from accounts.constants import NEW_ACCOUNT_UPDATED_AT
 from accounts.models import Account, AccountSnapshot, Platform, Profile
 from accounts.serializers import AccountSerializer
 
@@ -120,6 +121,24 @@ class AccountDeltaSerializerTests(TestCase):
         payload = AccountSerializer(account).data
         self.assertEqual(payload["view_delta"], 0)
         self.assertEqual(payload["follower_delta"], 0)
+
+    def test_import_create_sets_marker_updated_at(self):
+        from rest_framework.test import APIRequestFactory
+
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {"username": "brand_new", "platform": "tiktok"},
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data.get("import_action"), "created")
+        acc = Account.objects.get(username="brand_new", platform=Platform.TIKTOK)
+        self.assertEqual(acc.updated_at, NEW_ACCOUNT_UPDATED_AT)
 
     def test_import_create_unchanged_when_same_profile(self):
         from rest_framework.test import APIRequestFactory
