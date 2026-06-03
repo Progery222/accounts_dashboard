@@ -58,6 +58,21 @@ def _cleanup_chrome_artifacts(profile_dir: str) -> None:
     if removed:
         print(f"[worker] cleaned up Chrome artefacts: {removed}", file=sys.stderr)
 
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = base / name
+        try:
+            if p.exists() or p.is_symlink():
+                p.unlink()
+                removed.append(name)
+        except Exception as exc:
+            print(f"[worker] cleanup: could not remove {name}: {exc}", file=sys.stderr)
+    try:
+        from platforms.worker_utils import kill_chrome_processes_for_profile
+
+        kill_chrome_processes_for_profile(profile_dir)
+    except Exception:
+        pass
+
 
 def _is_item_list_url(url: str) -> bool:
     """Return True for any TikTok video-list API endpoint."""

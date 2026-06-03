@@ -13,8 +13,9 @@
 .EXAMPLE
   .\scripts\deploy-mobilefarm.ps1 -IdentityFile "$env:USERPROFILE\.ssh\id_ed25519"
 
-  После деплоя, чтобы refresh работал как локально (ключи API, cookies):
-  .\scripts\sync-mobilefarm-secrets.ps1
+  Синхронизирует: backend/, new_frontend/, deploy/, scripts/*.sh и *.py (операционные).
+  НЕ синхронизирует: .env, worker_accounts.env, Chrome-профиль, backend/media, БД.
+  После деплоя для сессий и ключей: .\scripts\sync-mobilefarm-secrets.ps1
 #>
 [CmdletBinding()]
 param(
@@ -75,7 +76,8 @@ $IdentityFile = Resolve-IdentityFile $IdentityFile
 $sshBase = "ssh -i `"$IdentityFile`" -o BatchMode=yes -o ConnectTimeout=15 $remote"
 $scpBase = "scp -i `"$IdentityFile`" -o BatchMode=yes"
 
-$robocopyExcludeDirs = @(".venv", ".venv-gil", "__pycache__", "var", "staticfiles", "node_modules")
+# media заливается отдельно (scp/rsync); на сервере часто root/docker — ломает scp при полном деплое
+$robocopyExcludeDirs = @(".venv", ".venv-gil", "__pycache__", "var", "staticfiles", "node_modules", "media")
 $robocopyExcludeFiles = @(".env", "worker_accounts.env", "worker_subs.env", "*.pyc", "*.session")
 
 try {
@@ -124,11 +126,21 @@ try {
     Copy-Item -Path (Join-Path $repoRoot ".env.example") -Destination (Join-Path $staging ".env.example") -Force
     Copy-Item -Path (Join-Path $repoRoot "scripts\write_mobilefarm_env.py") -Destination (Join-Path $staging "write_mobilefarm_env.py") -Force
 
+    # Операционные скрипты (не весь scripts/ — там сотни одноразовых patch-*.mjs).
+    $scriptsStage = Join-Path $staging "scripts"
+    New-Item -ItemType Directory -Path $scriptsStage -Force | Out-Null
+    $scriptsSrc = Join-Path $repoRoot "scripts"
+    Get-ChildItem -Path $scriptsSrc -File | Where-Object {
+        $_.Extension -in @(".sh", ".py") -or $_.Name -eq "merge_mobilefarm_env.py"
+    } | ForEach-Object {
+        Copy-Item -Path $_.FullName -Destination (Join-Path $scriptsStage $_.Name) -Force
+    }
+
     Write-Step "Ensure remote directory"
     Invoke-DeployCommand "$sshBase `"mkdir -p ${RemoteRoot}`""
 
     Write-Step "Upload"
-    Invoke-DeployCommand "$scpBase -r `"$staging/backend`" `"$staging/new_frontend`" `"$staging/deploy`" `"$staging/docker-compose.prod.yml`" `"$staging/docker-compose.prod.mobilefarm.yml`" `"$staging/.env.example`" `"$staging/write_mobilefarm_env.py`" ${remote}:${RemoteRoot}/"
+    Invoke-DeployCommand "$scpBase -r `"$staging/backend`" `"$staging/new_frontend`" `"$staging/deploy`" `"$staging/scripts`" `"$staging/docker-compose.prod.yml`" `"$staging/docker-compose.prod.mobilefarm.yml`" `"$staging/.env.example`" `"$staging/write_mobilefarm_env.py`" ${remote}:${RemoteRoot}/"
 
     Write-Step "Remove leaked backend/.env on server"
     Invoke-DeployCommand "$sshBase `"rm -f ${RemoteRoot}/backend/.env`""
@@ -160,10 +172,9 @@ fi
         Invoke-DeployCommand "$sshBase `"$composeCmd`""
     }
 
-    Write-Step "Upload enable-mobilefarm-headed-browser.sh"
-    $enableSh = Join-Path $repoRoot "scripts\enable-mobilefarm-headed-browser.sh"
-    if ((Test-Path $enableSh) -and -not $DryRun) {
-        Invoke-DeployCommand "$scpBase `"$enableSh`" ${remote}:${RemoteRoot}/enable-mobilefarm-headed-browser.sh"
+    if (-not $DryRun) {
+        Write-Step "chmod scripts/*.sh on server"
+        Invoke-DeployCommand "$sshBase `"chmod +x ${RemoteRoot}/scripts/*.sh 2>/dev/null; ln -sf ${RemoteRoot}/scripts/enable-mobilefarm-headed-browser.sh ${RemoteRoot}/enable-mobilefarm-headed-browser.sh 2>/dev/null || true`""
     }
 
     if (-not $SkipBuild -and -not $DryRun) {
@@ -173,6 +184,7 @@ fi
         Write-Host ""
         Write-Host "Deploy OK: http://${SshHost}:9080/" -ForegroundColor Green
         Write-Host "На сервере (RDP-терминал): bash ~/dashboard/enable-mobilefarm-headed-browser.sh" -ForegroundColor DarkGray
+        Write-Host "  (то же: ~/dashboard/scripts/enable-mobilefarm-headed-browser.sh)" -ForegroundColor DarkGray
         Write-Host "Секреты/cookies с Windows: .\scripts\sync-mobilefarm-secrets.ps1" -ForegroundColor DarkGray
     }
     elseif ($DryRun) {
