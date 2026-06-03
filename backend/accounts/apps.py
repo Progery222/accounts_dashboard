@@ -429,6 +429,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         if not rr.is_running and rr.cancel_requested:
             rr.cancel_requested = False
             rr.save(update_fields=["cancel_requested", "updated_at"])
+        try:
+            from platforms.worker_pool import clear_playwright_refresh_force_stop
+
+            clear_playwright_refresh_force_stop()
+        except Exception:
+            pass
         now_reserve = timezone.now()
         state.is_running = True
         state.cancel_requested = False
@@ -570,6 +576,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         report_rows: list[dict] = []
         run_flags = {"cancelled": False}
         state = AutoRefreshState.get()
+        try:
+            from platforms.worker_pool import clear_playwright_refresh_force_stop
+
+            clear_playwright_refresh_force_stop()
+        except Exception:
+            pass
         state.is_running = True
         state.cancel_requested = False
         state.source = source
@@ -581,13 +593,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         state.last_error = ""
         state.started_at = timezone.now()
         state.finished_at = None
-        try:
-            worker_count_early = max(
-                1,
-                min(16, int(str(os.environ.get("AUTO_REFRESH_WORKERS", "1")).strip() or "1")),
-            )
-        except Exception:
-            worker_count_early = 1
+        from .scrape_backend import scheduled_auto_refresh_worker_count
+
+        worker_count_early = scheduled_auto_refresh_worker_count(accounts)
         state.run_detail = {
             "items": [
                 {
@@ -731,8 +739,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             report_by_index: list[dict | None] = [None] * len(accounts)
             platform_limits = _platform_limits()
             account_queue = ParallelAccountQueue(len(accounts), platform_limits)
-            # Последовательно: один аккаунт за раз, Apify до записи в БД, затем следующий.
-            worker_count = 1
+            worker_count = scheduled_auto_refresh_worker_count(accounts)
 
             thread_slot_map: dict[int, int] = {}
             thread_slot_lock = threading.Lock()

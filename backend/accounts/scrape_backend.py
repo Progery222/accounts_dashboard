@@ -26,6 +26,46 @@ def accounts_needing_playwright(accounts: list[Account]) -> list[Account]:
     return [a for a in accounts if not should_use_apify_for_account(a)]
 
 
+def apify_platforms_in_accounts(accounts: list[Account]) -> set[str]:
+    return {str(a.platform) for a in accounts if should_use_apify_for_account(a)}
+
+
+def scheduled_auto_refresh_worker_count(accounts: list[Account]) -> int:
+    """
+    Потоки для расписания / «Запустить сейчас»:
+
+    - только Playwright → как bulk/refresh_all (_parallel_refresh_worker_count);
+    - только Apify, одна платформа в пакете → 1;
+    - только Apify, несколько платформ → параллельно (лимит APIFY_MAX_CONCURRENT_RUNS);
+    - смесь Apify + Playwright → общий пул воркеров, Playwright параллельно, Apify по
+      слотам платформ в ParallelAccountQueue (не блокируем весь прогон одним потоком).
+    """
+    if not accounts:
+        return 1
+
+    from django.conf import settings
+
+    from accounts.views import _parallel_refresh_worker_count, _refresh_worker_count
+
+    apify_platforms = apify_platforms_in_accounts(accounts)
+    playwright_accounts = accounts_needing_playwright(accounts)
+
+    if not apify_platforms:
+        return _parallel_refresh_worker_count(list(accounts))
+
+    if not playwright_accounts:
+        if len(apify_platforms) <= 1:
+            return 1
+        apify_cap = max(1, int(getattr(settings, "APIFY_MAX_CONCURRENT_RUNS", 3) or 3))
+        env_cap = _refresh_worker_count(account_count=len(accounts))
+        parallel = _parallel_refresh_worker_count(
+            [a for a in accounts if should_use_apify_for_account(a)],
+        )
+        return max(1, min(16, len(accounts), apify_cap, env_cap, parallel))
+
+    return _parallel_refresh_worker_count(list(accounts))
+
+
 def dispatch_apify_for_batch_account(
     account: Account,
     *,

@@ -10,9 +10,75 @@ from accounts.models import Account, Platform, ScrapeBackendChoice, ScrapeBacken
 from accounts.scrape_backend import (
     accounts_needing_playwright,
     facebook_playwright_warm_needed,
+    scheduled_auto_refresh_worker_count,
     should_use_apify_for_account,
 )
 from platforms.apify.config import use_apify_for_platform
+
+
+class ScheduledWorkerCountTests(TestCase):
+    def test_parallel_workers_when_all_playwright_backends(self) -> None:
+        ScrapeBackendConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "tiktok_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "instagram_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "threads_backend": ScrapeBackendChoice.PLAYWRIGHT,
+            },
+        )
+        accounts = [
+            Account(platform=Platform.TIKTOK, username="a"),
+            Account(platform=Platform.INSTAGRAM, username="b"),
+            Account(platform=Platform.THREADS, username="c"),
+        ]
+        with patch.dict("os.environ", {"AUTO_REFRESH_WORKERS": "4"}, clear=False):
+            self.assertGreaterEqual(scheduled_auto_refresh_worker_count(accounts), 3)
+
+    def test_one_worker_when_only_apify_single_platform(self) -> None:
+        ScrapeBackendConfig.objects.update_or_create(
+            pk=1,
+            defaults={"tiktok_backend": ScrapeBackendChoice.APIFY},
+        )
+        with self.settings(APIFY_ENABLED=True, APIFY_TOKEN="test-token"):
+            accounts = [
+                Account(platform=Platform.TIKTOK, username="a"),
+                Account(platform=Platform.TIKTOK, username="b2"),
+            ]
+            self.assertEqual(scheduled_auto_refresh_worker_count(accounts), 1)
+
+    def test_parallel_workers_when_only_apify_multiple_platforms(self) -> None:
+        ScrapeBackendConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "tiktok_backend": ScrapeBackendChoice.APIFY,
+                "facebook_backend": ScrapeBackendChoice.APIFY,
+            },
+        )
+        with self.settings(APIFY_ENABLED=True, APIFY_TOKEN="test-token"):
+            accounts = [
+                Account(platform=Platform.TIKTOK, username="a"),
+                Account(platform=Platform.FACEBOOK, username="b"),
+            ]
+            with patch.dict("os.environ", {"AUTO_REFRESH_WORKERS": "4"}, clear=False):
+                self.assertGreaterEqual(scheduled_auto_refresh_worker_count(accounts), 2)
+
+    def test_parallel_workers_when_mixed_apify_and_playwright(self) -> None:
+        ScrapeBackendConfig.objects.update_or_create(
+            pk=1,
+            defaults={
+                "tiktok_backend": ScrapeBackendChoice.APIFY,
+                "instagram_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "threads_backend": ScrapeBackendChoice.PLAYWRIGHT,
+            },
+        )
+        with self.settings(APIFY_ENABLED=True, APIFY_TOKEN="test-token"):
+            accounts = [
+                Account(platform=Platform.TIKTOK, username="a"),
+                Account(platform=Platform.INSTAGRAM, username="b"),
+                Account(platform=Platform.THREADS, username="c"),
+            ]
+            with patch.dict("os.environ", {"AUTO_REFRESH_WORKERS": "4"}, clear=False):
+                self.assertGreaterEqual(scheduled_auto_refresh_worker_count(accounts), 3)
 
 
 class TikTokApifyConfigTests(TestCase):
