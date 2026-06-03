@@ -288,26 +288,33 @@ class AccountsConfig(AppConfig):
             from .models import AutoRefreshState, RefreshAllState
 
             _scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
-            # If process was restarted in the middle of an auto-refresh run, mark
-            # previous run as interrupted so UI doesn't show stale "running" forever.
-            try:
-                state = AutoRefreshState.get()
-                if state.is_running:
-                    state.is_running = False
-                    state.current_account = ""
-                    state.last_error = "Автообновление было прервано перезапуском процесса."
-                    state.save(update_fields=["is_running", "current_account", "last_error", "updated_at"])
-            except Exception:
-                pass
-            try:
-                rr = RefreshAllState.get()
-                if rr.is_running:
-                    rr.is_running = False
-                    rr.current_account = ""
-                    rr.last_error = "Сбор всех аккаунтов был прерван перезапуском процесса."
-                    rr.save(update_fields=["is_running", "current_account", "last_error", "updated_at"])
-            except Exception:
-                pass
+            # Сброс «зависшего» is_running только при реальном перезапуске runserver,
+            # не при manage.py shell / диагностических скриптах с django.setup().
+            from .refresh_state import should_clear_stale_refresh_on_startup
+
+            if should_clear_stale_refresh_on_startup():
+                try:
+                    state = AutoRefreshState.get()
+                    if state.is_running:
+                        state.is_running = False
+                        state.current_account = ""
+                        state.last_error = "Автообновление было прервано перезапуском процесса."
+                        state.save(
+                            update_fields=["is_running", "current_account", "last_error", "updated_at"],
+                        )
+                except Exception:
+                    pass
+                try:
+                    rr = RefreshAllState.get()
+                    if rr.is_running:
+                        rr.is_running = False
+                        rr.current_account = ""
+                        rr.last_error = "Сбор всех аккаунтов был прерван перезапуском процесса."
+                        rr.save(
+                            update_fields=["is_running", "current_account", "last_error", "updated_at"],
+                        )
+                except Exception:
+                    pass
 
             job_kw = _scheduler_job_defaults()
             from apscheduler.triggers.interval import IntervalTrigger

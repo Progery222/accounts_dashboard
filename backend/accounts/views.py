@@ -145,6 +145,14 @@ def _scrape(account: Account) -> dict:
     username = account.username
     platform = account.platform
 
+    from platforms.apify.config import use_apify_for_platform
+
+    if use_apify_for_platform(platform):
+        raise ValueError(
+            f"Для {platform} в настройках выбран Apify — используйте сбор через Apify, "
+            "а не Playwright/HTTP"
+        )
+
     if platform == Platform.TIKTOK:
         from platforms.tiktok.service import fetch_tiktok_profile
         raw = fetch_tiktok_profile(username)
@@ -533,6 +541,53 @@ def _refresh_int_env(name: str, default: int, *, min_v: int = 1, max_v: int = 32
     return max(min_v, min(max_v, val))
 
 
+def _refresh_worker_count(*, account_count: int | None = None) -> int:
+    """Минимум воркеров из AUTO_REFRESH_WORKERS (по умолчанию 3)."""
+    try:
+        n = int(str(os.environ.get("AUTO_REFRESH_WORKERS", "3")).strip() or "3")
+    except Exception:
+        n = 3
+    n = max(1, min(16, n))
+    if account_count is not None:
+        n = min(n, max(1, int(account_count)))
+    return n
+
+
+def _parallel_refresh_worker_count(accounts: list[Account]) -> int:
+    """
+    Воркеры для bulk / refresh_all: параллельно разные платформы.
+    Берём max(AUTO_REFRESH_WORKERS, число платформ в пакете), в пределах лимитов concurrency.
+    """
+    n = len(accounts)
+    if n <= 1:
+        return 1
+    platforms = {a.platform for a in accounts}
+    limits = _refresh_platform_limits(accounts)
+    max_by_limits = sum(limits.get(p, 1) for p in platforms)
+    env_floor = _refresh_worker_count(account_count=n)
+    cross_platform = min(n, len(platforms), max(1, max_by_limits))
+    target = max(env_floor, cross_platform)
+    return max(1, min(16, n, max(1, max_by_limits), target))
+
+
+def _keep_bulk_refresh_running(state: AutoRefreshState) -> None:
+    """Восстановить is_running, если флаг сбросили побочным процессом, а поток bulk ещё работает."""
+    state.refresh_from_db(fields=["is_running", "finished_at", "source", "last_error"])
+    if (state.source or "").strip() != "bulk_refresh" or state.finished_at:
+        return
+    updates: list[str] = []
+    if not state.is_running:
+        state.is_running = True
+        updates.append("is_running")
+    err = (state.last_error or "").strip()
+    if err == "Автообновление было прервано перезапуском процесса.":
+        state.last_error = ""
+        updates.append("last_error")
+    if updates:
+        updates.append("updated_at")
+        state.save(update_fields=updates)
+
+
 def _refresh_platform_limits(accs: list[Account]) -> dict[str, int]:
     defaults: dict[str, int] = {
         Platform.TIKTOK: 1,
@@ -733,8 +788,8 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
             from accounts.models import ApifyRefreshJobTrigger
             from .scrape_backend import (
                 accounts_needing_playwright,
-                dispatch_apify_for_batch_account,
                 facebook_playwright_warm_needed,
+                refresh_account_via_apify_sync,
                 should_use_apify_for_account,
             )
 
@@ -769,20 +824,13 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                     fb_batch_guard = FacebookRefreshBatchGuard()
 
                 if not stop_requested.is_set():
-                    from django.conf import settings as dj_settings
-
-                    pw_accounts = accounts_needing_playwright(accounts)
-                    if pw_accounts and bool(
-                        getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
-                    ):
-                        _prewarm_workers(pw_accounts)
                     preload: dict[str, dict] = {}
                 else:
                     preload = {}
 
                 platform_limits = _refresh_platform_limits(accounts)
                 account_queue = ParallelAccountQueue(len(accounts), platform_limits)
-                worker_count = 1
+                worker_count = _parallel_refresh_worker_count(accounts)
 
                 with state_lock:
                     state.refresh_from_db(fields=["run_detail"])
@@ -802,6 +850,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         return thread_slot_map[tid]
 
                 def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
+                    _keep_bulk_refresh_running(state)
                     with state_lock:
                         state.processed_accounts += 1
                         if success:
@@ -834,6 +883,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             return
 
                         close_old_connections()
+                        _keep_bulk_refresh_running(state)
                         account = accounts[idx]
                         from .warm_run_detail import is_refresh_cancel_requested
 
@@ -881,11 +931,50 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 )
                                 _mark_progress(success=True, failed=False)
                             elif should_use_apify_for_account(account):
-                                dispatch_apify_for_batch_account(
-                                    account,
-                                    trigger=ApifyRefreshJobTrigger.BULK,
-                                    parent_batch_id=apify_batch_id,
-                                )
+                                from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus
+
+                                attempted_network = True
+                                try:
+                                    refresh_account_via_apify_sync(
+                                        account,
+                                        trigger=ApifyRefreshJobTrigger.BULK,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as e:
+                                    err_msg = str(e).replace("\r\n", " ").replace("\n", " ").strip()
+                                    if len(err_msg) > 800:
+                                        err_msg = err_msg[:797] + "..."
+                                    _persist_auto_refresh_run_item(
+                                        account.id,
+                                        status="error",
+                                        worker=None,
+                                        detail=err_msg,
+                                    )
+                                    _mark_progress(success=False, failed=True, last_error=err_msg)
+                                    errors_out.append({"id": account.id, "detail": err_msg})
+                                else:
+                                    job = (
+                                        ApifyRefreshJob.objects.filter(account_id=account.id)
+                                        .order_by("-id")
+                                        .first()
+                                    )
+                                    if job and job.status != ApifyRefreshJobStatus.SUCCEEDED:
+                                        err_msg = (job.error_message or "Ошибка Apify")[:800]
+                                        _persist_auto_refresh_run_item(
+                                            account.id,
+                                            status="error",
+                                            worker=None,
+                                            detail=err_msg,
+                                        )
+                                        _mark_progress(
+                                            success=False, failed=True, last_error=err_msg,
+                                        )
+                                        errors_out.append({"id": account.id, "detail": err_msg})
+                                    else:
+                                        _persist_auto_refresh_run_item(
+                                            account.id, status="done", worker=None, detail="",
+                                        )
+                                        _mark_progress(success=True, failed=False)
                             else:
                                 if is_refresh_cancel_requested():
                                     stop_requested.set()
@@ -973,8 +1062,16 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             )
                         finally:
                             if attempted_network and not is_refresh_cancel_requested():
-                                delay_sec = _refresh_all_delay_seconds(account)
-                                account_queue.set_platform_cooldown(account.platform, delay_sec)
+                                delay_sec = (
+                                    0.0
+                                    if should_use_apify_for_account(account)
+                                    else _refresh_all_delay_seconds(account)
+                                )
+                                if delay_sec > 0:
+                                    account_queue.set_platform_cooldown(
+                                        account.platform,
+                                        delay_sec,
+                                    )
                                 if account.platform == Platform.FACEBOOK and delay_sec > 0:
                                     print(
                                         f"[bulk_refresh] facebook cooldown {delay_sec:.0f} с",
@@ -992,8 +1089,10 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                     for f in futures:
                         f.result()
 
+                from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancelled
+
                 warm_tracker.join_warm_threads(
-                    timeout=15.0 if is_refresh_cancel_requested() else None,
+                    timeout=15.0 if _refresh_cancelled() else None,
                 )
 
                 with state_lock:
@@ -1334,7 +1433,7 @@ def _run_refresh_all_background(
             include_hidden_profiles=include_hidden_profiles,
         )
         accounts = order_accounts_for_refresh(list(accounts_qs))
-        worker_count = 1
+        worker_count = _parallel_refresh_worker_count(accounts)
         _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
         run_items = [
@@ -2481,7 +2580,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             state.last_error = ""
             state.started_at = timezone.now()
             state.finished_at = None
-            worker_count = 1
+            worker_count = _parallel_refresh_worker_count(ordered)
             state.run_detail = {"items": run_items, "worker_count": worker_count}
             state.save(update_fields=[
                 "is_running", "source", "cancel_requested", "total_accounts",
@@ -3481,11 +3580,16 @@ def auto_refresh_status(request):
             raw = getattr(obj, "run_detail", None) or {}
             return raw if isinstance(raw, dict) else {}
 
-        if auto.is_running:
+        from .auto_refresh_progress import progress_from_run_detail, refresh_run_in_progress
+
+        auto_src = (getattr(auto, "source", None) or "").strip()
+        auto_active = refresh_run_in_progress(auto, source=auto_src)
+        rr_active = refresh_run_in_progress(rr, source="refresh_all")
+
+        if auto_active:
             state = auto
-            auto_src = (getattr(auto, "source", None) or "").strip()
             pipeline = "bulk_refresh" if auto_src == "bulk_refresh" else "scheduled_auto"
-        elif rr.is_running:
+        elif rr_active:
             state = rr
             pipeline = "refresh_all"
         else:
@@ -3494,8 +3598,6 @@ def auto_refresh_status(request):
 
         report_csv = (getattr(auto, "last_report_csv", None) or "").strip()
         rd = _coerce_rd(state) if pipeline else _coerce_rd(auto)
-        from .auto_refresh_progress import progress_from_run_detail
-
         done, total, progress = progress_from_run_detail(
             rd,
             db_total=int(state.total_accounts or 0),
@@ -3508,7 +3610,7 @@ def auto_refresh_status(request):
 
         pending = peek_pending_scheduled_refresh_count()
         return Response({
-            "is_running": bool(auto.is_running or rr.is_running),
+            "is_running": bool(auto_active or rr_active),
             "pending_scheduled_runs": pending,
             "active_pipeline": pipeline,
             "source": resp_src or (auto.source or "").strip(),

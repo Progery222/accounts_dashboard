@@ -9,6 +9,28 @@ from django.utils import timezone
 from accounts.models import ApifyRefreshJob, ApifyRefreshJobTrigger, AutoRefreshState
 
 _TERMINAL_STATUSES = frozenset({"done", "error", "skipped", "cancelled"})
+_ACTIVE_ITEM_STATUSES = frozenset({"queued", "running"})
+_RESTART_LAST_ERROR = "Автообновление было прервано перезапуском процесса."
+
+
+def refresh_run_in_progress(state, *, source: str | None = None) -> bool:
+    """Прогон ещё идёт: флаг is_running или в run_detail есть queued/running."""
+    if getattr(state, "finished_at", None):
+        return False
+    if getattr(state, "is_running", False):
+        return True
+    src = (source or getattr(state, "source", None) or "").strip()
+    if src not in ("bulk_refresh", "scheduler", "refresh_all"):
+        return False
+    rd = state.run_detail if isinstance(state.run_detail, dict) else {}
+    items = rd.get("items") or []
+    if not isinstance(items, list) or not items:
+        return bool(getattr(state, "started_at", None))
+    return any(
+        str(it.get("status") or "").strip().lower() in _ACTIVE_ITEM_STATUSES
+        for it in items
+        if isinstance(it, dict)
+    )
 
 
 def progress_from_run_detail(

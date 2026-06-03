@@ -4,10 +4,12 @@ COPY new_frontend ./new_frontend
 COPY deploy/nginx-atomic/precompile.mjs ./deploy/nginx-atomic/precompile.mjs
 RUN npm install @babel/standalone@7.26.9 --no-save \
     && node deploy/nginx-atomic/precompile.mjs /src/new_frontend/app.html \
-    && wget -q -O /src/new_frontend/vendor/react.production.min.js \
-         https://unpkg.com/react@18.3.1/umd/react.production.min.js \
-    && wget -q -O /src/new_frontend/vendor/react-dom.production.min.js \
-         https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js
+    && (test -s /src/new_frontend/vendor/react.production.min.js \
+        || wget -q -O /src/new_frontend/vendor/react.production.min.js \
+            https://unpkg.com/react@18.3.1/umd/react.production.min.js) \
+    && (test -s /src/new_frontend/vendor/react-dom.production.min.js \
+        || wget -q -O /src/new_frontend/vendor/react-dom.production.min.js \
+            https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js)
 
 FROM nginx:alpine
 COPY deploy/nginx-atomic/default.conf /etc/nginx/conf.d/default.conf

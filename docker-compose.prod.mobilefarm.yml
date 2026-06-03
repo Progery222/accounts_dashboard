@@ -21,6 +21,7 @@ services:
       XAUTHORITY: /root/.Xauthority
     volumes:
       - browser_profile:/app/.browser-profile
+      - ./backend/media:/app/media
       - ./backend/config/worker_accounts.env:/app/config/worker_accounts.env:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-/home/atom/.Xauthority}:/root/.Xauthority:ro

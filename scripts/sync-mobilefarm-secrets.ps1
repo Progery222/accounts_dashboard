@@ -104,8 +104,8 @@ foreach ($pair in @(
 if (-not $SkipBrowserProfile) {
     if (-not $LocalBrowserProfile) {
         foreach ($c in @(
-                (Join-Path $repoRoot "backend\.browser-profile"),
-                (Join-Path $env:LOCALAPPDATA "TikStatsChromeProfile")
+                (Join-Path $env:LOCALAPPDATA "TikStatsChromeProfile"),
+                (Join-Path $repoRoot "backend\.browser-profile")
             )) {
             if ($c -and (Test-Path $c)) { $LocalBrowserProfile = $c; break }
         }

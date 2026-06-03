@@ -175,6 +175,17 @@ def force_stop_auto_refresh(*, reason: str = "Остановлено польз�
     threading.Thread(target=_interrupt_workers, daemon=True, name="refresh-force-stop").start()
 
 
+def should_clear_stale_refresh_on_startup() -> bool:
+    """
+    Сбрасывать is_running при старте только в рабочем runserver (не shell/скрипты с django.setup).
+    """
+    if os.environ.get("RUN_MAIN") == "true":
+        return True
+    if "runserver" in sys.argv and "--noreload" in sys.argv:
+        return True
+    return False
+
+
 def clear_orphan_cancel_flags() -> None:
     """После force_stop поток мог умереть, оставив cancel_requested=True при is_running=False."""
     from .models import AutoRefreshState, RefreshAllState
