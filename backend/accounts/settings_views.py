@@ -971,7 +971,7 @@ def _run_platform_cookie_import(
                          this file via a non-persistent context so the platform
                          cannot overwrite the profile's cookies during scraping.
     post_import_fn(ctx) is awaited before ctx.close() — use it for extra steps
-    (e.g. saving an Instaloader session from the imported cookies).
+    (e.g. exporting instagram_state.json from imported cookies).
     """
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
@@ -1105,27 +1105,6 @@ def _instagram_has_session_chrome() -> bool:
     return _check_cookie_in_profile(["instagram.com"], ["sessionid"])
 
 
-def _instagram_save_instaloader(pw_cookies: list[dict]) -> None:
-    """Save imported Instagram cookies as an Instaloader .session file."""
-    try:
-        import instaloader
-        session_file = _get_setting("INSTAGRAM_SESSION_FILE", "instagram.session")
-        session_path = Path(session_file)
-        if not session_path.is_absolute():
-            session_path = Path(__file__).parent.parent / session_path
-        username = _get_setting("INSTAGRAM_USERNAME", "") or "imported"
-
-        L = instaloader.Instaloader()
-        sess = L.context._session
-        for c in pw_cookies:
-            if "instagram.com" in c.get("domain", ""):
-                sess.cookies.set(c["name"], c["value"], domain=".instagram.com")
-        L.context.username = username
-        L.save_session_to_file(str(session_path))
-    except Exception:
-        pass  # best-effort; Chrome profile cookies still work for Playwright worker
-
-
 @api_view(["POST"])
 def instagram_import_cookies(request):
     raw = (request.data.get("cookies") or "").strip()
@@ -1138,9 +1117,6 @@ def instagram_import_cookies(request):
     if not pw_cookies:
         return Response({"error": "Не найдено Instagram-куков (нужен домен instagram.com)"}, status=400)
 
-    async def _save_instaloader(ctx):
-        _instagram_save_instaloader(pw_cookies)
-
     state_path = str(Path(_get_profile_dir()) / "instagram_state.json")
     job_id = _new_job()
     t = threading.Thread(
@@ -1149,7 +1125,7 @@ def instagram_import_cookies(request):
             job_id, pw_cookies, _instagram_has_session_chrome,
             f"Готово! Импортировано {len(pw_cookies)} кук(ов). Авторизация Instagram активна.",
             "sessionid не найден после импорта. Скопируйте куки с instagram.com в залогиненном состоянии.",
-            _save_instaloader,
+            None,
         ),
         kwargs={"state_export_path": state_path},
         daemon=True,
@@ -1326,21 +1302,7 @@ def _run_instagram_auth(job_id: str) -> None:
                 # Give Instagram a moment to set all cookies
                 await page.wait_for_timeout(2000)
 
-                # Extract cookies and save as instaloader session
                 _set_job(job_id, "pending", "Сохраняю сессию…")
-                cookies = await ctx.cookies("https://www.instagram.com")
-
-                import instaloader
-                L = instaloader.Instaloader()
-                sess = L.context._session
-                for c in cookies:
-                    if c.get("domain", "").endswith("instagram.com"):
-                        sess.cookies.set(c["name"], c["value"], domain=".instagram.com")
-                L.context.username = username or "unknown"
-                L.save_session_to_file(str(session_path))
-
-                # Воркер Instagram (Playwright) грузит instagram_state.json, а не instaloader .session.
-                # Без этого открывается «чистый» Chromium без входа, хотя в persistent-профиле сессия есть.
                 ig_state_path = Path(profile_dir) / "instagram_state.json"
                 await ctx.storage_state(path=str(ig_state_path))
 

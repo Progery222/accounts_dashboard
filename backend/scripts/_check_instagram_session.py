@@ -1,4 +1,5 @@
-"""Проверка Instagram: instaloader .session + Playwright instagram_state.json."""
+#!/usr/bin/env python
+"""Проверка сессии Instagram для Playwright (instagram_state.json + worker)."""
 from __future__ import annotations
 
 import json
@@ -12,94 +13,68 @@ import os
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 
-import django
-
-django.setup()
-
-from django.conf import settings
-
 
 def main() -> int:
-    user = (getattr(settings, "INSTAGRAM_USERNAME", "") or "").strip()
-    session_file = (getattr(settings, "INSTAGRAM_SESSION_FILE", "") or "instagram.session").strip()
-    sp = Path(session_file)
-    if not sp.is_absolute():
-        sp = Path(_BACKEND) / sp
+    import django
 
-    print("=" * 60)
-    print("Instagram session check")
-    print("=" * 60)
-    print(f"INSTAGRAM_USERNAME: {user or '(не задан)'}")
-    print(f"INSTAGRAM_PASSWORD: {'задан' if getattr(settings, 'INSTAGRAM_PASSWORD', '') else 'нет'}")
-    print(f"INSTAGRAM_SESSION_FILE: {sp}")
-    print(f"  exists: {sp.exists()}  size: {sp.stat().st_size if sp.exists() else 0} bytes")
+    django.setup()
 
-    # Playwright state
+    from platforms.instagram.scraper import _call_instagram_worker
     from platforms.worker_utils import state_file_path
 
     state_path = state_file_path("instagram")
-    print(f"\nPlaywright state: {state_path}")
-    print(f"  exists: {state_path.exists()}")
-    if state_path.exists():
-        try:
-            data = json.loads(state_path.read_text(encoding="utf-8"))
-            cookies = data.get("cookies") or []
-            ig = [c for c in cookies if "instagram.com" in (c.get("domain") or "")]
-            names = {c.get("name") for c in ig}
-            has_session = "sessionid" in names and any(
-                c.get("name") == "sessionid" and c.get("value") for c in ig
-            )
-            print(f"  cookies (instagram): {len(ig)}")
-            print(f"  sessionid present: {has_session}")
-            print(f"  key names: {', '.join(sorted(n for n in names if n)[:12])}...")
-        except Exception as e:
-            print(f"  read error: {e}")
+    print("=" * 60)
+    print("Instagram Playwright session check")
+    print("=" * 60)
+    print(f"state file: {state_path}")
+    print(f"exists: {state_path.exists()}")
 
-    # Instaloader
-    print("\n--- Instaloader session ---")
+    if not state_path.exists():
+        print("FAIL: нет instagram_state.json — setup_instagram_auth --from-chrome или вход в настройках")
+        return 1
+
     try:
-        import instaloader
-    except ImportError:
-        print("FAIL: instaloader не установлен (pip install instaloader)")
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+        cookies = data.get("cookies") or []
+        ig = [c for c in cookies if "instagram.com" in (c.get("domain") or "")]
+        names = {c.get("name") for c in ig}
+        has_session = "sessionid" in names and any(
+            c.get("name") == "sessionid" and c.get("value") for c in ig
+        )
+        print(f"instagram cookies: {len(ig)}, sessionid: {has_session}")
+        if not has_session:
+            print("FAIL: sessionid отсутствует в state")
+            return 1
+    except Exception as exc:
+        print(f"FAIL: не прочитать state: {exc}")
         return 1
 
-    if not sp.exists():
-        print("FAIL: файл сессии не найден")
-        return 1
-
-    if not user:
-        print("SKIP: нет INSTAGRAM_USERNAME для проверки входа")
-        return 1
-
-    L = instaloader.Instaloader(quiet=True, max_connection_attempts=1)
+    test_user = (sys.argv[1] if len(sys.argv) > 1 else "freemarketsignal").lstrip("@")
+    print(f"\nWorker counts_only @{test_user}…")
     try:
-        L.load_session_from_file(user, str(sp))
-        print(f"OK: сессия загружена для @{user}")
-    except Exception as e:
-        print(f"FAIL: load_session_from_file: {e}")
+        counts = _call_instagram_worker({"username": test_user, "counts_only": True})
+    except Exception as exc:
+        print(f"FAIL worker: {exc}")
         return 1
 
-    test_targets = [user, "freemarketsignal"]
-    for target in test_targets:
-        print(f"\n  Profile.from_username(@{target}):")
-        try:
-            p = instaloader.Profile.from_username(L.context, target)
-            print(
-                f"    OK  full_name={p.full_name!r}  followers={p.followers}  "
-                f"mediacount={p.mediacount}"
-            )
-            try:
-                n = 0
-                for post in p.get_posts():
-                    n += 1
-                    if n >= 3:
-                        break
-                print(f"    OK  get_posts: хотя бы {n} пост(ов) доступны")
-            except Exception as pe:
-                print(f"    WARN get_posts: {pe}")
-        except Exception as e:
-            print(f"    FAIL: {e}")
+    print(
+        f"OK followers={counts.get('follower_count')} "
+        f"following={counts.get('following_count')} posts={counts.get('post_count')}"
+    )
 
+    print(f"\nWorker scrape (dry) — полный профиль @{test_user}…")
+    try:
+        prof = _call_instagram_worker({"username": test_user})
+    except Exception as exc:
+        print(f"FAIL scrape: {exc}")
+        return 1
+
+    posts = prof.get("_posts") or []
+    print(
+        f"OK display_name={prof.get('display_name')!r} posts={len(posts)} "
+        f"sample_views={[int(p.get('view_count') or 0) for p in posts[:3]]}"
+    )
+    print("\nПроверка пройдена.")
     return 0
 
 

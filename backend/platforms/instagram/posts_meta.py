@@ -1,4 +1,4 @@
-"""Лимиты постов IG (Playwright/Instaloader) и флаг authoritative для sync в БД."""
+"""Лимиты постов IG (Playwright) и флаг authoritative для sync в БД."""
 from __future__ import annotations
 
 import os
