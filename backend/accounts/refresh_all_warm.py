@@ -135,6 +135,10 @@ def stop_facebook_parallel_warm(*, label: str = "refresh_all", progress_path: Pa
     worker_path = _facebook_worker_path()
     if worker_path is None:
         return {}
+    from platforms.worker_pool import worker_daemon_alive
+
+    if progress_path is None and not worker_daemon_alive(worker_path):
+        return {}
     plat = Platform.FACEBOOK
     if progress_path is not None:
         try:
@@ -306,7 +310,9 @@ class RefreshAllWarmTracker:
         self._parallel_warm_stop = threading.Event()
         self._parallel_progress_file: Path | None = None
 
-        has_fb = any(getattr(a, "platform", None) == Platform.FACEBOOK for a in accounts)
+        from accounts.scrape_backend import facebook_playwright_warm_needed
+
+        has_fb = facebook_playwright_warm_needed(accounts)
         warm_on = refresh_warm_enabled() and not is_refresh_cancel_requested()
 
         if not warm_on or not has_fb:
@@ -435,6 +441,10 @@ class RefreshAllWarmTracker:
             return
         plat = str(platform or "").strip().lower()
         if plat not in _WARM_PLATFORMS:
+            return
+        from platforms.apify.config import use_apify_for_platform
+
+        if use_apify_for_platform(plat):
             return
         log_label = (label or self._label).strip() or self._label
         with self._lock:

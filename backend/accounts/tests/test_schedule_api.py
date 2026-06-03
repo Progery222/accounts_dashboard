@@ -53,14 +53,17 @@ class RefreshScheduleApiTests(APITestCase):
             "/api/accounts/schedule/",
             {
                 "auto_refresh_telegram_enabled": True,
-                "auto_refresh_telegram_chat_id": "123456",
+                "auto_refresh_telegram_chat_ids": ["123456", "789012"],
             },
             format="json",
         )
         self.assertEqual(r.status_code, status.HTTP_200_OK)
         self.assertTrue(r.data["auto_refresh_telegram_enabled"])
+        self.assertEqual(r.data["auto_refresh_telegram_chat_ids"], ["123456", "789012"])
         self.assertEqual(r.data["auto_refresh_telegram_chat_id"], "123456")
         self.assertIn("telegram_bot_configured", r.data)
+        cfg = RefreshScheduleConfig.get()
+        self.assertEqual(cfg.auto_refresh_telegram_chat_ids, ["123456", "789012"])
 
     def test_auto_refresh_scope_platforms_and_profiles(self):
         RefreshScheduleConfig.objects.update_or_create(

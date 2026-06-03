@@ -49,7 +49,12 @@ class RefreshScheduleConfig(models.Model):
         max_length=32,
         blank=True,
         default="",
-        help_text="Chat ID получателя (личный чат с ботом).",
+        help_text="Устаревшее: один chat ID; используйте auto_refresh_telegram_chat_ids.",
+    )
+    auto_refresh_telegram_chat_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Список chat ID получателей отчёта в Telegram.",
     )
     include_hidden_platform_accounts = models.BooleanField(
         default=False,
@@ -102,6 +107,7 @@ class RefreshScheduleConfig(models.Model):
                 "auto_refresh_csv_report": True,
                 "auto_refresh_telegram_enabled": False,
                 "auto_refresh_telegram_chat_id": "",
+                "auto_refresh_telegram_chat_ids": [],
                 "include_hidden_platform_accounts": False,
                 "include_hidden_profile_accounts": False,
                 "include_unavailable_accounts": False,

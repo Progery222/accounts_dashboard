@@ -415,12 +415,46 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 flush=True,
             )
             return
+        # Резервируем прогон до снятия lock: иначе два «Запустить сейчас» оба видят
+        # is_running=False, один сбрасывает флаг — воркеры второго сразу выходят.
+        state = AutoRefreshState.get()
+        rr = RefreshAllState.get()
+        if not rr.is_running and rr.cancel_requested:
+            rr.cancel_requested = False
+            rr.save(update_fields=["cancel_requested", "updated_at"])
+        now_reserve = timezone.now()
+        state.is_running = True
+        state.cancel_requested = False
+        state.source = source or "scheduler"
+        state.current_account = ""
+        state.last_error = ""
+        state.started_at = now_reserve
+        state.finished_at = None
+        state.save(
+            update_fields=[
+                "is_running",
+                "cancel_requested",
+                "source",
+                "current_account",
+                "last_error",
+                "started_at",
+                "finished_at",
+                "updated_at",
+            ],
+        )
     except Exception as exc:
         print(
             f"[scheduled_refresh] проверка состояния не удалась: {exc}",
             file=sys.stderr,
             flush=True,
         )
+        try:
+            st_fail = AutoRefreshState.get()
+            if st_fail.is_running and not (st_fail.run_detail or {}).get("items"):
+                st_fail.is_running = False
+                st_fail.save(update_fields=["is_running", "updated_at"])
+        except Exception:
+            pass
         return
     finally:
         # Не держим lock во время link clicks / prewarm — иначе «Запустить сейчас»
@@ -444,6 +478,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "auto_refresh_csv_report",
                 "auto_refresh_telegram_enabled",
                 "auto_refresh_telegram_chat_id",
+                "auto_refresh_telegram_chat_ids",
                 "auto_refresh_platforms",
                 "auto_refresh_profile_ids",
             ],
@@ -488,6 +523,16 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             file=sys.stderr,
             flush=True,
         )
+        try:
+            st_empty = AutoRefreshState.get()
+            if st_empty.is_running:
+                st_empty.is_running = False
+                st_empty.finished_at = timezone.now()
+                st_empty.save(
+                    update_fields=["is_running", "finished_at", "updated_at"],
+                )
+        except Exception:
+            pass
         queued_run = None
         with _queued_refresh_lock:
             if _queued_refresh_requested:
@@ -519,8 +564,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         run_flags = {"cancelled": False}
         state = AutoRefreshState.get()
         state.is_running = True
-        state.source = source
         state.cancel_requested = False
+        state.source = source
         state.total_accounts = len(accounts)
         state.processed_accounts = 0
         state.success_accounts = 0
@@ -551,9 +596,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             "worker_count": worker_count_early,
         }
         state.save(update_fields=[
-            "is_running", "source", "cancel_requested", "total_accounts", "processed_accounts",
-            "success_accounts", "failed_accounts", "current_account",
-            "last_error", "started_at", "finished_at", "run_detail", "updated_at",
+            "is_running", "cancel_requested", "source", "total_accounts",
+            "processed_accounts", "success_accounts", "failed_accounts",
+            "current_account", "last_error", "started_at", "finished_at",
+            "run_detail", "updated_at",
         ])
 
         defer_link_clicks = bool(fast_start) or source == "manual"
@@ -638,13 +684,28 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
         from .scrape_backend import (
             accounts_needing_playwright,
-            dispatch_apify_for_batch_account,
             facebook_playwright_warm_needed,
+            refresh_account_via_apify_sync,
             should_use_apify_for_account,
         )
         from .models import ApifyRefreshJobTrigger
 
         apify_batch_id = uuid.uuid4()
+        try:
+            from platforms.apify.abort import abort_active_apify_jobs
+
+            aborted = abort_active_apify_jobs()
+            if aborted:
+                print(
+                    f"[scheduled_refresh] отменено активных Apify jobs: {aborted}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[scheduled_refresh] abort Apify jobs failed: {exc}", file=sys.stderr)
+        from platforms.apify.batch_guard import enter_sync_apify_batch, leave_sync_apify_batch
+
+        enter_sync_apify_batch(apify_batch_id)
         has_facebook = facebook_playwright_warm_needed(accounts)
         fb_batch_guard = None
         if has_facebook:
@@ -663,7 +724,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             report_by_index: list[dict | None] = [None] * len(accounts)
             platform_limits = _platform_limits()
             account_queue = ParallelAccountQueue(len(accounts), platform_limits)
-            worker_count = _int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
+            # Последовательно: один аккаунт за раз, Apify до записи в БД, затем следующий.
+            worker_count = 1
 
             thread_slot_map: dict[int, int] = {}
             thread_slot_lock = threading.Lock()
@@ -710,7 +772,11 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 for a in accounts
             ]
             st_plan = AutoRefreshState.objects.get(pk=1)
-            st_plan.run_detail = {"items": run_items, "worker_count": worker_count}
+            st_plan.run_detail = {
+                "items": run_items,
+                "worker_count": worker_count,
+                "apify_batch_id": str(apify_batch_id),
+            }
             st_plan.save(update_fields=["run_detail", "updated_at"])
 
             def _finalize_run_detail_stale() -> None:
@@ -770,7 +836,21 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         run_with_db_reconnect(_read_cancel_flag)
                         if bool(state.cancel_requested) or not bool(state.is_running):
                             run_flags["cancelled"] = True
-                            state.last_error = "Автообновление остановлено пользователем."
+                            if state.cancel_requested:
+                                state.last_error = "Автообновление остановлено пользователем."
+                            else:
+                                prev = (state.last_error or "").strip()
+                                state.last_error = prev or (
+                                    "Прогон остановлен: is_running сброшен без cancel_requested "
+                                    "(не кнопка «Остановить» — stale-clear, перезапуск или гонка)."
+                                )[:500]
+                            print(
+                                "[scheduled_refresh] worker exit: "
+                                f"cancel={state.cancel_requested} running={state.is_running} "
+                                f"last_error={(state.last_error or '')[:120]!r}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
 
                             def _save_stop_msg() -> None:
                                 state.save(update_fields=["last_error", "updated_at"])
@@ -817,7 +897,11 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             account.id,
                             status="running",
                             worker=slot,
-                            detail="запуск браузера…",
+                            detail=(
+                                "Apify (синхронно)…"
+                                if should_use_apify_for_account(account)
+                                else "запуск браузера…"
+                            ),
                         )
 
                         before = None
@@ -891,11 +975,129 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     detail=skip_detail,
                                 )
                             elif should_use_apify_for_account(account):
-                                dispatch_apify_for_batch_account(
-                                    account,
-                                    trigger=ApifyRefreshJobTrigger.SCHEDULER,
-                                    parent_batch_id=apify_batch_id,
+                                from accounts.models import ApifyRefreshJobStatus
+
+                                account.refresh_from_db()
+                                before = (
+                                    int(account.follower_count or 0),
+                                    int(account.like_count or 0),
+                                    int(account.view_count or 0),
+                                    int(account.post_count or 0),
                                 )
+                                attempted_network = True
+                                _persist_run_item(
+                                    account.id,
+                                    status="running",
+                                    worker=slot,
+                                    detail="Apify (синхронно)…",
+                                )
+                                try:
+                                    refresh_account_via_apify_sync(
+                                        account,
+                                        trigger=ApifyRefreshJobTrigger.SCHEDULER,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as e:
+                                    detail = humanize_refresh_run_detail(e)
+                                    _mark_profile_unavailable_if_applicable(account, e)
+                                    report_by_index[idx] = {
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "profile_name": _profile_name(account),
+                                        "status": "ошибка",
+                                        "follower_before": before[0],
+                                        "follower_after": before[0],
+                                        "like_before": before[1],
+                                        "like_after": before[1],
+                                        "view_before": before[2],
+                                        "view_after": before[2],
+                                        "post_before": before[3],
+                                        "post_after": before[3],
+                                        "elapsed_sec": round(
+                                            max(0.0, time.perf_counter() - row_started), 3
+                                        ),
+                                        "detail": detail,
+                                    }
+                                    _mark_progress(success=False, failed=True, last_error=detail)
+                                    _persist_run_item(
+                                        account.id,
+                                        status="error",
+                                        worker=None,
+                                        detail=detail[:800],
+                                    )
+                                else:
+                                    from accounts.models import ApifyRefreshJob
+
+                                    job = (
+                                        ApifyRefreshJob.objects.filter(account_id=account.id)
+                                        .order_by("-id")
+                                        .first()
+                                    )
+                                    account = _reload_account(idx)
+                                    after = (
+                                        int(account.follower_count or 0),
+                                        int(account.like_count or 0),
+                                        int(account.view_count or 0),
+                                        int(account.post_count or 0),
+                                    )
+                                    if job and job.status != ApifyRefreshJobStatus.SUCCEEDED:
+                                        detail = (job.error_message or "Ошибка Apify")[:800]
+                                        report_by_index[idx] = {
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "profile_name": _profile_name(account),
+                                            "status": "ошибка",
+                                            "follower_before": before[0],
+                                            "follower_after": before[0],
+                                            "like_before": before[1],
+                                            "like_after": before[1],
+                                            "view_before": before[2],
+                                            "view_after": before[2],
+                                            "post_before": before[3],
+                                            "post_after": before[3],
+                                            "elapsed_sec": round(
+                                                max(0.0, time.perf_counter() - row_started), 3
+                                            ),
+                                            "detail": detail,
+                                        }
+                                        _mark_progress(success=False, failed=True, last_error=detail)
+                                        _persist_run_item(
+                                            account.id,
+                                            status="error",
+                                            worker=None,
+                                            detail=detail[:800],
+                                        )
+                                    else:
+                                        unchanged = before == after
+                                        report_by_index[idx] = {
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "profile_name": _profile_name(account),
+                                            "status": (
+                                                "успешно (данные без изменений)"
+                                                if unchanged
+                                                else "успешно"
+                                            ),
+                                            "follower_before": before[0],
+                                            "follower_after": after[0],
+                                            "like_before": before[1],
+                                            "like_after": after[1],
+                                            "view_before": before[2],
+                                            "view_after": after[2],
+                                            "post_before": before[3],
+                                            "post_after": after[3],
+                                            "elapsed_sec": round(
+                                                max(0.0, time.perf_counter() - row_started), 3
+                                            ),
+                                            "detail": "",
+                                        }
+                                        _mark_progress(success=True, failed=False)
+                                        _persist_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail="",
+                                        )
                             else:
                                 if is_refresh_cancel_requested():
                                     stop_requested.set()
@@ -1041,10 +1243,16 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             print(f"[scheduled_refresh] {account.platform}/@{account.username}: {e}")
                         finally:
                             if attempted_network and not is_refresh_cancel_requested():
-                                account_queue.set_platform_cooldown(
-                                    account.platform,
-                                    _refresh_all_delay_seconds(account),
+                                delay_sec = (
+                                    0.0
+                                    if should_use_apify_for_account(account)
+                                    else _refresh_all_delay_seconds(account)
                                 )
+                                if delay_sec > 0:
+                                    account_queue.set_platform_cooldown(
+                                        account.platform,
+                                        delay_sec,
+                                    )
                                 warm_tracker.after_network_refresh(account.platform)
                     finally:
                         if report_by_index[idx] is None:
@@ -1135,6 +1343,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         },
                     )
         finally:
+            leave_sync_apify_batch()
             finished = timezone.now()
             state.is_running = False
             state.cancel_requested = False
@@ -1196,6 +1405,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 if should_send_auto_refresh_telegram(
                     run_was_cancelled=bool(run_flags.get("cancelled")),
                     last_error=(state.last_error or "").strip(),
+                    report_rows=report_rows,
+                    started_at=state.started_at,
+                    finished_at=finished,
+                    run_detail=state.run_detail,
                 ):
                     try:
                         text = build_auto_refresh_telegram_text(

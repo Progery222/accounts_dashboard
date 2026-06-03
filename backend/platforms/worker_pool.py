@@ -670,6 +670,17 @@ def shutdown_worker(worker_path: Path) -> bool:
     return True
 
 
+def worker_daemon_alive(worker_path: Path) -> bool:
+    """True, если демон worker.py для этого пути уже в пуле и процесс жив."""
+    key = pool_storage_key(worker_path)
+    with _GLOBAL_LOCK:
+        handle = _HANDLES.get(key)
+        if handle is None:
+            return False
+        proc = getattr(handle, "proc", None)
+        return proc is not None and proc.poll() is None
+
+
 def prepare_tiktok_warm_session() -> None:
     """Перед warm_tiktok_session: только TikTok worker/Chrome, не Facebook и не весь пул."""
     worker_path = Path(__file__).resolve().parent / "tiktok" / "worker.py"

@@ -26,8 +26,11 @@ def interrupt_refresh_playwright_workers(*, label: str = "refresh_stop") -> None
         print(f"[{label}] shutdown workers failed: {exc}", file=sys.stderr, flush=True)
 
     try:
-        from platforms.facebook.rate_limit import shutdown_facebook_worker
+        from accounts.models import ScrapeBackendChoice, ScrapeBackendConfig
 
-        shutdown_facebook_worker()
+        if ScrapeBackendConfig.get().facebook_backend != ScrapeBackendChoice.APIFY:
+            from platforms.facebook.rate_limit import shutdown_facebook_worker
+
+            shutdown_facebook_worker()
     except Exception:
         pass

@@ -11,6 +11,7 @@ from platforms.profile_unavailable import (
     is_profile_unavailable_error as is_instagram_profile_unavailable_error,
     user_visible_profile_unavailable_error as user_visible_instagram_error,
 )
+from platforms.instagram.posts_meta import annotate_instagram_posts_payload, instagram_max_posts
 from platforms.worker_pool import call_worker
 
 _HEADERS = {
@@ -262,9 +263,10 @@ def _instaloader_profile_and_posts_raw(L, username: str) -> dict | tuple[dict, l
             return _fetch_instagram_playwright(u)
 
     posts: list[dict] = []
+    max_posts = instagram_max_posts()
     try:
         for post in profile.get_posts():
-            if len(posts) >= 12:
+            if len(posts) >= max_posts:
                 break
             posts.append({
                 "external_id": post.shortcode,
@@ -330,7 +332,7 @@ def fetch_instagram_profiles_bulk(usernames: list[str]) -> dict[str, dict]:
             complete[key] = fetch_instagram_profile(raw)
             continue
         if isinstance(chunk, dict):
-            complete[key] = chunk
+            complete[key] = annotate_instagram_posts_payload(chunk)
         else:
             summary, posts = chunk
             pending[key] = (summary, posts)
@@ -350,20 +352,20 @@ def fetch_instagram_profiles_bulk(usernames: list[str]) -> dict[str, dict]:
                     next(u for u in usernames if norm(u) == key),
                     posts,
                 )
-                complete[key] = summary
+                complete[key] = annotate_instagram_posts_payload(summary)
         else:
             grids = data.get("_batch_reels_grids") or {}
             for key, (summary, posts) in pending.items():
                 rows = grids.get(key) or []
                 summary = dict(summary)
                 summary["_posts"] = _merge_posts_with_reels_grid_scraper(posts or [], rows)
-                complete[key] = summary
+                complete[key] = annotate_instagram_posts_payload(summary)
     elif len(pending) == 1:
         key, (summary, posts) = next(iter(pending.items()))
         u_for_merge = next(x for x in usernames if norm(x) == key)
         summary = dict(summary)
         summary["_posts"] = _merge_reels_views_into_posts(u_for_merge, posts)
-        complete[key] = summary
+        complete[key] = annotate_instagram_posts_payload(summary)
 
     return complete
 
@@ -460,15 +462,17 @@ def fetch_instagram_profile(username: str) -> dict:
         }
 
     if force_playwright:
-        return _fetch_instagram_playwright(username)
+        return annotate_instagram_posts_payload(_fetch_instagram_playwright(username))
 
     if insta_user and insta_pass:
         # Instaloader для профиля и постов; затем один проход Playwright по /reels/ для просмотров.
         # Если это падает не ValueError — сессия сломана; перезапусти setup_instagram_auth.
-        return _fetch_instagram_instaloader(username, insta_user, insta_pass, session_file)
+        return annotate_instagram_posts_payload(
+            _fetch_instagram_instaloader(username, insta_user, insta_pass, session_file),
+        )
 
     # No credentials configured at all — fall back to Playwright
-    return _fetch_instagram_playwright(username)
+    return annotate_instagram_posts_payload(_fetch_instagram_playwright(username))
 
 
 def _fetch_instagram_instaloader(username: str, insta_user: str, insta_pass: str, session_file: str) -> dict:
@@ -778,7 +782,8 @@ def _parse_instagram_graphql_user(user: dict, username: str) -> dict:
     )
 
     posts = []
-    for edge in (user.get("edge_owner_to_timeline_media", {}).get("edges") or [])[:20]:
+    max_posts = instagram_max_posts()
+    for edge in (user.get("edge_owner_to_timeline_media", {}).get("edges") or [])[:max_posts]:
         node = edge.get("node", {})
         shortcode = node.get("shortcode", "")
         if not shortcode:
@@ -810,22 +815,26 @@ def _parse_instagram_graphql_user(user: dict, username: str) -> dict:
             "posted_at":     posted_at,
         })
 
-    return {
-        "display_name": display_name,
-        "avatar_url":   avatar_url,
-        "bio":          bio,
-        "follower_count":  follower_count,
-        "following_count": following_count,
-        "like_count":  0,
-        "post_count":  post_count,
-        "_posts":      _merge_reels_views_into_posts(username, posts),
-    }
+    return annotate_instagram_posts_payload(
+        {
+            "display_name": display_name,
+            "avatar_url": avatar_url,
+            "bio": bio,
+            "follower_count": follower_count,
+            "following_count": following_count,
+            "like_count": 0,
+            "post_count": post_count,
+            "_posts": _merge_reels_views_into_posts(username, posts),
+        },
+    )
 
 
 def _fetch_instagram_playwright(username: str) -> dict:
     """Fallback: Playwright subprocess (requires manual login in browser)."""
     try:
-        return _call_instagram_worker({"username": username})
+        return annotate_instagram_posts_payload(
+            _call_instagram_worker({"username": username}),
+        )
     except ValueError as e:
         # Worker may return plain text errors without PROFILE_UNAVAILABLE prefix.
         # Normalize known "page unavailable / not found" phrases so views can

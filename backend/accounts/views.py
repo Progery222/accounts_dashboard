@@ -739,256 +739,280 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
             )
 
             apify_batch_id = uuid.uuid4()
-            has_facebook = facebook_playwright_warm_needed(accounts)
-            fb_batch_guard = None
-            if has_facebook:
-                from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
-
-                fb_batch_guard = FacebookRefreshBatchGuard()
-
-            if not stop_requested.is_set():
-                from django.conf import settings as dj_settings
-
-                pw_accounts = accounts_needing_playwright(accounts)
-                if pw_accounts and bool(
-                    getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
-                ):
-                    _prewarm_workers(pw_accounts)
-                preload: dict[str, dict] = {}
-            else:
-                preload = {}
-
-            platform_limits = _refresh_platform_limits(accounts)
-            account_queue = ParallelAccountQueue(len(accounts), platform_limits)
-            worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
-
             with state_lock:
                 state.refresh_from_db(fields=["run_detail"])
-                rd = dict(state.run_detail or {})
-                rd["worker_count"] = worker_count
-                state.run_detail = rd
+                rd_batch = dict(state.run_detail or {})
+                rd_batch["apify_batch_id"] = str(apify_batch_id)
+                state.run_detail = rd_batch
                 state.save(update_fields=["run_detail", "updated_at"])
+            try:
+                from platforms.apify.abort import abort_active_apify_jobs
 
-            thread_slot_map: dict[int, int] = {}
-            thread_slot_lock = threading.Lock()
-
-            def _worker_slot() -> int:
-                tid = threading.get_ident()
-                with thread_slot_lock:
-                    if tid not in thread_slot_map:
-                        thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
-                    return thread_slot_map[tid]
-
-            def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
-                with state_lock:
-                    state.processed_accounts += 1
-                    if success:
-                        state.success_accounts += 1
-                    if failed:
-                        state.failed_accounts += 1
-                        state.last_error = last_error
-                    state.save(update_fields=[
-                        "processed_accounts", "success_accounts", "failed_accounts",
-                        "last_error", "updated_at",
-                    ])
-
-            def _worker() -> None:
-                while True:
-                    if stop_requested.is_set():
-                        return
-                    with state_lock:
-                        state.refresh_from_db(fields=["cancel_requested"])
-                        if bool(state.cancel_requested):
-                            state.last_error = "Обновление остановлено пользователем."
-                            state.save(update_fields=["last_error", "updated_at"])
-                            stop_requested.set()
-                            return
-
-                    idx = account_queue.claim(
-                        lambda i: accounts[i].platform,
-                        stop_event=stop_requested,
+                aborted = abort_active_apify_jobs()
+                if aborted:
+                    print(
+                        f"[bulk_refresh] отменено активных Apify jobs: {aborted}",
+                        file=sys.stderr,
+                        flush=True,
                     )
-                    if idx is None:
-                        return
+            except Exception as exc:
+                print(f"[bulk_refresh] abort Apify jobs failed: {exc}", file=sys.stderr)
+            from platforms.apify.batch_guard import enter_sync_apify_batch, leave_sync_apify_batch
 
-                    close_old_connections()
-                    account = accounts[idx]
-                    from .warm_run_detail import is_refresh_cancel_requested
+            enter_sync_apify_batch(apify_batch_id)
+            try:
+                has_facebook = facebook_playwright_warm_needed(accounts)
+                fb_batch_guard = None
+                if has_facebook:
+                    from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
-                    if is_refresh_cancel_requested():
-                        stop_requested.set()
-                        return
-                    release_db_for_long_task()
-                    warm_tracker.wait_warm_before_refresh(account.platform)
-                    if is_refresh_cancel_requested():
-                        stop_requested.set()
-                        return
-                    attempted_network = False
-                    refresh_baseline = None
-                    try:
+                    fb_batch_guard = FacebookRefreshBatchGuard()
+
+                if not stop_requested.is_set():
+                    from django.conf import settings as dj_settings
+
+                    pw_accounts = accounts_needing_playwright(accounts)
+                    if pw_accounts and bool(
+                        getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
+                    ):
+                        _prewarm_workers(pw_accounts)
+                    preload: dict[str, dict] = {}
+                else:
+                    preload = {}
+
+                platform_limits = _refresh_platform_limits(accounts)
+                account_queue = ParallelAccountQueue(len(accounts), platform_limits)
+                worker_count = 1
+
+                with state_lock:
+                    state.refresh_from_db(fields=["run_detail"])
+                    rd = dict(state.run_detail or {})
+                    rd["worker_count"] = worker_count
+                    state.run_detail = rd
+                    state.save(update_fields=["run_detail", "updated_at"])
+
+                thread_slot_map: dict[int, int] = {}
+                thread_slot_lock = threading.Lock()
+
+                def _worker_slot() -> int:
+                    tid = threading.get_ident()
+                    with thread_slot_lock:
+                        if tid not in thread_slot_map:
+                            thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
+                        return thread_slot_map[tid]
+
+                def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
+                    with state_lock:
+                        state.processed_accounts += 1
+                        if success:
+                            state.success_accounts += 1
+                        if failed:
+                            state.failed_accounts += 1
+                            state.last_error = last_error
+                        state.save(update_fields=[
+                            "processed_accounts", "success_accounts", "failed_accounts",
+                            "last_error", "updated_at",
+                        ])
+
+                def _worker() -> None:
+                    while True:
                         if stop_requested.is_set():
                             return
-
-                        slot = _worker_slot()
                         with state_lock:
-                            state.current_account = f"{account.platform}/@{account.username}"
-                            state.save(update_fields=["current_account", "updated_at"])
-                        _persist_auto_refresh_run_item(account.id, status="running", worker=slot)
-
-                        if cutoff is not None and account.updated_at and account.updated_at >= cutoff:
-                            skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
-                            _persist_auto_refresh_run_item(
-                                account.id,
-                                status="skipped",
-                                worker=None,
-                                detail=skip_detail,
-                            )
-                            _mark_progress(success=True, failed=False)
-                        elif (
-                            account.platform == Platform.FACEBOOK
-                            and fb_batch_guard is not None
-                            and not should_use_apify_for_account(account)
-                            and fb_batch_guard.is_tripped()
-                        ):
-                            skip_detail = fb_batch_guard.skip_detail()
-                            _persist_auto_refresh_run_item(
-                                account.id,
-                                status="skipped",
-                                worker=None,
-                                detail=skip_detail,
-                            )
-                            _mark_progress(success=True, failed=False)
-                        elif should_use_apify_for_account(account):
-                            dispatch_apify_for_batch_account(
-                                account,
-                                trigger=ApifyRefreshJobTrigger.BULK,
-                                parent_batch_id=apify_batch_id,
-                            )
-                        else:
-                            if is_refresh_cancel_requested():
+                            state.refresh_from_db(fields=["cancel_requested"])
+                            if bool(state.cancel_requested):
+                                state.last_error = "Обновление остановлено пользователем."
+                                state.save(update_fields=["last_error", "updated_at"])
                                 stop_requested.set()
                                 return
-                            ensure_fresh_db_connections()
-                            account = Account.objects.select_related("profile").get(pk=account.pk)
-                            refresh_baseline = _account_refresh_baseline(account)
-                            with _account_refresh_mutex(account.id):
-                                Account.objects.filter(pk=account.pk).update(
-                                    profile_unavailable=False,
-                                )
-                                account.profile_unavailable = False
-                                key = _normalize_instagram_username_key(account.username)
-                                scraped = None
-                                if account.platform == Platform.INSTAGRAM and key in preload:
-                                    scraped = preload[key]
-                                attempted_network = True
-                                refreshed, detail, _ = _refresh_account_for_api(
-                                    account, scraped=scraped,
-                                )
-                            if refreshed is not None and is_refresh_cancel_requested():
-                                _restore_account_refresh_baseline(account.pk, refresh_baseline)
-                                refreshed = None
-                                detail = "Остановлено пользователем"
-                            if refreshed is not None:
+
+                        idx = account_queue.claim(
+                            lambda i: accounts[i].platform,
+                            stop_event=stop_requested,
+                        )
+                        if idx is None:
+                            return
+
+                        close_old_connections()
+                        account = accounts[idx]
+                        from .warm_run_detail import is_refresh_cancel_requested
+
+                        if is_refresh_cancel_requested():
+                            stop_requested.set()
+                            return
+                        release_db_for_long_task()
+                        warm_tracker.wait_warm_before_refresh(account.platform)
+                        if is_refresh_cancel_requested():
+                            stop_requested.set()
+                            return
+                        attempted_network = False
+                        refresh_baseline = None
+                        try:
+                            if stop_requested.is_set():
+                                return
+
+                            slot = _worker_slot()
+                            with state_lock:
+                                state.current_account = f"{account.platform}/@{account.username}"
+                                state.save(update_fields=["current_account", "updated_at"])
+                            _persist_auto_refresh_run_item(account.id, status="running", worker=slot)
+
+                            if cutoff is not None and account.updated_at and account.updated_at >= cutoff:
+                                skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
                                 _persist_auto_refresh_run_item(
-                                    account.id, status="done", worker=None, detail="",
+                                    account.id,
+                                    status="skipped",
+                                    worker=None,
+                                    detail=skip_detail,
                                 )
                                 _mark_progress(success=True, failed=False)
-                            elif detail and "Остановлен" in str(detail):
+                            elif (
+                                account.platform == Platform.FACEBOOK
+                                and fb_batch_guard is not None
+                                and not should_use_apify_for_account(account)
+                                and fb_batch_guard.is_tripped()
+                            ):
+                                skip_detail = fb_batch_guard.skip_detail()
                                 _persist_auto_refresh_run_item(
                                     account.id,
-                                    status="cancelled",
+                                    status="skipped",
                                     worker=None,
-                                    detail=str(detail)[:800],
+                                    detail=skip_detail,
                                 )
-                                _mark_progress(success=False, failed=False)
-                                stop_requested.set()
+                                _mark_progress(success=True, failed=False)
+                            elif should_use_apify_for_account(account):
+                                dispatch_apify_for_batch_account(
+                                    account,
+                                    trigger=ApifyRefreshJobTrigger.BULK,
+                                    parent_batch_id=apify_batch_id,
+                                )
                             else:
-                                err_msg = str(detail or "")
-                                _persist_auto_refresh_run_item(
-                                    account.id,
-                                    status="error",
-                                    worker=None,
-                                    detail=err_msg[:800],
-                                )
-                                _mark_progress(success=False, failed=True, last_error=err_msg)
-                                errors_out.append({"id": account.id, "detail": detail})
-                    except RefreshCancelledError:
-                        if attempted_network:
-                            _restore_account_refresh_baseline(account.pk, refresh_baseline)
-                        _persist_auto_refresh_run_item(
-                            account.id,
-                            status="cancelled",
-                            worker=None,
-                            detail="Остановлено пользователем",
-                        )
-                        _mark_progress(success=False, failed=False)
-                        stop_requested.set()
-                    except Exception as e:
-                        if account.platform == Platform.FACEBOOK:
-                            from platforms.facebook.rate_limit import (
-                                is_facebook_rate_limited_error,
-                                shutdown_facebook_worker,
+                                if is_refresh_cancel_requested():
+                                    stop_requested.set()
+                                    return
+                                ensure_fresh_db_connections()
+                                account = Account.objects.select_related("profile").get(pk=account.pk)
+                                refresh_baseline = _account_refresh_baseline(account)
+                                with _account_refresh_mutex(account.id):
+                                    Account.objects.filter(pk=account.pk).update(
+                                        profile_unavailable=False,
+                                    )
+                                    account.profile_unavailable = False
+                                    key = _normalize_instagram_username_key(account.username)
+                                    scraped = None
+                                    if account.platform == Platform.INSTAGRAM and key in preload:
+                                        scraped = preload[key]
+                                    attempted_network = True
+                                    refreshed, detail, _ = _refresh_account_for_api(
+                                        account, scraped=scraped,
+                                    )
+                                if refreshed is not None and is_refresh_cancel_requested():
+                                    _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                                    refreshed = None
+                                    detail = "Остановлено пользователем"
+                                if refreshed is not None:
+                                    _persist_auto_refresh_run_item(
+                                        account.id, status="done", worker=None, detail="",
+                                    )
+                                    _mark_progress(success=True, failed=False)
+                                elif detail and "Остановлен" in str(detail):
+                                    _persist_auto_refresh_run_item(
+                                        account.id,
+                                        status="cancelled",
+                                        worker=None,
+                                        detail=str(detail)[:800],
+                                    )
+                                    _mark_progress(success=False, failed=False)
+                                    stop_requested.set()
+                                else:
+                                    err_msg = str(detail or "")
+                                    _persist_auto_refresh_run_item(
+                                        account.id,
+                                        status="error",
+                                        worker=None,
+                                        detail=err_msg[:800],
+                                    )
+                                    _mark_progress(success=False, failed=True, last_error=err_msg)
+                                    errors_out.append({"id": account.id, "detail": detail})
+                        except RefreshCancelledError:
+                            if attempted_network:
+                                _restore_account_refresh_baseline(account.pk, refresh_baseline)
+                            _persist_auto_refresh_run_item(
+                                account.id,
+                                status="cancelled",
+                                worker=None,
+                                detail="Остановлено пользователем",
                             )
-
-                            if is_facebook_rate_limited_error(e):
-                                shutdown_facebook_worker()
-                                if fb_batch_guard is not None:
-                                    fb_batch_guard.trip(str(e))
-                        detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
-                        if len(detail) > 800:
-                            detail = detail[:797] + "..."
-                        _persist_auto_refresh_run_item(
-                            account.id,
-                            status="error",
-                            worker=None,
-                            detail=detail,
-                        )
-                        _mark_progress(success=False, failed=True, last_error=detail)
-                        errors_out.append({"id": account.id, "detail": detail})
-                        print(
-                            f"[bulk_refresh] {account.platform}/@{account.username}: {e}",
-                            file=sys.stderr,
-                        )
-                    finally:
-                        if attempted_network and not is_refresh_cancel_requested():
-                            delay_sec = _refresh_all_delay_seconds(account)
-                            account_queue.set_platform_cooldown(account.platform, delay_sec)
-                            if account.platform == Platform.FACEBOOK and delay_sec > 0:
-                                print(
-                                    f"[bulk_refresh] facebook cooldown {delay_sec:.0f} с",
-                                    file=sys.stderr,
-                                    flush=True,
+                            _mark_progress(success=False, failed=False)
+                            stop_requested.set()
+                        except Exception as e:
+                            if account.platform == Platform.FACEBOOK:
+                                from platforms.facebook.rate_limit import (
+                                    is_facebook_rate_limited_error,
+                                    shutdown_facebook_worker,
                                 )
-                            warm_tracker.after_network_refresh(account.platform)
-                        if stop_requested.is_set():
-                            account_queue.abandon(idx, account.platform)
-                        else:
-                            account_queue.finish(idx, account.platform)
 
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = [executor.submit(_worker) for _ in range(worker_count)]
-                for f in futures:
-                    f.result()
+                                if is_facebook_rate_limited_error(e):
+                                    shutdown_facebook_worker()
+                                    if fb_batch_guard is not None:
+                                        fb_batch_guard.trip(str(e))
+                            detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
+                            if len(detail) > 800:
+                                detail = detail[:797] + "..."
+                            _persist_auto_refresh_run_item(
+                                account.id,
+                                status="error",
+                                worker=None,
+                                detail=detail,
+                            )
+                            _mark_progress(success=False, failed=True, last_error=detail)
+                            errors_out.append({"id": account.id, "detail": detail})
+                            print(
+                                f"[bulk_refresh] {account.platform}/@{account.username}: {e}",
+                                file=sys.stderr,
+                            )
+                        finally:
+                            if attempted_network and not is_refresh_cancel_requested():
+                                delay_sec = _refresh_all_delay_seconds(account)
+                                account_queue.set_platform_cooldown(account.platform, delay_sec)
+                                if account.platform == Platform.FACEBOOK and delay_sec > 0:
+                                    print(
+                                        f"[bulk_refresh] facebook cooldown {delay_sec:.0f} с",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
+                                warm_tracker.after_network_refresh(account.platform)
+                            if stop_requested.is_set():
+                                account_queue.abandon(idx, account.platform)
+                            else:
+                                account_queue.finish(idx, account.platform)
 
-            warm_tracker.join_warm_threads(
-                timeout=15.0 if is_refresh_cancel_requested() else None,
-            )
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    futures = [executor.submit(_worker) for _ in range(worker_count)]
+                    for f in futures:
+                        f.result()
 
-            with state_lock:
-                state.refresh_from_db()
-                if stop_requested.is_set():
-                    _mark_bulk_refresh_queued_cancelled(state)
-                if errors_out:
-                    last = errors_out[-1]
-                    prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
-                    state.last_error = (
-                        f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
-                        f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
-                    )[:4000]
-                    state.save(update_fields=["last_error", "updated_at"])
-                elif not stop_requested.is_set():
-                    state.last_error = ""
-                    state.save(update_fields=["last_error", "updated_at"])
+                warm_tracker.join_warm_threads(
+                    timeout=15.0 if is_refresh_cancel_requested() else None,
+                )
+
+                with state_lock:
+                    state.refresh_from_db()
+                    if stop_requested.is_set():
+                        _mark_bulk_refresh_queued_cancelled(state)
+                    if errors_out:
+                        last = errors_out[-1]
+                        prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
+                        state.last_error = (
+                            f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
+                            f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
+                        )[:4000]
+                        state.save(update_fields=["last_error", "updated_at"])
+                    elif not stop_requested.is_set():
+                        state.last_error = ""
+                        state.save(update_fields=["last_error", "updated_at"])
+            finally:
+                leave_sync_apify_batch()
     finally:
         if warm_tracker is not None:
             try:
@@ -1310,7 +1334,7 @@ def _run_refresh_all_background(
             include_hidden_profiles=include_hidden_profiles,
         )
         accounts = order_accounts_for_refresh(list(accounts_qs))
-        worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
+        worker_count = 1
         _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
         run_items = [
@@ -1328,7 +1352,11 @@ def _run_refresh_all_background(
         state.processed_accounts = 0
         state.success_accounts = 0
         state.failed_accounts = 0
-        state.run_detail = {"items": run_items, "worker_count": worker_count}
+        state.run_detail = {
+            "items": run_items,
+            "worker_count": worker_count,
+            "apify_batch_id": str(apify_batch_id),
+        }
         state.save(update_fields=[
             "total_accounts", "processed_accounts", "success_accounts", "failed_accounts",
             "run_detail", "updated_at",
@@ -1337,17 +1365,33 @@ def _run_refresh_all_background(
         if not accounts:
             return
 
+        try:
+            from platforms.apify.abort import abort_active_apify_jobs
+
+            aborted = abort_active_apify_jobs()
+            if aborted:
+                print(
+                    f"[refresh_all] отменено активных Apify jobs: {aborted}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"[refresh_all] abort Apify jobs failed: {exc}", file=sys.stderr)
+        from platforms.apify.batch_guard import enter_sync_apify_batch, leave_sync_apify_batch
+
+        enter_sync_apify_batch(apify_batch_id)
+
         skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
 
         ig_preload: dict[str, dict] = {}
 
         from .scrape_backend import (
             accounts_needing_playwright,
-            dispatch_apify_for_batch_account,
             facebook_playwright_warm_needed,
+            refresh_account_via_apify_sync,
             should_use_apify_for_account,
         )
-        from accounts.models import ApifyRefreshJobTrigger
+        from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus, ApifyRefreshJobTrigger
 
         has_facebook = facebook_playwright_warm_needed(accounts)
         fb_batch_guard = None
@@ -1517,11 +1561,122 @@ def _run_refresh_all_background(
                                     detail=skip_detail,
                                 )
                             elif should_use_apify_for_account(account):
-                                dispatch_apify_for_batch_account(
-                                    account,
-                                    trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
-                                    parent_batch_id=apify_batch_id,
-                                )
+                                attempted_network = True
+                                try:
+                                    refresh_account_via_apify_sync(
+                                        account,
+                                        trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as e:
+                                    detail, _ = _format_refresh_error(account, e)
+                                    row = {
+                                        "id": account.id,
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "status": "ошибка",
+                                        "error": detail,
+                                        "follower_count": before["follower_count"],
+                                        "follower_delta": None,
+                                        "like_count": before["like_count"],
+                                        "like_delta": None,
+                                        "view_count": before["view_count"],
+                                        "view_delta": None,
+                                        "post_count": before["post_count"],
+                                        "post_delta": None,
+                                    }
+                                    _refresh_all_atomic_progress(
+                                        failed=True, last_error=str(detail or "")
+                                    )
+                                    _persist_refresh_all_run_item(
+                                        account.id,
+                                        status="error",
+                                        worker=None,
+                                        detail=str(detail or "")[:800],
+                                    )
+                                else:
+                                    job = (
+                                        ApifyRefreshJob.objects.filter(account_id=account.id)
+                                        .order_by("-id")
+                                        .first()
+                                    )
+                                    account.refresh_from_db(
+                                        fields=[
+                                            "follower_count",
+                                            "like_count",
+                                            "view_count",
+                                            "post_count",
+                                            "link_click_count",
+                                            "updated_at",
+                                        ],
+                                    )
+                                    after = {
+                                        "follower_count": account.follower_count,
+                                        "like_count": account.like_count,
+                                        "view_count": account.view_count,
+                                        "post_count": account.post_count,
+                                    }
+                                    if job and job.status != ApifyRefreshJobStatus.SUCCEEDED:
+                                        detail = (job.error_message or "Ошибка Apify")[:800]
+                                        row = {
+                                            "id": account.id,
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "status": "ошибка",
+                                            "error": detail,
+                                            "follower_count": before["follower_count"],
+                                            "follower_delta": None,
+                                            "like_count": before["like_count"],
+                                            "like_delta": None,
+                                            "view_count": before["view_count"],
+                                            "view_delta": None,
+                                            "post_count": before["post_count"],
+                                            "post_delta": None,
+                                        }
+                                        _refresh_all_atomic_progress(
+                                            failed=True, last_error=detail,
+                                        )
+                                        _persist_refresh_all_run_item(
+                                            account.id,
+                                            status="error",
+                                            worker=None,
+                                            detail=detail,
+                                        )
+                                    else:
+                                        changed = {
+                                            k: (after[k] != before[k]) for k in before
+                                        }
+                                        changed_count = sum(1 for v in changed.values() if v)
+                                        status_label = (
+                                            "нет обновлений"
+                                            if changed_count == 0
+                                            else "обновилось"
+                                        )
+                                        row = {
+                                            "id": account.id,
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "status": status_label,
+                                            "follower_count": after["follower_count"],
+                                            "follower_delta": after["follower_count"]
+                                            - before["follower_count"],
+                                            "like_count": after["like_count"],
+                                            "like_delta": after["like_count"]
+                                            - before["like_count"],
+                                            "view_count": after["view_count"],
+                                            "view_delta": after["view_count"]
+                                            - before["view_count"],
+                                            "post_count": after["post_count"],
+                                            "post_delta": after["post_count"]
+                                            - before["post_count"],
+                                        }
+                                        _refresh_all_atomic_progress(failed=False)
+                                        _persist_refresh_all_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail="",
+                                        )
                             else:
                                 if is_refresh_cancel_requested():
                                     stop_requested.set()
@@ -1753,6 +1908,12 @@ def _run_refresh_all_background(
         except Exception:
             pass
     finally:
+        try:
+            from platforms.apify.batch_guard import leave_sync_apify_batch
+
+            leave_sync_apify_batch()
+        except Exception:
+            pass
         try:
             from platforms.worker_pool import shutdown_playwright_pool_aggressive
 
@@ -2320,7 +2481,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             state.last_error = ""
             state.started_at = timezone.now()
             state.finished_at = None
-            worker_count = _refresh_int_env("AUTO_REFRESH_WORKERS", 1, min_v=1, max_v=16)
+            worker_count = 1
             state.run_detail = {"items": run_items, "worker_count": worker_count}
             state.save(update_fields=[
                 "is_running", "source", "cancel_requested", "total_accounts",
@@ -2888,6 +3049,27 @@ def _telegram_default_chat_id() -> str:
     return (getattr(settings, "TELEGRAM_AUTO_REFRESH_CHAT_ID", None) or "").strip()
 
 
+def _schedule_telegram_chat_ids(config) -> list[str]:
+    from .telegram_chat_ids import telegram_chat_ids_from_config
+
+    return telegram_chat_ids_from_config(config)
+
+
+def _schedule_telegram_chat_id_legacy(config) -> str:
+    ids = _schedule_telegram_chat_ids(config)
+    if ids:
+        return ids[0]
+    return (getattr(config, "auto_refresh_telegram_chat_id", None) or "").strip()
+
+
+def _apply_schedule_telegram_chat_ids(config, chat_ids: list[str]) -> None:
+    from .telegram_chat_ids import normalize_telegram_chat_ids
+
+    ids = normalize_telegram_chat_ids(chat_ids)
+    config.auto_refresh_telegram_chat_ids = ids
+    config.auto_refresh_telegram_chat_id = ids[0] if ids else ""
+
+
 def _schedule_to_dict(config) -> dict:
     from .auto_refresh_scope import (
         normalize_auto_refresh_platforms,
@@ -2910,13 +3092,11 @@ def _schedule_to_dict(config) -> dict:
         "auto_refresh_telegram_enabled": bool(
             getattr(config, "auto_refresh_telegram_enabled", False),
         ),
-        "auto_refresh_telegram_chat_id": (
-            getattr(config, "auto_refresh_telegram_chat_id", None) or ""
-        ).strip(),
+        "auto_refresh_telegram_chat_ids": _schedule_telegram_chat_ids(config),
+        "auto_refresh_telegram_chat_id": _schedule_telegram_chat_id_legacy(config),
         "telegram_bot_configured": _telegram_bot_configured(),
         "telegram_chat_configured": bool(
-            (getattr(config, "auto_refresh_telegram_chat_id", None) or "").strip()
-            or _telegram_default_chat_id()
+            _schedule_telegram_chat_ids(config) or _telegram_default_chat_id()
         ),
         "include_hidden_platform_accounts": bool(
             getattr(config, "include_hidden_platform_accounts", False),
@@ -3090,10 +3270,14 @@ def refresh_schedule(request):
             config.auto_refresh_telegram_enabled = _coerce_bool(
                 data["auto_refresh_telegram_enabled"],
             )
-        if "auto_refresh_telegram_chat_id" in data:
-            config.auto_refresh_telegram_chat_id = str(
-                data.get("auto_refresh_telegram_chat_id") or "",
-            ).strip()[:32]
+        if "auto_refresh_telegram_chat_ids" in data:
+            _apply_schedule_telegram_chat_ids(
+                config,
+                data.get("auto_refresh_telegram_chat_ids"),
+            )
+        elif "auto_refresh_telegram_chat_id" in data:
+            legacy = str(data.get("auto_refresh_telegram_chat_id") or "").strip()[:32]
+            _apply_schedule_telegram_chat_ids(config, [legacy] if legacy else [])
         if "include_hidden_platform_accounts" in data:
             config.include_hidden_platform_accounts = _coerce_bool(data["include_hidden_platform_accounts"])
         if "include_hidden_profile_accounts" in data:
@@ -3154,11 +3338,25 @@ def auto_refresh_telegram_test(request):
         from .models import RefreshScheduleConfig
         from .telegram_report import send_telegram_test_message
 
+        from .telegram_chat_ids import normalize_telegram_chat_ids
+
         config = RefreshScheduleConfig.get()
         data = request.data if isinstance(request.data, dict) else {}
+        chat_ids_raw = data.get("chat_ids")
+        chat_ids = (
+            normalize_telegram_chat_ids(chat_ids_raw)
+            if isinstance(chat_ids_raw, list)
+            else None
+        )
         chat_id = str(data.get("chat_id") or "").strip() or None
-        send_telegram_test_message(config=config, chat_id=chat_id)
-        return Response({"ok": True, "detail": "Сообщение отправлено в Telegram."})
+        send_telegram_test_message(config=config, chat_id=chat_id, chat_ids=chat_ids)
+        n = len(chat_ids) if chat_ids else 1
+        detail = (
+            f"Сообщение отправлено в {n} чат(ов) Telegram."
+            if chat_ids and len(chat_ids) > 1
+            else "Сообщение отправлено в Telegram."
+        )
+        return Response({"ok": True, "detail": detail})
     except Exception as exc:
         return Response(
             {"ok": False, "detail": str(exc)},
@@ -3294,11 +3492,15 @@ def auto_refresh_status(request):
             state = auto
             pipeline = None
 
-        total = max(0, int(state.total_accounts or 0))
-        done = max(0, int(state.processed_accounts or 0))
-        progress = 0 if total <= 0 else min(100, int(round((done / total) * 100)))
         report_csv = (getattr(auto, "last_report_csv", None) or "").strip()
         rd = _coerce_rd(state) if pipeline else _coerce_rd(auto)
+        from .auto_refresh_progress import progress_from_run_detail
+
+        done, total, progress = progress_from_run_detail(
+            rd,
+            db_total=int(state.total_accounts or 0),
+            db_done=int(state.processed_accounts or 0),
+        )
         resp_src = (getattr(state, "source", None) or "").strip()
         if pipeline == "refresh_all" and not resp_src:
             resp_src = "refresh_all"
@@ -3338,7 +3540,10 @@ def auto_refresh_run_now(request):
     try:
         from .refresh_state import clear_stale_refresh_runs_if_needed
 
+        from .refresh_state import clear_orphan_cancel_flags
+
         clear_stale_refresh_runs_if_needed()
+        clear_orphan_cancel_flags()
         state = AutoRefreshState.get()
         rr = RefreshAllState.get()
         if state.is_running or rr.is_running:

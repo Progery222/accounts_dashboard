@@ -117,6 +117,16 @@ def on_apify_job_finished(
         return
 
     if trigger in (ApifyRefreshJobTrigger.BULK, ApifyRefreshJobTrigger.SCHEDULER):
+        from accounts.auto_refresh_progress import apify_job_applies_to_current_auto_refresh
+
+        if not apify_job_applies_to_current_auto_refresh(job):
+            logger.info(
+                "apify.completion ignored stale job_id=%s batch=%s trigger=%s",
+                job.pk,
+                job.parent_batch_id,
+                job.trigger,
+            )
+            return
 
         def _write() -> None:
             state = AutoRefreshState.get()

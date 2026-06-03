@@ -20,6 +20,9 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from platforms.instagram.posts_meta import annotate_instagram_posts_payload, instagram_max_posts
+from platforms.instagram.posts_meta import instagram_reels_scroll_iterations as _reels_scroll_iters
+
 
 def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[dict]:
     """
@@ -126,7 +129,7 @@ _EXTRACT_TIMELINE_POSTS_JS = r"""
                 if (!prev.description && r.description) prev.description = r.description;
                 if (!prev.thumbnail_url && r.thumbnail_url) prev.thumbnail_url = r.thumbnail_url;
             }
-            return Array.from(byId.values()).slice(0, 20);
+            return Array.from(byId.values()).slice(0, __IG_MAX_POSTS__);
         }
 
         if (results.length === 0) {
@@ -151,9 +154,15 @@ _EXTRACT_TIMELINE_POSTS_JS = r"""
             }
         }
     } catch(e) {}
-    return results.slice(0, 20);
+    return results.slice(0, __IG_MAX_POSTS__);
 })()
 """
+
+# Подставляется при загрузке модуля (см. _timeline_posts_js).
+_EXTRACT_TIMELINE_POSTS_JS = _EXTRACT_TIMELINE_POSTS_JS.replace(
+    "__IG_MAX_POSTS__",
+    str(instagram_max_posts()),
+)
 
 # Все карточки /reel/ на вкладке Reels: shortcode, просмотры (включая 0), превью.
 # Важно: не брать «первый числовой span» наугад — см. extractViewsFromCard.
@@ -304,7 +313,7 @@ async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
 
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(500)
-    for _ in range(16):
+    for _ in range(_reels_scroll_iters()):
         await page.evaluate("window.scrollBy(0, Math.min(window.innerHeight, 900))")
         await page.wait_for_timeout(650)
 
@@ -520,16 +529,18 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
     # У аккаунтов без постов и рилсов /reels/ часто редирект или пустой DOM — не ходим туда,
     # иначе лишние goto, антибот и риск «зависания» без строки в stdout.
     if post_count == 0 and len(posts) == 0:
-        return {
-            "display_name": display_name,
-            "avatar_url": avatar_url,
-            "bio": bio,
-            "follower_count": follower_count,
-            "following_count": following_count,
-            "like_count": 0,
-            "post_count": post_count,
-            "_posts": [],
-        }
+        return annotate_instagram_posts_payload(
+            {
+                "display_name": display_name,
+                "avatar_url": avatar_url,
+                "bio": bio,
+                "follower_count": follower_count,
+                "following_count": following_count,
+                "like_count": 0,
+                "post_count": post_count,
+                "_posts": [],
+            },
+        )
 
     reels_rows = await _scrape_reels_tab_once(page, _wu, username)
     reels_dom_stats = await _extract_profile_counts_from_dom(page)
@@ -541,16 +552,18 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         post_count = int(reels_dom_stats["posts"])
     posts = _merge_posts_with_reels_grid(posts, reels_rows)
 
-    return {
-        "display_name": display_name,
-        "avatar_url": avatar_url,
-        "bio": bio,
-        "follower_count": follower_count,
-        "following_count": following_count,
-        "like_count": 0,
-        "post_count": post_count,
-        "_posts": posts or [],
-    }
+    return annotate_instagram_posts_payload(
+        {
+            "display_name": display_name,
+            "avatar_url": avatar_url,
+            "bio": bio,
+            "follower_count": follower_count,
+            "following_count": following_count,
+            "like_count": 0,
+            "post_count": post_count,
+            "_posts": posts or [],
+        },
+    )
 
 
 async def scrape_profile_counts_only_on_page(page, _wu, username: str) -> dict:

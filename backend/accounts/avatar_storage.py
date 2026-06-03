@@ -176,24 +176,32 @@ def ensure_account_avatar_after_refresh(
     После refresh: один раз скачать аватар, если файла ещё нет.
     avatar_missing — площадка отдала пустой avatar_url; повторно не пробуем.
     """
-    if account_has_stored_avatar(account):
-        return
-    if account.avatar_missing:
-        return
     if not scrape_included_avatar:
         return
 
     url = (scraped_avatar_url or "").strip()
     if not url:
+        # Apify/парсер не вернул картинку — не затираем уже сохранённый аватар.
+        if account_has_stored_avatar(account) or (account.avatar_url or "").strip():
+            return
         if not account.avatar_missing:
             Account.objects.filter(pk=account.pk).update(avatar_missing=True)
         return
 
-    source = (account.avatar_url or url).strip()
-    if not source:
-        return
-    if try_download_and_store(account, source):
+    if account.avatar_missing:
         Account.objects.filter(pk=account.pk).update(avatar_missing=False)
+
+    source = url
+    if try_download_and_store(account, source):
+        if source != (account.avatar_url or "").strip():
+            Account.objects.filter(pk=account.pk).update(avatar_url=source)
+        return
+
+    if account_has_stored_avatar(account) or (account.avatar_url or "").strip():
+        return
+
+    if source != (account.avatar_url or "").strip():
+        Account.objects.filter(pk=account.pk).update(avatar_url=source)
 
 
 def serve_account_avatar_response(pk: int) -> HttpResponse:

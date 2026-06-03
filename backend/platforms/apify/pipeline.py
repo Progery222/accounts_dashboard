@@ -88,10 +88,12 @@ def _build_input(job: ApifyRefreshJob, stage: str) -> dict[str, Any]:
     if plat == Platform.INSTAGRAM:
         handle = uname.lstrip("@")
         if stage == "posts":
+            from platforms.instagram.posts_meta import instagram_max_posts
+
             return {
                 "directUrls": [f"https://www.instagram.com/{handle}/"],
                 "resultsType": "posts",
-                "resultsLimit": 80,
+                "resultsLimit": instagram_max_posts(),
             }
         return {"usernames": [handle]}
     if plat == Platform.YOUTUBE:
@@ -332,6 +334,25 @@ def _fail_job(job: ApifyRefreshJob, message: str) -> None:
     on_apify_job_finished(job, success=False, detail=message)
 
 
+def _safe_start_next_stage(job_id: int, stage: str) -> None:
+    """Старт следующей стадии async-пути с повторной проверкой статуса/batch."""
+    try:
+        job = ApifyRefreshJob.objects.get(pk=job_id)
+    except ApifyRefreshJob.DoesNotExist:
+        return
+    if job.status in (
+        ApifyRefreshJobStatus.SUCCEEDED,
+        ApifyRefreshJobStatus.FAILED,
+        ApifyRefreshJobStatus.ABORTED,
+    ):
+        return
+    from .batch_guard import poller_should_ignore_job
+
+    if poller_should_ignore_job(job):
+        return
+    _start_stage(job_id, stage)
+
+
 def handle_run_terminal(job_id: int, run_id: str, run_meta: dict[str, Any]) -> None:
     global _finished_run_ids
     with _finish_lock:
@@ -344,6 +365,12 @@ def handle_run_terminal(job_id: int, run_id: str, run_meta: dict[str, Any]) -> N
     try:
         job = ApifyRefreshJob.objects.select_related("account").get(pk=job_id)
     except ApifyRefreshJob.DoesNotExist:
+        release_run_slot()
+        return
+
+    from .batch_guard import poller_should_ignore_job
+
+    if poller_should_ignore_job(job):
         release_run_slot()
         return
 
@@ -400,7 +427,7 @@ def handle_run_terminal(job_id: int, run_id: str, run_meta: dict[str, Any]) -> N
         release_run_slot()
         if nxt:
             threading.Thread(
-                target=_start_stage,
+                target=_safe_start_next_stage,
                 args=(job.pk, nxt),
                 daemon=True,
                 name=f"apify-next-{job.pk}-{nxt}",
@@ -412,7 +439,7 @@ def handle_run_terminal(job_id: int, run_id: str, run_meta: dict[str, Any]) -> N
     release_run_slot()
     if nxt:
         threading.Thread(
-            target=_start_stage,
+            target=_safe_start_next_stage,
             args=(job.pk, nxt),
             daemon=True,
             name=f"apify-next-{job.pk}-{nxt}",
@@ -428,8 +455,11 @@ def handle_run_terminal(job_id: int, run_id: str, run_meta: dict[str, Any]) -> N
 
 def process_queued_jobs() -> None:
     """Попытаться стартовать queued jobs при наличии слота."""
+    from .batch_guard import is_sync_batch_active
     from .pool import active_run_count, max_concurrent_runs
 
+    if is_sync_batch_active():
+        return
     if active_run_count() >= max_concurrent_runs():
         return
     pending = (
@@ -442,10 +472,16 @@ def process_queued_jobs() -> None:
 
 def poll_running_jobs() -> None:
     """Fallback polling для run без webhook."""
+    from .batch_guard import is_sync_batch_active, poller_should_ignore_job
+
+    if is_sync_batch_active():
+        return
     jobs = ApifyRefreshJob.objects.filter(
         status__in=[ApifyRefreshJobStatus.STARTING, ApifyRefreshJobStatus.RUNNING],
     ).select_related("account")
     for job in jobs:
+        if poller_should_ignore_job(job):
+            continue
         run_id = (job.apify_run_id or "").strip()
         if not run_id:
             continue

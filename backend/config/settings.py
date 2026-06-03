@@ -331,6 +331,8 @@ SADCAPTCHA_API_KEY = os.getenv("SADCAPTCHA_API_KEY", "").strip()
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "")
 INSTAGRAM_SESSION_FILE = os.getenv("INSTAGRAM_SESSION_FILE", "")
+# Макс. постов за refresh (Playwright/Instaloader); Apify — APIFY pipeline resultsLimit.
+INSTAGRAM_MAX_POSTS = max(12, min(200, int(os.getenv("INSTAGRAM_MAX_POSTS", "80") or "80")))
 
 # ── Facebook ───────────────────────────────────────────────────────────────────
 # ВНИМАНИЕ: пароли ТОЛЬКО через .env / переменные окружения. Никаких дефолтов.

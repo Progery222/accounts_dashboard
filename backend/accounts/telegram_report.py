@@ -12,6 +12,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from .auto_refresh_csv import extract_auto_refresh_status_counts
+from .telegram_chat_ids import normalize_telegram_chat_ids, telegram_chat_ids_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +46,18 @@ def resolve_telegram_bot_token() -> str:
     return (getattr(settings, "TELEGRAM_BOT_TOKEN", None) or "").strip()
 
 
+def resolve_auto_refresh_chat_ids(config) -> list[str]:
+    ids = telegram_chat_ids_from_config(config)
+    if ids:
+        return ids
+    env = (getattr(settings, "TELEGRAM_AUTO_REFRESH_CHAT_ID", None) or "").strip()
+    return normalize_telegram_chat_ids(env)
+
+
 def resolve_auto_refresh_chat_id(config) -> str:
-    from_db = (getattr(config, "auto_refresh_telegram_chat_id", None) or "").strip()
-    if from_db:
-        return from_db
-    return (getattr(settings, "TELEGRAM_AUTO_REFRESH_CHAT_ID", None) or "").strip()
+    """Первый chat ID из списка (совместимость)."""
+    ids = resolve_auto_refresh_chat_ids(config)
+    return ids[0] if ids else ""
 
 
 def telegram_bot_configured() -> bool:
@@ -101,15 +109,41 @@ def auto_refresh_report_filename(*, finished_at) -> str:
     return f"auto_refresh_{stamp}.csv"
 
 
+def _run_detail_unstarted(run_detail: dict[str, Any] | None) -> bool:
+    items = list((run_detail or {}).get("items") or [])
+    if not items:
+        return True
+    pending = {"queued", "running", ""}
+    return all(str(it.get("status") or "").strip().lower() in pending for it in items)
+
+
 def should_send_auto_refresh_telegram(
     *,
     run_was_cancelled: bool,
     last_error: str,
+    report_rows: list[dict[str, Any]] | None = None,
+    started_at=None,
+    finished_at=None,
+    run_detail: dict[str, Any] | None = None,
+    min_duration_sec: float = 30.0,
 ) -> bool:
     if run_was_cancelled:
         return False
     err = (last_error or "").strip().lower()
     if err and any(m in err for m in _CANCEL_MARKERS):
+        return False
+    rows = report_rows or []
+    counts = extract_auto_refresh_status_counts(rows)
+    any_work = any(int(counts.get(k) or 0) > 0 for k in counts)
+    elapsed = 0.0
+    if started_at and finished_at:
+        elapsed = max(0.0, (finished_at - started_at).total_seconds())
+    if not any_work and _run_detail_unstarted(run_detail) and elapsed < max(
+        5.0,
+        float(min_duration_sec),
+    ):
+        return False
+    if not any_work and started_at and finished_at and elapsed < max(5.0, float(min_duration_sec)):
         return False
     return True
 
@@ -161,27 +195,61 @@ def send_auto_refresh_telegram_report(
     token = resolve_telegram_bot_token()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в окружении")
-    chat_id = resolve_auto_refresh_chat_id(config)
-    if not chat_id:
-        raise RuntimeError("Chat ID не задан (настройки расписания или TELEGRAM_AUTO_REFRESH_CHAT_ID)")
-    send_telegram_message(token=token, chat_id=chat_id, text=text)
-    send_telegram_document(
-        token=token,
-        chat_id=chat_id,
-        filename=filename,
-        content=csv_body,
-    )
+    chat_ids = resolve_auto_refresh_chat_ids(config)
+    if not chat_ids:
+        raise RuntimeError(
+            "Chat ID не задан (добавьте получателей в настройках расписания "
+            "или TELEGRAM_AUTO_REFRESH_CHAT_ID в .env)",
+        )
+    errors: list[str] = []
+    for chat_id in chat_ids:
+        try:
+            send_telegram_message(token=token, chat_id=chat_id, text=text)
+            send_telegram_document(
+                token=token,
+                chat_id=chat_id,
+                filename=filename,
+                content=csv_body,
+            )
+        except Exception as exc:
+            errors.append(f"{chat_id}: {exc}")
+    if errors:
+        if len(errors) == len(chat_ids):
+            raise RuntimeError(errors[0])
+        raise RuntimeError(
+            f"Не удалось отправить всем получателям ({len(errors)} из {len(chat_ids)}): "
+            + "; ".join(errors[:3]),
+        )
 
 
-def send_telegram_test_message(*, config, chat_id: str | None = None) -> None:
+def send_telegram_test_message(
+    *,
+    config,
+    chat_id: str | None = None,
+    chat_ids: list[str] | None = None,
+) -> None:
     token = resolve_telegram_bot_token()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в backend/.env")
-    cid = (chat_id or "").strip() or resolve_auto_refresh_chat_id(config)
-    if not cid:
-        raise RuntimeError("Укажите Chat ID в настройках расписания")
-    send_telegram_message(
-        token=token,
-        chat_id=cid,
-        text="Проверка связи с ботом Accounts Stats. Автообновление: OK.",
-    )
+    targets = normalize_telegram_chat_ids(chat_ids) if chat_ids is not None else []
+    if not targets:
+        single = (chat_id or "").strip()
+        if single:
+            targets = normalize_telegram_chat_ids(single)
+        else:
+            targets = resolve_auto_refresh_chat_ids(config)
+    if not targets:
+        raise RuntimeError("Укажите хотя бы один Chat ID в настройках расписания")
+    text = "Проверка связи с ботом Accounts Stats. Автообновление: OK."
+    errors: list[str] = []
+    for cid in targets:
+        try:
+            send_telegram_message(token=token, chat_id=cid, text=text)
+        except Exception as exc:
+            errors.append(f"{cid}: {exc}")
+    if errors:
+        if len(errors) == len(targets):
+            raise RuntimeError(errors[0])
+        raise RuntimeError(
+            f"Ошибка для {len(errors)} из {len(targets)} chat ID: " + "; ".join(errors[:3]),
+        )

@@ -54,6 +54,19 @@ class TelegramTextTests(SimpleTestCase):
             ),
         )
 
+    def test_should_not_send_instant_empty_run(self):
+        started = timezone.now()
+        self.assertFalse(
+            should_send_auto_refresh_telegram(
+                run_was_cancelled=False,
+                last_error="",
+                report_rows=[],
+                started_at=started,
+                finished_at=started,
+                run_detail={"items": [{"status": "queued"}]},
+            ),
+        )
+
 
 class TelegramApiTests(TestCase):
     def test_telegram_test_endpoint_requires_token(self):
@@ -75,7 +88,10 @@ class TelegramApiTests(TestCase):
     def test_send_report(self, mock_msg):
         from accounts.telegram_report import send_auto_refresh_telegram_report
 
-        cfg = MagicMock(auto_refresh_telegram_chat_id="99")
+        cfg = MagicMock(
+            auto_refresh_telegram_chat_ids=["99"],
+            auto_refresh_telegram_chat_id="99",
+        )
         with patch("accounts.telegram_report.send_telegram_document"):
             send_auto_refresh_telegram_report(
                 config=cfg,
@@ -84,3 +100,20 @@ class TelegramApiTests(TestCase):
                 filename="t.csv",
             )
         mock_msg.assert_called_once()
+
+    @patch("accounts.telegram_report.send_telegram_message")
+    def test_send_report_multiple_chats(self, mock_msg):
+        from accounts.telegram_report import send_auto_refresh_telegram_report
+
+        cfg = MagicMock(
+            auto_refresh_telegram_chat_ids=["11", "22"],
+            auto_refresh_telegram_chat_id="11",
+        )
+        with patch("accounts.telegram_report.send_telegram_document"):
+            send_auto_refresh_telegram_report(
+                config=cfg,
+                text="hi",
+                csv_body="a;b\n1;2",
+                filename="t.csv",
+            )
+        self.assertEqual(mock_msg.call_count, 2)

@@ -43,6 +43,16 @@ class AccountAvatarStorageTests(TestCase):
         self.assertTrue(self.with_url.avatar_missing)
         self.assertFalse(account_has_stored_avatar(self.with_url))
 
+    def test_keep_existing_url_when_scrape_reports_empty(self):
+        ensure_account_avatar_after_refresh(
+            self.with_url,
+            scrape_included_avatar=True,
+            scraped_avatar_url=None,
+        )
+        self.with_url.refresh_from_db()
+        self.assertFalse(self.with_url.avatar_missing)
+        self.assertEqual(self.with_url.avatar_url, "https://cdn.example/avatar.jpg")
+
     def test_skip_when_already_missing(self):
         self.with_url.avatar_missing = True
         self.with_url.save(update_fields=["avatar_missing"])

@@ -32,6 +32,7 @@ def dispatch_apify_for_batch_account(
     trigger: str,
     parent_batch_id: uuid.UUID,
 ) -> int:
+    """Устаревший async-путь; для batch/auto используйте refresh_account_via_apify_sync."""
     from platforms.apify.dispatch import dispatch_apify_refresh_for_batch
 
     patch: dict[str, Any] = {
@@ -48,6 +49,60 @@ def dispatch_apify_for_batch_account(
         run_detail_patch=patch,
     )
     return job.pk
+
+
+def refresh_account_via_apify_sync(
+    account: Account,
+    *,
+    trigger: str,
+    parent_batch_id: uuid.UUID,
+) -> Account:
+    """
+    Синхронный Apify refresh для batch / автообновления:
+    один job на аккаунт, все стадии подряд, запись в БД до возврата.
+  """
+    from django.utils import timezone
+
+    from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus
+    from platforms.apify.abort import abort_active_apify_jobs_for_account
+    from platforms.apify.sync_pipeline import run_job_pipeline_sync
+
+    if not apify_enabled():
+        raise ValueError("Apify отключён (APIFY_ENABLED=0 или нет APIFY_TOKEN)")
+    if not use_apify_for_platform(account.platform):
+        raise ValueError(f"Для {account.platform} не выбран backend Apify")
+
+    abort_active_apify_jobs_for_account(account.pk)
+
+    patch: dict[str, Any] = {
+        "backend": "apify",
+        "status": "running",
+        "detail": "Apify (синхронно)",
+        "apify_stage": "queued",
+        "apify_stages": [],
+    }
+    job = ApifyRefreshJob.objects.create(
+        account=account,
+        platform=account.platform,
+        username_snapshot=account.username,
+        status=ApifyRefreshJobStatus.QUEUED,
+        trigger=trigger,
+        parent_batch_id=parent_batch_id,
+        apify_stages=[],
+        run_detail_extra={"sync_inline": True},
+        started_at=timezone.now(),
+    )
+    from accounts.apify_completion import _update_run_detail_item
+
+    _update_run_detail_item(
+        account.id,
+        trigger=trigger,
+        patch=patch,
+    )
+    run_job_pipeline_sync(job.pk)
+    job.refresh_from_db()
+    account.refresh_from_db()
+    return account
 
 
 def apify_run_detail_patch_for_job(job) -> dict[str, Any]:

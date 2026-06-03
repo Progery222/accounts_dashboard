@@ -25,6 +25,10 @@ def _state_looks_stale(state, *, stale_hours: float, stall_hours: float) -> bool
     now = timezone.now()
     started = getattr(state, "started_at", None)
     updated = getattr(state, "updated_at", None) or started
+    finished = getattr(state, "finished_at", None)
+    # Активный прогон: не сбрасывать по «старому» started_at до обновления в теле run.
+    if finished is None and started and (now - started) <= timedelta(hours=1):
+        stall_hours = max(stall_hours, 6.0)
     if started and (now - started) > timedelta(hours=max(0.5, stale_hours)):
         return True
     if updated and (now - updated) > timedelta(hours=max(0.25, stall_hours)):
@@ -171,6 +175,18 @@ def force_stop_auto_refresh(*, reason: str = "Остановлено польз�
     threading.Thread(target=_interrupt_workers, daemon=True, name="refresh-force-stop").start()
 
 
+def clear_orphan_cancel_flags() -> None:
+    """После force_stop поток мог умереть, оставив cancel_requested=True при is_running=False."""
+    from .models import AutoRefreshState, RefreshAllState
+
+    for model in (AutoRefreshState, RefreshAllState):
+        st = model.get()
+        if st.is_running or not st.cancel_requested:
+            continue
+        st.cancel_requested = False
+        st.save(update_fields=["cancel_requested", "updated_at"])
+
+
 def clear_stale_refresh_runs_if_needed() -> list[str]:
     """Сбросить зависшие прогоны: долгий простой, отмена без завершения, общий таймаут."""
     from .models import AutoRefreshState, RefreshAllState
@@ -178,6 +194,7 @@ def clear_stale_refresh_runs_if_needed() -> list[str]:
     stale_h = _float_env("AUTO_REFRESH_STALE_HOURS", 14.0)
     stall_h = _float_env("AUTO_REFRESH_STALL_HOURS", 4.0)
     cleared: list[str] = []
+    clear_orphan_cancel_flags()
     cleared.extend(clear_abandoned_cancelled_runs())
     for key, model in (("auto", AutoRefreshState), ("refresh_all", RefreshAllState)):
         if key in cleared:

@@ -91,6 +91,12 @@ def wait_for_run(
     deadline = time.monotonic() + max_wait
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
+        try:
+            from accounts.auto_refresh_progress import touch_auto_refresh_run_alive_if_needed
+
+            touch_auto_refresh_run_alive_if_needed()
+        except Exception:
+            pass
         last = get_run(run_id)
         status = str(last.get("status") or "")
         if status in TERMINAL_STATUSES:

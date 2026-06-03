@@ -74,14 +74,18 @@ def normalize_instagram(
 
     partial = bool(posts_count and len(posts) < posts_count * 0.8)
     avatar = profile.get("profilePicUrlHD") or profile.get("profilePicUrl") or None
-    return {
+    avatar = str(avatar).strip() if avatar else ""
+    out: dict[str, Any] = {
         "display_name": _clean_display_name(str(profile.get("fullName") or ""), username),
-        "avatar_url": avatar,
         "bio": str(profile.get("biography") or ""),
         "follower_count": int(profile.get("followersCount") or 0),
         "like_count": 0,
         "post_count": posts_count or len(posts),
         "_posts": posts,
         "_posts_authoritative": profile_succeeded and posts_succeeded,
-        **({"_partial": True} if partial or not posts_succeeded else {}),
     }
+    if avatar:
+        out["avatar_url"] = avatar
+    if partial or not posts_succeeded:
+        out["_partial"] = True
+    return out
