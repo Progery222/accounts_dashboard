@@ -44,9 +44,55 @@ POST_VIEWS_MAX_POSTS = int(os.getenv("THREADS_POST_VIEWS_MAX_POSTS", "28") or "2
 POST_DELAY_MS = int(os.getenv("THREADS_POST_DELAY_MS", "1450") or "1450")
 POST_RETRY_CLICKS = int(os.getenv("THREADS_POST_RETRY_CLICKS", "4") or "4")
 POST_VIEWS_DOM_RESCAN_MS = int(os.getenv("THREADS_POST_VIEWS_DOM_RESCAN_MS", "2400") or "2400")
+THREADS_DEBUG_NETWORK = os.getenv("THREADS_DEBUG_NETWORK", "").strip().lower() in ("1", "true", "yes")
+SCROLL_MAX_PASSES = int(os.getenv("THREADS_SCROLL_MAX_PASSES", "25") or "25")
+SCROLL_STALE_STOP = int(os.getenv("THREADS_SCROLL_STALE_STOP", "3") or "3")
 
 
 # ── Parse helpers ─────────────────────────────────────────────────────────────
+
+def _empty_metrics_row() -> dict:
+    return {"views": 0, "likes": 0, "comments": 0, "text": "", "ts": "", "thumb": "", "url": ""}
+
+
+def _is_post_code(val: str) -> bool:
+    s = str(val or "").strip()
+    if not s or not re.match(r"^[A-Za-z0-9_-]{6,}$", s):
+        return False
+    if s.isdigit():
+        return False
+    return True
+
+
+def _merge_metrics_row(
+    store: dict[str, dict],
+    code: str,
+    *,
+    views: int = 0,
+    likes: int = 0,
+    comments: int = 0,
+    text: str = "",
+    ts: str = "",
+    thumb: str = "",
+    url: str = "",
+) -> None:
+    if not _is_post_code(code):
+        return
+    row = store.setdefault(code, _empty_metrics_row())
+    if views > int(row.get("views") or 0):
+        row["views"] = views
+    if likes > int(row.get("likes") or 0):
+        row["likes"] = likes
+    if comments > int(row.get("comments") or 0):
+        row["comments"] = comments
+    if text and len(str(text)) > len(str(row.get("text") or "")):
+        row["text"] = str(text)[:500]
+    if ts and not row.get("ts"):
+        row["ts"] = ts
+    if thumb and not row.get("thumb"):
+        row["thumb"] = thumb
+    if url and not row.get("url"):
+        row["url"] = url
 
 def _parse_count(text: str) -> int:
     if not text:
@@ -75,8 +121,79 @@ def _extract_post_code_from_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
-def _collect_post_views_from_json(payload, out: dict[str, int]) -> None:
-    """Рекурсивно собирает post_code -> view_count из JSON-ответов Threads."""
+def _metrics_from_post_dict(cur: dict) -> tuple[int, int, int, str, str, str, str]:
+    view_val = 0
+    for key in (
+        "view_count",
+        "video_view_count",
+        "video_play_count",
+        "play_count",
+        "views",
+        "total_view_count",
+        "impression_count",
+        "play_count_num",
+        "video_view_count_string",
+    ):
+        if key in cur:
+            view_val = max(view_val, _parse_count(cur.get(key)))
+
+    like_val = 0
+    for key in ("like_count", "likes", "likesCount", "like_count_display"):
+        if key in cur:
+            like_val = max(like_val, _parse_count(cur.get(key)))
+
+    comment_val = 0
+    tpi = cur.get("text_post_app_info")
+    if isinstance(tpi, dict):
+        for key in ("direct_reply_count", "reply_count", "comment_count"):
+            if key in tpi:
+                comment_val = max(comment_val, _parse_count(tpi.get(key)))
+    for key in ("direct_reply_count", "reply_count", "comment_count", "replyCount"):
+        if key in cur:
+            comment_val = max(comment_val, _parse_count(cur.get(key)))
+
+    text = ""
+    cap = cur.get("caption")
+    if isinstance(cap, dict):
+        text = str(cap.get("text") or "").strip()
+    elif isinstance(cap, str):
+        text = cap.strip()
+    if not text:
+        text = str(cur.get("text") or "").strip()
+
+    ts = ""
+    for key in ("taken_at", "timestamp", "created_at"):
+        if cur.get(key):
+            ts = str(cur.get(key))
+            break
+
+    thumb = ""
+    iv2 = cur.get("image_versions2")
+    if isinstance(iv2, dict):
+        for cand in iv2.get("candidates") or []:
+            if isinstance(cand, dict) and cand.get("url"):
+                thumb = str(cand["url"])
+                break
+
+    url = ""
+    code = str(cur.get("code") or "").strip()
+    if _is_post_code(code):
+        url = f"https://www.threads.com/post/{code}"
+    for key in ("permalink", "url", "post_url", "thread_url"):
+        u = str(cur.get(key) or "").strip()
+        if u.startswith("http"):
+            url = u
+            break
+
+    return view_val, like_val, comment_val, text, ts, thumb, url
+
+
+def _collect_post_metrics_from_json(
+    payload,
+    store: dict[str, dict],
+    profile_hints: dict[str, int] | None = None,
+) -> None:
+    """Рекурсивно собирает метрики постов и follower_count из JSON Threads."""
     stack = [payload]
     while stack:
         cur = stack.pop()
@@ -86,43 +203,53 @@ def _collect_post_views_from_json(payload, out: dict[str, int]) -> None:
         if not isinstance(cur, dict):
             continue
 
-        view_val = 0
-        for key in (
-            "view_count",
-            "video_view_count",
-            "video_play_count",
-            "play_count",
-            "views",
-            "total_view_count",
-            "impression_count",
-            "play_count_num",
-            "video_view_count_string",
-        ):
-            if key in cur:
-                view_val = max(view_val, _parse_count(cur.get(key)))
+        if profile_hints is not None:
+            for key in ("follower_count", "followers", "followersCount"):
+                if key in cur:
+                    fc = _parse_count(cur.get(key))
+                    if fc > 0:
+                        profile_hints["follower_count"] = max(
+                            int(profile_hints.get("follower_count") or 0),
+                            fc,
+                        )
 
-        if view_val > 0:
-            candidates: set[str] = set()
-            for key in ("code", "shortcode", "post_code", "thread_code"):
-                val = str(cur.get(key) or "").strip()
-                if re.match(r"^[A-Za-z0-9_-]{6,}$", val):
-                    candidates.add(val)
-            for key in ("permalink", "url", "post_url", "thread_url"):
-                code = _extract_post_code_from_url(str(cur.get(key) or ""))
-                if code:
-                    candidates.add(code)
-            for code in candidates:
-                prev = int(out.get(code) or 0)
-                if view_val > prev:
-                    out[code] = view_val
+        codes: set[str] = set()
+        for key in ("code", "shortcode", "post_code", "thread_code"):
+            val = str(cur.get(key) or "").strip()
+            if _is_post_code(val):
+                codes.add(val)
+        for key in ("permalink", "url", "post_url", "thread_url"):
+            code = _extract_post_code_from_url(str(cur.get(key) or ""))
+            if _is_post_code(code):
+                codes.add(code)
+
+        if codes:
+            v, lk, cm, text, ts, thumb, url = _metrics_from_post_dict(cur)
+            if v > 0 or lk > 0 or cm > 0 or text or ts:
+                for code in codes:
+                    _merge_metrics_row(
+                        store,
+                        code,
+                        views=v,
+                        likes=lk,
+                        comments=cm,
+                        text=text,
+                        ts=ts,
+                        thumb=thumb,
+                        url=url,
+                    )
 
         for v in cur.values():
             if isinstance(v, (dict, list)):
                 stack.append(v)
 
 
-async def _capture_response_post_views(response, out: dict[str, int]) -> None:
-    """Пытается вытащить views из network JSON, не открывая посты отдельно."""
+async def _capture_response_post_metrics(
+    response,
+    store: dict[str, dict],
+    profile_hints: dict[str, int],
+) -> None:
+    """Метрики постов и профиля из network JSON."""
     try:
         url = (response.url or "").lower()
     except Exception:
@@ -149,14 +276,191 @@ async def _capture_response_post_views(response, out: dict[str, int]) -> None:
     except Exception:
         return
 
-    before = len(out)
-    _collect_post_views_from_json(payload, out)
-    after = len(out)
+    if THREADS_DEBUG_NETWORK:
+        print(f"[threads_worker] net {url[:120]}", file=sys.stderr)
+
+    before = len(store)
+    _collect_post_metrics_from_json(payload, store, profile_hints)
+    after = len(store)
     if after > before:
         print(
-            f"[threads_worker] network views map +{after - before} (total={after})",
+            f"[threads_worker] network posts map +{after - before} (total={after})",
             file=sys.stderr,
         )
+
+
+_EXTRACT_EMBEDDED_JSON_JS = r"""
+(() => {
+    const results = {};
+    const merge = (code, row) => {
+        if (!code || !/^[A-Za-z0-9_-]{6,}$/.test(code) || /^\\d+$/.test(code)) return;
+        const prev = results[code] || { views: 0, likes: 0, comments: 0, text: '', ts: '', thumb: '', url: '' };
+        const n = (v, p) => Math.max(Number(v) || 0, Number(p) || 0);
+        results[code] = {
+            views: n(row.views, prev.views),
+            likes: n(row.likes, prev.likes),
+            comments: n(row.comments, prev.comments),
+            text: (row.text && row.text.length > (prev.text || '').length) ? row.text : prev.text,
+            ts: row.ts || prev.ts,
+            thumb: row.thumb || prev.thumb,
+            url: row.url || prev.url,
+        };
+    };
+    const parseCount = (raw) => {
+        if (raw == null) return 0;
+        const t = String(raw).replace(/\\u00a0/g,'').replace(/\\s+/g,'').replace(',', '.').trim();
+        const m = t.match(/^([\\d]+(?:\\.[\\d]+)?)([KMB])?$/i);
+        if (!m) {
+            const d = t.replace(/[^\\d]/g, '');
+            return d ? parseInt(d, 10) : 0;
+        }
+        const num = parseFloat(m[1]);
+        const mult = {K:1e3,M:1e6,B:1e9}[ (m[2]||'').toUpperCase() ] || 1;
+        return Number.isFinite(num) ? Math.round(num * mult) : 0;
+    };
+    const fromPost = (obj) => {
+        if (!obj || typeof obj !== 'object') return null;
+        const code = String(obj.code || '').trim();
+        if (!/^[A-Za-z0-9_-]{6,}$/.test(code) || /^\\d+$/.test(code)) return null;
+        const tpi = obj.text_post_app_info || {};
+        let views = 0, likes = 0, comments = 0;
+        for (const k of ['view_count','video_view_count','play_count','views']) {
+            if (obj[k] != null) views = Math.max(views, parseCount(obj[k]));
+        }
+        for (const k of ['like_count','likes']) {
+            if (obj[k] != null) likes = Math.max(likes, parseCount(obj[k]));
+        }
+        for (const k of ['direct_reply_count','reply_count','comment_count']) {
+            if (obj[k] != null) comments = Math.max(comments, parseCount(obj[k]));
+            if (tpi[k] != null) comments = Math.max(comments, parseCount(tpi[k]));
+        }
+        let text = '';
+        const cap = obj.caption;
+        if (cap && typeof cap === 'object') text = String(cap.text || '').trim();
+        else if (typeof cap === 'string') text = cap.trim();
+        if (!text) text = String(obj.text || '').trim();
+        let ts = obj.taken_at || obj.timestamp || '';
+        let thumb = '';
+        const iv = obj.image_versions2;
+        if (iv && iv.candidates && iv.candidates[0]) thumb = iv.candidates[0].url || '';
+        const url = obj.url || ('https://www.threads.com/post/' + code);
+        return { code, views, likes, comments, text: text.slice(0, 500), ts: String(ts||''), thumb, url };
+    };
+    const walk = (obj, depth) => {
+        if (!obj || depth > 14) return;
+        if (Array.isArray(obj)) {
+            for (const x of obj) walk(x, depth + 1);
+            return;
+        }
+        if (typeof obj !== 'object') return;
+        const row = fromPost(obj);
+        if (row) merge(row.code, row);
+        for (const v of Object.values(obj)) walk(v, depth + 1);
+    };
+    try {
+        for (const s of document.querySelectorAll('script[type="application/json"]')) {
+            try { walk(JSON.parse(s.textContent), 0); } catch (_) {}
+        }
+    } catch (_) {}
+    return results;
+})()
+"""
+
+
+async def _extract_posts_from_embedded_json(page) -> dict[str, dict]:
+    try:
+        raw = await page.evaluate(_EXTRACT_EMBEDDED_JSON_JS)
+    except Exception as exc:
+        print(f"[threads_worker] embedded JSON failed: {exc}", file=sys.stderr)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for code, row in raw.items():
+        if not isinstance(row, dict):
+            continue
+        _merge_metrics_row(
+            out,
+            str(code),
+            views=int(row.get("views") or 0),
+            likes=int(row.get("likes") or 0),
+            comments=int(row.get("comments") or 0),
+            text=str(row.get("text") or ""),
+            ts=str(row.get("ts") or ""),
+            thumb=str(row.get("thumb") or ""),
+            url=str(row.get("url") or ""),
+        )
+    if out:
+        print(f"[threads_worker] embedded JSON posts: {len(out)}", file=sys.stderr)
+    return out
+
+
+async def _maybe_open_threads_tab(page, username: str) -> None:
+    try:
+        opened = await page.evaluate(
+            r"""(u) => {
+                const un = String(u || '').replace(/^@/, '');
+                const a = document.querySelector('a[href="/@' + un + '/threads"]') ||
+                    document.querySelector('a[href*="/' + un + '/threads"]');
+                if (a) { a.click(); return true; }
+                return false;
+            }""",
+            username,
+        )
+        if opened:
+            print("[threads_worker] opened /@user/threads tab", file=sys.stderr)
+            await page.wait_for_timeout(2200)
+    except Exception as exc:
+        print(f"[threads_worker] threads tab click: {exc}", file=sys.stderr)
+
+
+async def _scroll_profile_feed(page, *, logged_in: bool) -> set[str]:
+    max_passes = min(SCROLL_MAX_PASSES, 30 if logged_in else 22)
+    stale_rounds = 0
+    seen_ids: set[str] = set()
+    for pass_i in range(max_passes):
+        try:
+            ids = await page.evaluate(
+                r"""() => {
+                    const s = new Set();
+                    for (const a of document.querySelectorAll('a[href*="/post/"], a[href*="/t/"]')) {
+                        const h = a.getAttribute('href') || '';
+                        const m = h.match(/\\/post\\/([^/?#]+)/) || h.match(/\\/t\\/([^/?#]+)/);
+                        if (m) s.add(m[1]);
+                    }
+                    return Array.from(s);
+                }"""
+            )
+        except Exception:
+            ids = []
+        new_n = sum(1 for x in (ids or []) if x not in seen_ids)
+        seen_ids.update(ids or [])
+        if new_n == 0:
+            stale_rounds += 1
+            if stale_rounds >= SCROLL_STALE_STOP:
+                print(
+                    f"[threads_worker] scroll stop pass={pass_i + 1} ids={len(seen_ids)}",
+                    file=sys.stderr,
+                )
+                break
+        else:
+            stale_rounds = 0
+        try:
+            await page.evaluate(
+                r"""() => {
+                    const main = document.querySelector('#barcelona-page-layout [role="main"]') ||
+                        document.querySelector('[role="main"]');
+                    const step = Math.min(1400, Math.floor((window.innerHeight || 800) * 1.1));
+                    if (main && main.scrollBy) main.scrollBy(0, step);
+                    window.scrollBy(0, step);
+                }"""
+            )
+        except Exception:
+            pass
+        await page.keyboard.press("End")
+        await page.wait_for_timeout(1580)
+    await page.wait_for_timeout(2600)
+    return seen_ids
 
 
 def _extract_views_from_text_blob(text: str) -> int:
@@ -194,72 +498,86 @@ async def _click_retry_on_error_page(page) -> bool:
         return False
 
 
-async def _extract_views_on_open_post(page) -> int:
-    """Читает просмотры на уже открытой странице поста (несколько попыток — DOM подгружается)."""
-    best = 0
+_EXTRACT_OPEN_POST_ENGAGEMENT_JS = r"""
+() => {
+    const parseCount = (txt) => {
+        const t = String(txt || '').replace(/\u00a0/g,'').replace(/\u202f/g,'').replace(/\s+/g,'').trim();
+        const m = t.match(/^([\d]+(?:[.,][\d]+)?)\s*([KMBkmb]?)$/);
+        if (m) {
+            const n = parseFloat(m[1].replace(',', '.'));
+            const u = (m[2] || '').toUpperCase();
+            const mult = u === 'K' ? 1e3 : u === 'M' ? 1e6 : u === 'B' ? 1e9 : 1;
+            return Number.isFinite(n) ? Math.round(n * mult) : 0;
+        }
+        const d = t.replace(/[^\d]/g, '');
+        return d ? parseInt(d, 10) : 0;
+    };
+    const parseLeading = (fragment) => {
+        const m = String(fragment || '').match(/([\d][\d\s,.]*[KkMmBb]?)/);
+        return m ? parseCount(m[1].replace(/[\s,]/g, '')) : 0;
+    };
+    let views = 0, likes = 0, comments = 0;
+    for (const n of document.querySelectorAll('[aria-label]')) {
+        const lbl = (n.getAttribute('aria-label') || '').trim();
+        const low = lbl.toLowerCase();
+        if (/views?|просмотр/i.test(lbl)) {
+            const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?)/i);
+            if (m) views = Math.max(views, parseLeading(m[1]));
+        }
+        if ((low.includes('like') || low.includes('нрав')) && !/view|просмотр/i.test(lbl)) {
+            const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)/);
+            if (m) likes = Math.max(likes, parseLeading(m[1]));
+        }
+        if (/repl|comment|ответ|коммент/i.test(lbl) && !/view|просмотр/i.test(lbl)) {
+            const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)/);
+            if (m) comments = Math.max(comments, parseLeading(m[1]));
+        }
+    }
+    const txt = document.body.innerText || '';
+    const vm = txt.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
+    if (vm) views = Math.max(views, parseLeading(vm[1]));
+    return { views, likes, comments };
+}
+"""
+
+
+async def _extract_engagement_on_open_post(page) -> dict[str, int]:
+    """Просмотры, лайки и комментарии на открытой странице поста."""
+    best = {"views": 0, "likes": 0, "comments": 0}
     for attempt in range(5):
         try:
-            v = await page.evaluate(
-            r"""() => {
-                const parseCount = (txt) => {
-                    const t = String(txt || '').replace(/\u00a0/g,'').replace(/\u202f/g,'').replace(/\s+/g,'').trim();
-                    const m = t.match(/^([\d]+(?:[.,][\d]+)?)\s*([KMBkmb]?)$/);
-                    if (m) {
-                        const n = parseFloat(m[1].replace(',', '.'));
-                        const u = (m[2] || '').toUpperCase();
-                        const mult = u === 'K' ? 1e3 : u === 'M' ? 1e6 : u === 'B' ? 1e9 : 1;
-                        return Number.isFinite(n) ? Math.round(n * mult) : 0;
-                    }
-                    const d = t.replace(/[^\d]/g, '');
-                    return d ? parseInt(d, 10) : 0;
-                };
-                const scan = (root) => {
-                    if (!root) return 0;
-                    // 1) aria-label c "N views/просмотров"
-                    for (const n of root.querySelectorAll('[aria-label]')) {
-                        const lbl = n.getAttribute('aria-label') || '';
-                        const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
-                        if (m) {
-                            const v = parseCount(m[1]);
-                            if (v > 0) return v;
-                        }
-                    }
-                    // 2) видимый текст
-                    const txt = root.innerText || '';
-                    const m = txt.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
-                    if (m) return parseCount(m[1]);
-                    return 0;
-                };
-                return scan(document.body);
-            }"""
-            )
+            row = await page.evaluate(_EXTRACT_OPEN_POST_ENGAGEMENT_JS)
         except Exception:
-            v = 0
-        try:
-            best = max(best, int(v or 0))
-        except Exception:
-            pass
-        if best > 0 and attempt >= 1:
+            row = {}
+        if isinstance(row, dict):
+            for k in ("views", "likes", "comments"):
+                try:
+                    best[k] = max(int(best.get(k) or 0), int(row.get(k) or 0))
+                except (TypeError, ValueError):
+                    pass
+        if (
+            (best["views"] > 0 or best["likes"] > 0)
+            and attempt >= 1
+        ):
             break
         await asyncio.sleep(0.42 if attempt < 4 else 0.0)
-    return int(best or 0)
+    return best
 
 
-async def _collect_post_views_by_opening_posts(
+async def _collect_post_engagement_by_opening_posts(
     page,
     *,
     username: str,
     posts_raw: list[dict],
-    network_hints: dict[str, int] | None = None,
-) -> dict[str, int]:
+    network_posts: dict[str, dict] | None = None,
+) -> dict[str, dict]:
     """
-    fallback: открываем страницы постов с паузой и ретраем «Повторить попытку».
-    Нужно, когда в ленте нет просмотров, либо JSON из сети даёт больше, чем DOM ленты.
+    fallback: открываем посты, где не хватает views/likes относительно network+DOM.
     """
-    out: dict[str, int] = {}
+    out: dict[str, dict] = {}
     if not posts_raw:
         return out
-    hints = network_hints or {}
+    hints = network_posts or {}
 
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -269,8 +587,13 @@ async def _collect_post_views_by_opening_posts(
             continue
         seen.add(pid)
         dom_views = _parse_count(p.get("views", "0"))
-        network_v = int(hints.get(pid, 0) or 0)
-        if dom_views > 0 and network_v <= dom_views:
+        dom_likes = _parse_count(p.get("likes", "0"))
+        net = hints.get(pid) or {}
+        network_v = int(net.get("views") or 0)
+        network_l = int(net.get("likes") or 0)
+        need_views = dom_views == 0 or network_v > dom_views
+        need_likes = dom_likes == 0 or network_l > dom_likes
+        if not need_views and not need_likes:
             continue
         purl = str(p.get("url") or "").strip()
         if not purl:
@@ -283,7 +606,7 @@ async def _collect_post_views_by_opening_posts(
         return out
 
     print(
-        f"[threads_worker] fallback open-post views: {len(candidates)} candidates",
+        f"[threads_worker] fallback open-post enrich: {len(candidates)} candidates",
         file=sys.stderr,
     )
     for idx, (pid, purl) in enumerate(candidates, start=1):
@@ -295,25 +618,33 @@ async def _collect_post_views_by_opening_posts(
             except Exception:
                 pass
             await asyncio.sleep(0.35)
-            v = await _extract_views_on_open_post(page)
-            if v <= 0:
-                # Иногда страница роняется на "Произошла ошибка. Повторить попытку позже."
-                # Пробуем нажать Retry пару раз.
+            row = await _extract_engagement_on_open_post(page)
+            if int(row.get("views") or 0) <= 0:
                 for _ in range(POST_RETRY_CLICKS):
                     clicked = await _click_retry_on_error_page(page)
                     if not clicked:
                         break
                     await asyncio.sleep(1.2)
-                    v = await _extract_views_on_open_post(page)
-                    if v > 0:
+                    row = await _extract_engagement_on_open_post(page)
+                    if int(row.get("views") or 0) > 0:
                         break
-            if v > 0:
-                out[pid] = v
-                print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: views={v}", file=sys.stderr)
+            if any(int(row.get(k) or 0) > 0 for k in ("views", "likes", "comments")):
+                out[pid] = row
+                print(
+                    f"[threads_worker] post {idx}/{len(candidates)} {pid}: "
+                    f"v={row.get('views')} l={row.get('likes')} c={row.get('comments')}",
+                    file=sys.stderr,
+                )
             else:
-                print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: views not found", file=sys.stderr)
+                print(
+                    f"[threads_worker] post {idx}/{len(candidates)} {pid}: metrics not found",
+                    file=sys.stderr,
+                )
         except Exception as exc:
-            print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: open failed: {exc}", file=sys.stderr)
+            print(
+                f"[threads_worker] post {idx}/{len(candidates)} {pid}: open failed: {exc}",
+                file=sys.stderr,
+            )
         await asyncio.sleep(max(0.2, POST_DELAY_MS / 1000.0))
     return out
 
@@ -451,10 +782,11 @@ async def _run_with_page(username: str, page, _wu):
     bio            = ""
     posts_raw      = []
     settle_relaxed = False  # таймаут «ожидания DOM» — не считаем пустой список постов авторитетным
-    network_post_views: dict[str, int] = {}
+    network_posts: dict[str, dict] = {}
+    profile_hints: dict[str, int] = {"follower_count": 0}
 
     async def _on_response(resp):
-        await _capture_response_post_views(resp, network_post_views)
+        await _capture_response_post_metrics(resp, network_posts, profile_hints)
 
     page.on("response", lambda resp: asyncio.create_task(_on_response(resp)))
 
@@ -702,6 +1034,9 @@ async def _run_with_page(username: str, page, _wu):
 
     display_name   = info.get("displayName", "").strip() or username
     follower_count = _parse_count(info.get("followers", ""))
+    net_fc = int(profile_hints.get("follower_count") or 0)
+    if net_fc > follower_count:
+        follower_count = net_fc
     post_count_val = _parse_count(info.get("postCount", "")) or None
     avatar_url     = info.get("avatar", "")
     bio            = info.get("bio", "")
@@ -711,76 +1046,95 @@ async def _run_with_page(username: str, page, _wu):
         file=sys.stderr,
     )
 
-    # ── 5–6. Посты: скролл + DOM (Threads подгружает ленту лениво; End + wheel)
-    scroll_passes = 20 if logged_in else 15
-    for _ in range(scroll_passes):
-        await page.keyboard.press("End")
-        try:
-            await page.evaluate(
-                "() => { window.scrollBy(0, Math.min(1400, Math.floor(innerHeight * 1.1))); }",
-            )
-        except Exception:
-            pass
-        await page.wait_for_timeout(1580)
-    # Дать ответам догрузиться перед финальным merge метрик.
-    await page.wait_for_timeout(2600)
+    await _maybe_open_threads_tab(page, username)
+
+    embedded_posts = await _extract_posts_from_embedded_json(page)
+    for code, row in embedded_posts.items():
+        _merge_metrics_row(network_posts, code, **row)
+
+    # ── 5–6. Посты: скролл до плато + DOM
+    scroll_seen = await _scroll_profile_feed(page, logged_in=logged_in)
 
     _dom_posts_js = """(username) => {
+                            function parseLeading(fragment) {
+                                const m = String(fragment || '').match(/([\\d][\\d\\s,.]*[KkMmBb]?)/);
+                                if (!m) return '0';
+                                return m[1].replace(/[\\s,]/g, '');
+                            }
                             function getCount(el) {
                                 if (!el) return '0';
                                 const label = el.getAttribute('aria-label') || '';
-                                const mL = label.match(/^([\\d][\\d\\s,.]*)/);
-                                if (mL) return mL[1].replace(/\\s/g, '');
+                                const mL = label.match(/([\\d][\\d\\s,.]*[KkMmBb]?)/);
+                                if (mL) return parseLeading(mL[1]);
                                 for (const s of [...el.querySelectorAll('span')].reverse()) {
                                     const t = (s.textContent || '').trim();
-                                    if (t && /^[\\d,.]+[KkMmBb]?$/.test(t)) return t;
+                                    if (t && /^[\\d,.]+[KkMmBb]?$/i.test(t)) return t.replace(/[\\s,]/g, '');
                                 }
                                 return '0';
                             }
-
-                            // Extract view count for a post container.
-                            // Threads shows "16.4M views" / "16,464,791 views" / "16 464 791 views"
-                            // (space = thousands separator in Russian locale).
+                            function getLikes(el) {
+                                let best = '0';
+                                for (const node of el.querySelectorAll('[aria-label]')) {
+                                    const lbl = (node.getAttribute('aria-label') || '').trim();
+                                    const low = lbl.toLowerCase();
+                                    if (!(low.includes('like') || low.includes('нрав'))) continue;
+                                    if (low.includes('view') || low.includes('просмотр')) continue;
+                                    const m = lbl.match(/([\\d][\\d\\s,.]*[KkMmBb]?)/);
+                                    if (m) return parseLeading(m[1]);
+                                }
+                                for (const btn of el.querySelectorAll('button, [role="button"]')) {
+                                    const lbl = (btn.getAttribute('aria-label') || '').toLowerCase();
+                                    if (lbl.includes('like') || lbl.includes('нрав')) {
+                                        const c = getCount(btn);
+                                        if (c !== '0') return c;
+                                    }
+                                    const svgPath = btn.innerHTML || '';
+                                    if (/M12.*heart|M8.*24|M12.*L8/i.test(svgPath)) {
+                                        const c = getCount(btn);
+                                        if (c !== '0') best = c;
+                                    }
+                                }
+                                return best;
+                            }
                             function getViews(el) {
-                                // 1. aria-label "N views" / "N просмотров" on any child
                                 for (const node of el.querySelectorAll('[aria-label]')) {
                                     const lbl = node.getAttribute('aria-label') || '';
                                     const m = lbl.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
-                                    if (m) return m[1].replace(/[\\s,]/g, '');
+                                    if (m) return parseLeading(m[1]);
                                 }
-                                // 2. Visible text in the post: "16.4M views" / "16 464 791 views"
                                 const text = el.innerText || '';
                                 const m = text.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
-                                if (m) return m[1].replace(/[\\s,]/g, '');
+                                if (m) return parseLeading(m[1]);
                                 return '0';
                             }
-
+                            function postRoot(el) {
+                                if (el.matches && el.matches('a[href*="/post/"], a[href*="/t/"]')) {
+                                    return el.closest('article, div[role="article"], [data-pressable-container="true"]') || el;
+                                }
+                                return el;
+                            }
                             const results = [];
-                            const seen    = new Set();
-
-                            // Each post/thread is inside an article or a pressable container
-                            const containers = document.querySelectorAll(
-                                'article, div[role="article"], [data-pressable-container="true"], main a[href*="/post/"]'
-                            );
-
+                            const seen = new Set();
+                            const linkNodes = document.querySelectorAll('a[href*="/post/"], a[href*="/t/"]');
+                            const containers = linkNodes.length
+                                ? Array.from(linkNodes).map(postRoot)
+                                : Array.from(document.querySelectorAll(
+                                    'article, div[role="article"], [data-pressable-container="true"]'));
                             for (const el of containers) {
                                 try {
-                                    // Post ID from permalink (относительные и полные URL)
                                     let postId = '', postUrl = '';
                                     for (const a of el.querySelectorAll('a[href*="/post/"], a[href*="/t/"]')) {
                                         const href = a.getAttribute('href') || '';
-                                        const m    = href.match(/\\/post\\/([^/?#]+)/) ||
-                                                     href.match(/\\/t\\/([^/?#]+)/);
+                                        const m = href.match(/\\/post\\/([^/?#]+)/) ||
+                                                  href.match(/\\/t\\/([^/?#]+)/);
                                         if (m) {
-                                            postId  = m[1];
+                                            postId = m[1];
                                             postUrl = a.href || `https://www.threads.com${href}`;
                                             break;
                                         }
                                     }
                                     if (!postId || seen.has(postId)) continue;
                                     seen.add(postId);
-
-                                    // Text — Threads uses dir="auto" spans for text
                                     const textSpans = el.querySelectorAll('span[dir="auto"]');
                                     let text = '';
                                     for (const s of textSpans) {
@@ -788,34 +1142,17 @@ async def _run_with_page(username: str, page, _wu):
                                         if (t.length > text.length) text = t;
                                     }
                                     text = text.slice(0, 500);
-
-                                    // Timestamp
                                     let ts = '';
                                     const timeEl = el.querySelector('time');
                                     if (timeEl) ts = timeEl.getAttribute('datetime') || '';
-
-                                    // Thumbnail
                                     let thumb = '';
                                     for (const img of el.querySelectorAll('img')) {
                                         const src = img.src || '';
-                                        if (src.includes('/t51.') || src.includes('pbs.twimg')) {
+                                        if (src.includes('/t51.') || src.includes('pbs.twimg') ||
+                                            src.includes('cdninstagram') || src.includes('fbcdn')) {
                                             thumb = src; break;
                                         }
                                     }
-
-                                    // Like count — button near a heart SVG
-                                    let likes = '0';
-                                    for (const btn of el.querySelectorAll('button, [role="button"]')) {
-                                        const svgPath = (btn.innerHTML || '');
-                                        // Threads heart SVG paths contain characteristic d values
-                                        if (/M12.*heart|M8.*24|M12.*L8/i.test(svgPath) ||
-                                            (btn.getAttribute('aria-label') || '').toLowerCase().includes('like')) {
-                                            likes = getCount(btn);
-                                            break;
-                                        }
-                                    }
-
-                                    // Reply count
                                     let replies = '0';
                                     for (const btn of el.querySelectorAll('button, [role="button"]')) {
                                         const label = (btn.getAttribute('aria-label') || '').toLowerCase();
@@ -824,9 +1161,10 @@ async def _run_with_page(username: str, page, _wu):
                                             replies = getCount(btn); break;
                                         }
                                     }
-
-                                    results.push({ id: postId, url: postUrl, text, ts, thumb,
-                                                   likes, replies, views: getViews(el) });
+                                    results.push({
+                                        id: postId, url: postUrl, text, ts, thumb,
+                                        likes: getLikes(el), replies, views: getViews(el),
+                                    });
                                 } catch (_) {}
                             }
                             return results;
@@ -851,10 +1189,12 @@ async def _run_with_page(username: str, page, _wu):
             pid = str(p2.get("id", "") or "").strip()
             if not pid or pid not in by_id:
                 continue
-            v1 = _parse_count(by_id[pid].get("views", "0"))
-            v2 = _parse_count(p2.get("views", "0"))
-            if v2 > v1:
-                by_id[pid]["views"] = str(p2.get("views", "0"))
+            for field, parser in (("views", _parse_count), ("likes", _parse_count), ("replies", _parse_count)):
+                v1 = parser(by_id[pid].get(field, "0"))
+                v2 = parser(p2.get(field, "0"))
+                if v2 > v1:
+                    by_id[pid][field] = str(p2.get(field, "0"))
+        posts_raw = list(by_id.values())
 
     if len(posts_raw) < 2:
         extra = await _fallback_posts_from_page_html(page, username)
@@ -865,11 +1205,11 @@ async def _run_with_page(username: str, page, _wu):
                 seen_ids.add(rid)
                 posts_raw.append(row)
 
-    opened_post_views = await _collect_post_views_by_opening_posts(
+    opened_posts = await _collect_post_engagement_by_opening_posts(
         page,
         username=username,
         posts_raw=posts_raw,
-        network_hints=network_post_views,
+        network_posts=network_posts,
     )
 
     # ── 7. Post-process ───────────────────────────────────────────────────────
@@ -880,30 +1220,57 @@ async def _run_with_page(username: str, page, _wu):
         if not post_id or post_id in seen_post_ids:
             continue
         seen_post_ids.add(post_id)
-        ts = p.get("ts", "")
+        net = network_posts.get(post_id) or {}
+        opened = opened_posts.get(post_id) or {}
+        ts = p.get("ts", "") or net.get("ts", "")
         posted_at = None
         if ts:
             try:
-                posted_at = datetime.fromisoformat(ts.replace("Z", "+00:00")).isoformat()
+                if str(ts).isdigit():
+                    posted_at = datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
+                else:
+                    posted_at = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).isoformat()
             except Exception:
                 pass
         posts.append({
             "external_id":   post_id,
-            "description":   p.get("text", ""),
-            "thumbnail_url": p.get("thumb", ""),
-            "post_url":      p.get("url", f"https://www.threads.com/t/{post_id}"),
+            "description":   p.get("text", "") or net.get("text", ""),
+            "thumbnail_url": p.get("thumb", "") or net.get("thumb", ""),
+            "post_url":      p.get("url", "") or net.get("url", "") or f"https://www.threads.com/post/{post_id}",
             "view_count":    max(
                 _parse_count(p.get("views", "0")),
-                int(network_post_views.get(post_id, 0) or 0),
-                int(opened_post_views.get(post_id, 0) or 0),
+                int(net.get("views") or 0),
+                int(opened.get("views") or 0),
             ),
-            "like_count":    _parse_count(p.get("likes", "0")),
-            "comment_count": _parse_count(p.get("replies", "0")),
+            "like_count":    max(
+                _parse_count(p.get("likes", "0")),
+                int(net.get("likes") or 0),
+                int(opened.get("likes") or 0),
+            ),
+            "comment_count": max(
+                _parse_count(p.get("replies", "0")),
+                int(net.get("comments") or 0),
+                int(opened.get("comments") or 0),
+            ),
             "share_count":   0,
             "posted_at":     posted_at,
         })
 
-    print(f"[threads_worker] extracted {len(posts)} posts", file=sys.stderr)
+    unique_n = len(seen_post_ids) or len(scroll_seen)
+    if post_count_val is None or (unique_n and unique_n > int(post_count_val or 0)):
+        post_count_val = unique_n or post_count_val
+
+    print(
+        f"[threads_worker] extracted {len(posts)} posts, network={len(network_posts)}",
+        file=sys.stderr,
+    )
+    if THREADS_DEBUG_NETWORK and posts:
+        for p in posts[:12]:
+            print(
+                f"[threads_worker] dbg {p['external_id']}: v={p['view_count']} "
+                f"l={p['like_count']} c={p['comment_count']}",
+                file=sys.stderr,
+            )
 
     # Если DOM «не дождались», пустой список постов не должен стирать уже сохранённые в БД.
     posts_authoritative = not (settle_relaxed and len(posts) == 0)

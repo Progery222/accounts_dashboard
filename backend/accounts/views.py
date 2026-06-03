@@ -292,9 +292,8 @@ def _sync_posts(
         else:
             post.view_count = parsed_views
         parsed_like_count = _to_int(pd.get("like_count", pd.get("digg_count", 0)))
-        # Instagram: 0 со скрапа = «данных нет», не уменьшаем сохранённые лайки.
-        # Положительное значение считаем валидным и применяем только не ниже уже сохранённого.
-        if is_instagram:
+        # Instagram / Threads: 0 со скрапа = «данных нет», не уменьшаем сохранённые лайки.
+        if is_instagram or is_threads:
             if parsed_like_count > 0:
                 prev_likes = int(post.like_count or 0)
                 post.like_count = max(prev_likes, parsed_like_count)
@@ -307,7 +306,13 @@ def _sync_posts(
                 post.like_count = max(prev_likes, parsed_like_count)
         else:
             post.like_count = parsed_like_count
-        post.comment_count = _to_int(pd.get("comment_count", 0))
+        parsed_comment_count = _to_int(pd.get("comment_count", 0))
+        if is_threads:
+            if parsed_comment_count > 0:
+                prev_c = int(post.comment_count or 0)
+                post.comment_count = max(prev_c, parsed_comment_count)
+        else:
+            post.comment_count = parsed_comment_count
         post.share_count = _to_int(pd.get("share_count", 0))
         # Extract and store hashtags from description
         post.hashtags = _extract_hashtags(post.description)
