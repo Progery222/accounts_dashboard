@@ -600,10 +600,10 @@ def _refresh_platform_limits(accs: list[Account]) -> dict[str, int]:
         Platform.THREADS: 1,
         Platform.FACEBOOK: 1,
         Platform.RUMBLE: 1,
-        Platform.TELEGRAM: 2,
-        Platform.X: 2,
+        Platform.TELEGRAM: 1,
+        Platform.X: 1,
         Platform.REDDIT: 2,
-        Platform.YOUTUBE: 2,
+        Platform.YOUTUBE: 1,
     }
     limits: dict[str, int] = {}
     for p in {a.platform for a in accs}:

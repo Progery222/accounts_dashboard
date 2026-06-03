@@ -663,10 +663,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "threads": 1,
                 "facebook": 1,
                 "rumble": 1,
-                "telegram": 2,
-                "x": 2,
+                "telegram": 1,
+                "x": 1,
                 "reddit": 2,
-                "youtube": 2,
+                "youtube": 1,
             }
             limits: dict[str, int] = {}
             for p in {a.platform for a in accounts}:
