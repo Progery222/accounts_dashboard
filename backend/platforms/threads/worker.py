@@ -16,6 +16,7 @@ in degraded mode if not logged in (no posts). Full post data requires auth.
 import asyncio
 import json
 import os
+import random
 import re
 import sys
 from datetime import datetime, timezone
@@ -44,6 +45,10 @@ POST_VIEWS_MAX_POSTS = int(os.getenv("THREADS_POST_VIEWS_MAX_POSTS", "28") or "2
 POST_DELAY_MS = int(os.getenv("THREADS_POST_DELAY_MS", "1450") or "1450")
 POST_RETRY_CLICKS = int(os.getenv("THREADS_POST_RETRY_CLICKS", "4") or "4")
 POST_VIEWS_DOM_RESCAN_MS = int(os.getenv("THREADS_POST_VIEWS_DOM_RESCAN_MS", "2400") or "2400")
+HUMAN_BATCH_SIZE = int(os.getenv("THREADS_HUMAN_BATCH_SIZE", "4") or "4")
+HUMAN_BATCH_MAX_ROUNDS = int(os.getenv("THREADS_HUMAN_BATCH_MAX_ROUNDS", "18") or "18")
+HUMAN_SCROLL_PAUSE_MS = int(os.getenv("THREADS_HUMAN_SCROLL_PAUSE_MS", "2100") or "2100")
+HUMAN_IDLE_ROUNDS_STOP = int(os.getenv("THREADS_HUMAN_IDLE_ROUNDS_STOP", "3") or "3")
 
 
 # ── Parse helpers ─────────────────────────────────────────────────────────────
@@ -251,6 +256,7 @@ async def _collect_post_views_by_opening_posts(
     username: str,
     posts_raw: list[dict],
     network_hints: dict[str, int] | None = None,
+    skip_post_ids: set[str] | None = None,
 ) -> dict[str, int]:
     """
     fallback: открываем страницы постов с паузой и ретраем «Повторить попытку».
@@ -260,6 +266,7 @@ async def _collect_post_views_by_opening_posts(
     if not posts_raw:
         return out
     hints = network_hints or {}
+    already_opened = {str(x).strip() for x in (skip_post_ids or set()) if str(x).strip()}
 
     candidates: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -268,6 +275,12 @@ async def _collect_post_views_by_opening_posts(
         if not pid or pid in seen:
             continue
         seen.add(pid)
+        if pid in already_opened:
+            print(
+                f"[threads_worker] SKIP already opened {pid} (fallback)",
+                file=sys.stderr,
+            )
+            continue
         dom_views = _parse_count(p.get("views", "0"))
         network_v = int(hints.get(pid, 0) or 0)
         if dom_views > 0 and network_v <= dom_views:
@@ -316,6 +329,490 @@ async def _collect_post_views_by_opening_posts(
             print(f"[threads_worker] post {idx}/{len(candidates)} {pid}: open failed: {exc}", file=sys.stderr)
         await asyncio.sleep(max(0.2, POST_DELAY_MS / 1000.0))
     return out
+
+
+_DOM_POSTS_JS = r"""(username) => {
+                            function getCount(el) {
+                                if (!el) return '0';
+                                const label = el.getAttribute('aria-label') || '';
+                                const mL = label.match(/^([\d][\d\s,.]*)/);
+                                if (mL) return mL[1].replace(/\s/g, '');
+                                for (const s of [...el.querySelectorAll('span')].reverse()) {
+                                    const t = (s.textContent || '').trim();
+                                    if (t && /^[\d,.]+[KkMmBb]?$/.test(t)) return t;
+                                }
+                                return '0';
+                            }
+
+                            function getViews(el) {
+                                for (const node of el.querySelectorAll('[aria-label]')) {
+                                    const lbl = node.getAttribute('aria-label') || '';
+                                    const m = lbl.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
+                                    if (m) return m[1].replace(/[\s,]/g, '');
+                                }
+                                const text = el.innerText || '';
+                                const m = text.match(/([\d][\d\s,.]*[KkMmBb]?)\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
+                                if (m) return m[1].replace(/[\s,]/g, '');
+                                return '0';
+                            }
+
+                            const results = [];
+                            const seen    = new Set();
+                            const containers = document.querySelectorAll(
+                                'article, div[role="article"], [data-pressable-container="true"], main a[href*="/post/"]'
+                            );
+
+                            for (const el of containers) {
+                                try {
+                                    let postId = '', postUrl = '';
+                                    for (const a of el.querySelectorAll('a[href*="/post/"], a[href*="/t/"]')) {
+                                        const href = a.getAttribute('href') || '';
+                                        const m    = href.match(/\/post\/([^/?#]+)/) ||
+                                                     href.match(/\/t\/([^/?#]+)/);
+                                        if (m) {
+                                            postId  = m[1];
+                                            postUrl = a.href || `https://www.threads.com${href}`;
+                                            break;
+                                        }
+                                    }
+                                    if (!postId || seen.has(postId)) continue;
+                                    seen.add(postId);
+
+                                    const textSpans = el.querySelectorAll('span[dir="auto"]');
+                                    let text = '';
+                                    for (const s of textSpans) {
+                                        const t = (s.innerText || '').trim();
+                                        if (t.length > text.length) text = t;
+                                    }
+                                    text = text.slice(0, 500);
+
+                                    let ts = '';
+                                    const timeEl = el.querySelector('time');
+                                    if (timeEl) ts = timeEl.getAttribute('datetime') || '';
+
+                                    let thumb = '';
+                                    for (const img of el.querySelectorAll('img')) {
+                                        const src = img.src || '';
+                                        if (src.includes('/t51.') || src.includes('pbs.twimg')) {
+                                            thumb = src; break;
+                                        }
+                                    }
+
+                                    let likes = '0';
+                                    for (const btn of el.querySelectorAll('button, [role="button"]')) {
+                                        const svgPath = (btn.innerHTML || '');
+                                        if (/M12.*heart|M8.*24|M12.*L8/i.test(svgPath) ||
+                                            (btn.getAttribute('aria-label') || '').toLowerCase().includes('like')) {
+                                            likes = getCount(btn);
+                                            break;
+                                        }
+                                    }
+
+                                    let replies = '0';
+                                    for (const btn of el.querySelectorAll('button, [role="button"]')) {
+                                        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
+                                        if (label.includes('repl') || label.includes('ответ') ||
+                                            label.includes('comment')) {
+                                            replies = getCount(btn); break;
+                                        }
+                                    }
+
+                                    results.push({ id: postId, url: postUrl, text, ts, thumb,
+                                                   likes, replies, views: getViews(el) });
+                                } catch (_) {}
+                            }
+                            return results;
+            }"""
+
+
+def _profile_feed_url(username: str) -> str:
+    u = username.lstrip("@")
+    return f"https://www.threads.com/@{u}"
+
+
+async def _click_profile_threads_tab(page, username: str) -> bool:
+    """Вкладка «Threads» на профиле (лента публикаций)."""
+    u = username.lstrip("@")
+    try:
+        return bool(
+            await page.evaluate(
+                r"""(uname) => {
+                    const u = String(uname || '').replace(/^@/, '');
+                    const links = document.querySelectorAll('a[href*="/threads"]');
+                    for (const a of links) {
+                        const h = (a.getAttribute('href') || '');
+                        if (!h.includes('/' + u + '/threads') && !h.includes('/@' + u + '/threads')) continue;
+                        a.click();
+                        return true;
+                    }
+                    const tabs = document.querySelectorAll('[role="tab"], button, a');
+                    for (const el of tabs) {
+                        const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        if (t === 'threads' || t === 'треды' || t === 'публикации') {
+                            el.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                u,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _merge_posts_into(by_id: dict[str, dict], rows: list[dict]) -> int:
+    added = 0
+    for p in rows or []:
+        pid = str(p.get("id") or "").strip()
+        if not pid:
+            continue
+        if pid not in by_id:
+            by_id[pid] = dict(p)
+            added += 1
+        else:
+            cur = by_id[pid]
+            for key in ("text", "ts", "thumb", "url"):
+                if not cur.get(key) and p.get(key):
+                    cur[key] = p[key]
+            v1 = _parse_count(cur.get("views", "0"))
+            v2 = _parse_count(p.get("views", "0"))
+            if v2 > v1:
+                cur["views"] = str(p.get("views", "0"))
+            for key in ("likes", "replies"):
+                n1 = _parse_count(cur.get(key, "0"))
+                n2 = _parse_count(p.get(key, "0"))
+                if n2 > n1:
+                    cur[key] = str(p.get(key, "0"))
+    return added
+
+
+async def _extract_dom_posts(page, username: str) -> list[dict]:
+    try:
+        return await page.evaluate(_DOM_POSTS_JS, username) or []
+    except Exception as e:
+        print(f"[threads_worker] DOM posts extract failed: {e}", file=sys.stderr)
+        return []
+
+
+def _is_on_profile_feed(url: str, username: str) -> bool:
+    u = username.lstrip("@").lower()
+    low = (url or "").lower().split("?")[0]
+    if "/post/" in low or re.search(r"/t/[a-z0-9_-]{6,}", low):
+        return False
+    return f"/@{u}" in low
+
+
+async def _feed_scroll_y(page) -> int:
+    try:
+        return int(
+            await page.evaluate(
+                "() => Math.round(window.scrollY || document.documentElement.scrollTop || 0)",
+            )
+            or 0
+        )
+    except Exception:
+        return 0
+
+
+async def _restore_feed_scroll(page, y: int) -> None:
+    y = max(0, int(y or 0))
+    if y <= 0:
+        return
+    try:
+        await page.evaluate("(top) => window.scrollTo(0, top)", y)
+    except Exception:
+        return
+    await asyncio.sleep(0.55)
+
+
+async def _human_scroll_feed_step(page) -> int:
+    """Небольшой скролл вниз, как при просмотре ленты. Возвращает новый scrollY."""
+    delta = random.randint(360, 580)
+    try:
+        await page.mouse.wheel(0, delta)
+    except Exception:
+        try:
+            await page.evaluate(
+                "(d) => window.scrollBy({ top: d, behavior: 'smooth' })",
+                delta,
+            )
+        except Exception:
+            pass
+    pause_s = max(1.15, (HUMAN_SCROLL_PAUSE_MS + random.randint(-280, 420)) / 1000.0)
+    await asyncio.sleep(pause_s)
+    return await _feed_scroll_y(page)
+
+
+async def _return_to_profile_feed(
+    page,
+    username: str,
+    *,
+    scroll_y: int | None = None,
+    click_threads_tab: bool = True,
+) -> None:
+    feed_url = _profile_feed_url(username)
+    try:
+        await page.goto(feed_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+    except Exception:
+        try:
+            await page.goto(
+                f"https://www.threads.com/@{username.lstrip('@')}",
+                wait_until="domcontentloaded",
+                timeout=NAV_TIMEOUT,
+            )
+        except Exception:
+            return
+    await page.wait_for_timeout(1200)
+    if click_threads_tab:
+        await _click_profile_threads_tab(page, username)
+        await page.wait_for_timeout(900)
+    if scroll_y is not None and scroll_y > 0:
+        await _restore_feed_scroll(page, scroll_y)
+
+
+async def _back_to_feed_from_post(page, username: str, restore_y: int) -> None:
+    """Вернуться на ленту профиля без полного перезагрузки (сохранить scroll)."""
+    try:
+        cur_url = page.url or ""
+    except Exception:
+        cur_url = ""
+    if _is_on_profile_feed(cur_url, username):
+        await _restore_feed_scroll(page, restore_y)
+        return
+    try:
+        await page.go_back(wait_until="domcontentloaded", timeout=POST_OPEN_TIMEOUT_MS)
+        await asyncio.sleep(0.85)
+        try:
+            cur_url = page.url or ""
+        except Exception:
+            cur_url = ""
+        if _is_on_profile_feed(cur_url, username):
+            await _restore_feed_scroll(page, restore_y)
+            return
+    except Exception:
+        pass
+    print(
+        f"[threads_worker] go_back failed — reload feed at scrollY={restore_y}",
+        file=sys.stderr,
+    )
+    await _return_to_profile_feed(page, username, scroll_y=restore_y)
+
+
+async def _open_single_post_for_views(page, username: str, pid: str, purl: str) -> int:
+    if not purl:
+        purl = f"https://www.threads.com/@{username.lstrip('@')}/post/{pid}"
+    try:
+        await page.goto(purl, wait_until="domcontentloaded", timeout=POST_OPEN_TIMEOUT_MS)
+        await asyncio.sleep(1.1)
+        try:
+            await page.mouse.wheel(0, random.randint(180, 320))
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+        v = await _extract_views_on_open_post(page)
+        if v <= 0:
+            for _ in range(POST_RETRY_CLICKS):
+                clicked = await _click_retry_on_error_page(page)
+                if not clicked:
+                    break
+                await asyncio.sleep(1.0)
+                v = await _extract_views_on_open_post(page)
+                if v > 0:
+                    break
+        return int(v or 0)
+    except Exception as exc:
+        print(f"[threads_worker] open post {pid}: {exc}", file=sys.stderr)
+        return 0
+
+
+async def _collect_posts_human_batches(
+    page,
+    *,
+    username: str,
+    post_count_hint: int | None,
+    network_hints: dict[str, int],
+) -> tuple[list[dict], dict[str, int]]:
+    """
+    Человеческий цикл: видимые посты пачками по N → открыть каждый → мягкий скролл → следующая пачка.
+    """
+    by_id: dict[str, dict] = {}
+    opened_views: dict[str, int] = {}
+    opened_ids: set[str] = set()
+
+    target = POST_VIEWS_MAX_POSTS
+    if post_count_hint and post_count_hint > 0:
+        target = min(target, max(post_count_hint, HUMAN_BATCH_SIZE))
+
+    await _return_to_profile_feed(page, username, click_threads_tab=True)
+    print("[threads_worker] profile feed loaded (initial)", file=sys.stderr)
+    await page.wait_for_timeout(900)
+
+    feed_scroll_anchor = 0
+    no_new_ids_rounds = 0
+
+    for prime_i in range(4):
+        dom_prime = await _extract_dom_posts(page, username)
+        _merge_posts_into(by_id, dom_prime)
+        html_prime = await _fallback_posts_from_page_html(page, username)
+        _merge_posts_into(by_id, html_prime)
+        if by_id:
+            print(
+                f"[threads_worker] feed primed: {len(by_id)} post ids (step {prime_i + 1})",
+                file=sys.stderr,
+            )
+            break
+        feed_scroll_anchor = await _human_scroll_feed_step(page)
+
+    idle_rounds = 0
+    batch_size = max(1, HUMAN_BATCH_SIZE)
+
+    for round_idx in range(1, HUMAN_BATCH_MAX_ROUNDS + 1):
+        try:
+            on_feed = _is_on_profile_feed(page.url or "", username)
+        except Exception:
+            on_feed = False
+        if not on_feed:
+            await _return_to_profile_feed(
+                page, username, scroll_y=feed_scroll_anchor, click_threads_tab=True,
+            )
+
+        dom_rows = await _extract_dom_posts(page, username)
+        added_dom = _merge_posts_into(by_id, dom_rows)
+        if len(by_id) < 3:
+            html_rows = await _fallback_posts_from_page_html(page, username)
+            _merge_posts_into(by_id, html_rows)
+
+        visible_order: list[str] = []
+        for p in dom_rows:
+            pid = str(p.get("id") or "").strip()
+            if pid and pid not in opened_ids and pid not in visible_order:
+                visible_order.append(pid)
+
+        batch: list[tuple[str, str]] = []
+        for pid in visible_order:
+            row = by_id.get(pid) or {}
+            purl = str(row.get("url") or "").strip()
+            batch.append((pid, purl))
+            if len(batch) >= batch_size:
+                break
+
+        if not batch:
+            for pid, row in by_id.items():
+                if pid in opened_ids:
+                    continue
+                batch.append((pid, str(row.get("url") or "").strip()))
+                if len(batch) >= batch_size:
+                    break
+
+        skipped_visible = [
+            str(p.get("id") or "").strip()
+            for p in dom_rows
+            if str(p.get("id") or "").strip() in opened_ids
+        ]
+        if skipped_visible:
+            print(
+                f"[threads_worker] SKIP already opened (visible): "
+                f"{', '.join(skipped_visible[:6])}"
+                f"{', …' if len(skipped_visible) > 6 else ''}",
+                file=sys.stderr,
+            )
+
+        if batch:
+            batch_scroll_y = await _feed_scroll_y(page)
+            print(
+                f"[threads_worker] human batch {round_idx}: "
+                f"open {len(batch)} posts (known={len(by_id)}, opened={len(opened_ids)}, "
+                f"scrollY={batch_scroll_y})",
+                file=sys.stderr,
+            )
+            for b_idx, (pid, purl) in enumerate(batch, start=1):
+                v = await _open_single_post_for_views(page, username, pid, purl)
+                opened_ids.add(pid)
+                if v > 0:
+                    opened_views[pid] = v
+                hint_v = int(network_hints.get(pid, 0) or 0)
+                if hint_v > v:
+                    opened_views[pid] = hint_v
+                print(
+                    f"[threads_worker] human batch {round_idx} "
+                    f"post {b_idx}/{len(batch)} {pid}: views={opened_views.get(pid, 0)}",
+                    file=sys.stderr,
+                )
+                await _back_to_feed_from_post(page, username, batch_scroll_y)
+                batch_scroll_y = max(batch_scroll_y, await _feed_scroll_y(page))
+                await asyncio.sleep(max(0.35, POST_DELAY_MS / 1000.0))
+            feed_scroll_anchor = max(feed_scroll_anchor, batch_scroll_y)
+            idle_rounds = 0
+            no_new_ids_rounds = 0
+        else:
+            if len(by_id) >= target and len(opened_ids) >= len(by_id):
+                idle_rounds += 1
+            elif len(by_id) < target:
+                idle_rounds = 0
+            else:
+                idle_rounds += 1
+            print(
+                f"[threads_worker] human batch {round_idx}: nothing to open "
+                f"(known={len(by_id)}, opened={len(opened_ids)}, idle={idle_rounds})",
+                file=sys.stderr,
+            )
+
+        if len(opened_ids) >= target:
+            print(
+                f"[threads_worker] human batches: reached target {target} opened posts",
+                file=sys.stderr,
+            )
+            break
+
+        count_before_scroll = len(by_id)
+        scroll_steps = 3 if len(by_id) < target else 1
+        for _ in range(scroll_steps):
+            feed_scroll_anchor = max(
+                feed_scroll_anchor,
+                await _human_scroll_feed_step(page),
+            )
+        dom_after = await _extract_dom_posts(page, username)
+        added_after = _merge_posts_into(by_id, dom_after)
+        html_rows = await _fallback_posts_from_page_html(page, username)
+        added_after += _merge_posts_into(by_id, html_rows)
+        if added_after > 0:
+            no_new_ids_rounds = 0
+            print(
+                f"[threads_worker] scroll +{added_after} post ids "
+                f"(total={len(by_id)}, scrollY={feed_scroll_anchor}, target={target})",
+                file=sys.stderr,
+            )
+        elif len(by_id) == count_before_scroll:
+            no_new_ids_rounds += 1
+
+        if (
+            no_new_ids_rounds >= max(HUMAN_IDLE_ROUNDS_STOP, 4)
+            and len(opened_ids) >= len(by_id)
+            and len(by_id) > 0
+        ):
+            print(
+                f"[threads_worker] human batches: no new ids after "
+                f"{no_new_ids_rounds} scroll rounds",
+                file=sys.stderr,
+            )
+            break
+
+        if idle_rounds >= HUMAN_IDLE_ROUNDS_STOP:
+            print(
+                f"[threads_worker] human batches: stop after {idle_rounds} idle rounds",
+                file=sys.stderr,
+            )
+            break
+
+    posts_raw = list(by_id.values())
+    print(
+        f"[threads_worker] human batches done: {len(posts_raw)} post ids, "
+        f"{len(opened_views)} with views",
+        file=sys.stderr,
+    )
+    return posts_raw, opened_views
 
 
 # ── Login check JS ────────────────────────────────────────────────────────────
@@ -711,166 +1208,32 @@ async def _run_with_page(username: str, page, _wu):
         file=sys.stderr,
     )
 
-    # ── 5–6. Посты: скролл + DOM (Threads подгружает ленту лениво; End + wheel)
-    scroll_passes = 20 if logged_in else 15
-    for _ in range(scroll_passes):
-        await page.keyboard.press("End")
-        try:
-            await page.evaluate(
-                "() => { window.scrollBy(0, Math.min(1400, Math.floor(innerHeight * 1.1))); }",
-            )
-        except Exception:
-            pass
-        await page.wait_for_timeout(1580)
-    # Дать ответам догрузиться перед финальным merge метрик.
-    await page.wait_for_timeout(2600)
-
-    _dom_posts_js = """(username) => {
-                            function getCount(el) {
-                                if (!el) return '0';
-                                const label = el.getAttribute('aria-label') || '';
-                                const mL = label.match(/^([\\d][\\d\\s,.]*)/);
-                                if (mL) return mL[1].replace(/\\s/g, '');
-                                for (const s of [...el.querySelectorAll('span')].reverse()) {
-                                    const t = (s.textContent || '').trim();
-                                    if (t && /^[\\d,.]+[KkMmBb]?$/.test(t)) return t;
-                                }
-                                return '0';
-                            }
-
-                            // Extract view count for a post container.
-                            // Threads shows "16.4M views" / "16,464,791 views" / "16 464 791 views"
-                            // (space = thousands separator in Russian locale).
-                            function getViews(el) {
-                                // 1. aria-label "N views" / "N просмотров" on any child
-                                for (const node of el.querySelectorAll('[aria-label]')) {
-                                    const lbl = node.getAttribute('aria-label') || '';
-                                    const m = lbl.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
-                                    if (m) return m[1].replace(/[\\s,]/g, '');
-                                }
-                                // 2. Visible text in the post: "16.4M views" / "16 464 791 views"
-                                const text = el.innerText || '';
-                                const m = text.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s*(?:views?|просмотров?|просмотр(?:ов|а)?)/i);
-                                if (m) return m[1].replace(/[\\s,]/g, '');
-                                return '0';
-                            }
-
-                            const results = [];
-                            const seen    = new Set();
-
-                            // Each post/thread is inside an article or a pressable container
-                            const containers = document.querySelectorAll(
-                                'article, div[role="article"], [data-pressable-container="true"], main a[href*="/post/"]'
-                            );
-
-                            for (const el of containers) {
-                                try {
-                                    // Post ID from permalink (относительные и полные URL)
-                                    let postId = '', postUrl = '';
-                                    for (const a of el.querySelectorAll('a[href*="/post/"], a[href*="/t/"]')) {
-                                        const href = a.getAttribute('href') || '';
-                                        const m    = href.match(/\\/post\\/([^/?#]+)/) ||
-                                                     href.match(/\\/t\\/([^/?#]+)/);
-                                        if (m) {
-                                            postId  = m[1];
-                                            postUrl = a.href || `https://www.threads.com${href}`;
-                                            break;
-                                        }
-                                    }
-                                    if (!postId || seen.has(postId)) continue;
-                                    seen.add(postId);
-
-                                    // Text — Threads uses dir="auto" spans for text
-                                    const textSpans = el.querySelectorAll('span[dir="auto"]');
-                                    let text = '';
-                                    for (const s of textSpans) {
-                                        const t = (s.innerText || '').trim();
-                                        if (t.length > text.length) text = t;
-                                    }
-                                    text = text.slice(0, 500);
-
-                                    // Timestamp
-                                    let ts = '';
-                                    const timeEl = el.querySelector('time');
-                                    if (timeEl) ts = timeEl.getAttribute('datetime') || '';
-
-                                    // Thumbnail
-                                    let thumb = '';
-                                    for (const img of el.querySelectorAll('img')) {
-                                        const src = img.src || '';
-                                        if (src.includes('/t51.') || src.includes('pbs.twimg')) {
-                                            thumb = src; break;
-                                        }
-                                    }
-
-                                    // Like count — button near a heart SVG
-                                    let likes = '0';
-                                    for (const btn of el.querySelectorAll('button, [role="button"]')) {
-                                        const svgPath = (btn.innerHTML || '');
-                                        // Threads heart SVG paths contain characteristic d values
-                                        if (/M12.*heart|M8.*24|M12.*L8/i.test(svgPath) ||
-                                            (btn.getAttribute('aria-label') || '').toLowerCase().includes('like')) {
-                                            likes = getCount(btn);
-                                            break;
-                                        }
-                                    }
-
-                                    // Reply count
-                                    let replies = '0';
-                                    for (const btn of el.querySelectorAll('button, [role="button"]')) {
-                                        const label = (btn.getAttribute('aria-label') || '').toLowerCase();
-                                        if (label.includes('repl') || label.includes('ответ') ||
-                                            label.includes('comment')) {
-                                            replies = getCount(btn); break;
-                                        }
-                                    }
-
-                                    results.push({ id: postId, url: postUrl, text, ts, thumb,
-                                                   likes, replies, views: getViews(el) });
-                                } catch (_) {}
-                            }
-                            return results;
-            }"""
-
-    try:
-        posts_raw = await page.evaluate(_dom_posts_js, username)
-    except Exception as e:
-        print(f"[threads_worker] DOM posts extract failed: {e}", file=sys.stderr)
-        posts_raw = []
-    if posts_raw:
-        try:
-            await page.wait_for_timeout(int(POST_VIEWS_DOM_RESCAN_MS))
-        except Exception:
-            pass
-        try:
-            posts_raw_2 = await page.evaluate(_dom_posts_js, username)
-        except Exception:
-            posts_raw_2 = []
-        by_id = {str(p.get("id", "")): p for p in posts_raw if p.get("id")}
-        for p2 in posts_raw_2 or []:
-            pid = str(p2.get("id", "") or "").strip()
-            if not pid or pid not in by_id:
-                continue
-            v1 = _parse_count(by_id[pid].get("views", "0"))
-            v2 = _parse_count(p2.get("views", "0"))
-            if v2 > v1:
-                by_id[pid]["views"] = str(p2.get("views", "0"))
-
-    if len(posts_raw) < 2:
-        extra = await _fallback_posts_from_page_html(page, username)
-        seen_ids = {str(p.get("id", "")) for p in posts_raw if p.get("id")}
-        for row in extra:
-            rid = str(row.get("id", ""))
-            if rid and rid not in seen_ids:
-                seen_ids.add(rid)
-                posts_raw.append(row)
-
-    opened_post_views = await _collect_post_views_by_opening_posts(
+    # ── 5–6. Посты: пачками по N — открыть каждый, мягкий скролл, следующая пачка
+    posts_raw, opened_post_views = await _collect_posts_human_batches(
         page,
         username=username,
-        posts_raw=posts_raw,
+        post_count_hint=post_count_val,
         network_hints=network_post_views,
     )
+
+    for p in posts_raw:
+        pid = str(p.get("id") or "").strip()
+        ov = int(opened_post_views.get(pid, 0) or 0)
+        if ov > _parse_count(p.get("views", "0")):
+            p["views"] = str(ov)
+
+    # Дозаполнить просмотры для постов, которые нашли в HTML/сети, но не успели открыть
+    if posts_raw:
+        extra_views = await _collect_post_views_by_opening_posts(
+            page,
+            username=username,
+            posts_raw=posts_raw,
+            network_hints=network_post_views,
+            skip_post_ids=set(opened_post_views.keys()),
+        )
+        for pid, v in (extra_views or {}).items():
+            if int(v or 0) > int(opened_post_views.get(pid, 0) or 0):
+                opened_post_views[pid] = int(v)
 
     # ── 7. Post-process ───────────────────────────────────────────────────────
     posts = []
