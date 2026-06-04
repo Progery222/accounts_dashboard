@@ -849,6 +849,9 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                     from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
                     fb_batch_guard = FacebookRefreshBatchGuard()
+                from .scrape_backend import BatchScrapeContext
+
+                batch_scrape = BatchScrapeContext.for_accounts(accounts)
 
                 if not stop_requested.is_set():
                     preload: dict[str, dict] = {}
@@ -973,7 +976,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             elif (
                                 account.platform == Platform.FACEBOOK
                                 and fb_batch_guard is not None
-                                and not should_use_apify_for_account(account)
+                                and not should_use_apify_for_account(account, batch_ctx=batch_scrape)
                                 and fb_batch_guard.is_tripped()
                             ):
                                 skip_detail = fb_batch_guard.skip_detail()
@@ -984,7 +987,21 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                     detail=skip_detail,
                                 )
                                 _mark_progress(success=True, failed=False)
-                            elif should_use_apify_for_account(account):
+                            elif (
+                                account.platform == Platform.TIKTOK
+                                and batch_scrape.tiktok_captcha_tripped()
+                                and not should_use_apify_for_account(account, batch_ctx=batch_scrape)
+                            ):
+                                err_detail = batch_scrape.tiktok_captcha_skip_detail()
+                                _persist_auto_refresh_run_item(
+                                    account.id,
+                                    status="error",
+                                    worker=None,
+                                    detail=err_detail,
+                                )
+                                _mark_progress(success=False, failed=True, last_error=err_detail)
+                                errors_out.append({"id": account.id, "detail": err_detail})
+                            elif should_use_apify_for_account(account, batch_ctx=batch_scrape):
                                 from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus
 
                                 attempted_network = True
@@ -993,6 +1010,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                         account,
                                         trigger=ApifyRefreshJobTrigger.BULK,
                                         parent_batch_id=apify_batch_id,
+                                        batch_ctx=batch_scrape,
                                     )
                                 except Exception as e:
                                     err_msg = str(e).replace("\r\n", " ").replace("\n", " ").strip()
@@ -1069,6 +1087,10 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                     stop_requested.set()
                                 else:
                                     err_msg = str(detail or "")
+                                    batch_scrape.on_tiktok_playwright_error(
+                                        account,
+                                        ValueError(err_msg),
+                                    )
                                     _persist_auto_refresh_run_item(
                                         account.id,
                                         status="error",
@@ -1099,6 +1121,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                     shutdown_facebook_worker()
                                     if fb_batch_guard is not None:
                                         fb_batch_guard.trip(str(e))
+                            batch_scrape.on_tiktok_playwright_error(account, e)
                             detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
                             if len(detail) > 800:
                                 detail = detail[:797] + "..."
@@ -1118,7 +1141,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             if attempted_network and not is_refresh_cancel_requested():
                                 delay_sec = (
                                     0.0
-                                    if should_use_apify_for_account(account)
+                                    if should_use_apify_for_account(account, batch_ctx=batch_scrape)
                                     else _refresh_all_delay_seconds(account)
                                 )
                                 if delay_sec > 0:
@@ -1563,6 +1586,9 @@ def _run_refresh_all_background(
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
             fb_batch_guard = FacebookRefreshBatchGuard()
+        from .scrape_backend import BatchScrapeContext
+
+        batch_scrape = BatchScrapeContext.for_accounts(accounts)
 
         from .refresh_priority import account_refresh_priority_session
 
@@ -1727,7 +1753,7 @@ def _run_refresh_all_background(
                             elif (
                                 account.platform == Platform.FACEBOOK
                                 and fb_batch_guard is not None
-                                and not should_use_apify_for_account(account)
+                                and not should_use_apify_for_account(account, batch_ctx=batch_scrape)
                                 and fb_batch_guard.is_tripped()
                             ):
                                 skip_detail = fb_batch_guard.skip_detail()
@@ -1753,13 +1779,42 @@ def _run_refresh_all_background(
                                     worker=None,
                                     detail=skip_detail,
                                 )
-                            elif should_use_apify_for_account(account):
+                            elif (
+                                account.platform == Platform.TIKTOK
+                                and batch_scrape.tiktok_captcha_tripped()
+                                and not should_use_apify_for_account(account, batch_ctx=batch_scrape)
+                            ):
+                                err_detail = batch_scrape.tiktok_captcha_skip_detail()
+                                row = {
+                                    "id": account.id,
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "status": "ошибка",
+                                    "error": err_detail,
+                                    "follower_count": before["follower_count"],
+                                    "follower_delta": None,
+                                    "like_count": before["like_count"],
+                                    "like_delta": None,
+                                    "view_count": before["view_count"],
+                                    "view_delta": None,
+                                    "post_count": before["post_count"],
+                                    "post_delta": None,
+                                }
+                                _refresh_all_atomic_progress(failed=True, last_error=err_detail)
+                                _persist_refresh_all_run_item(
+                                    account.id,
+                                    status="error",
+                                    worker=None,
+                                    detail=err_detail,
+                                )
+                            elif should_use_apify_for_account(account, batch_ctx=batch_scrape):
                                 attempted_network = True
                                 try:
                                     refresh_account_via_apify_sync(
                                         account,
                                         trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
                                         parent_batch_id=apify_batch_id,
+                                        batch_ctx=batch_scrape,
                                     )
                                 except Exception as e:
                                     detail, _ = _format_refresh_error(account, e)
@@ -1983,6 +2038,7 @@ def _run_refresh_all_background(
                                     shutdown_facebook_worker()
                                     if fb_batch_guard is not None:
                                         fb_batch_guard.trip(str(e))
+                            batch_scrape.on_tiktok_playwright_error(account, e)
                             detail, _ = _format_refresh_error(account, e)
                             row = {
                                 "id": account.id,

@@ -19,6 +19,12 @@ def _scrape_backend_to_dict(cfg: ScrapeBackendConfig) -> dict:
         "youtube_backend": cfg.youtube_backend,
         "reddit_backend": cfg.reddit_backend,
         "rumble_backend": cfg.rumble_backend,
+        "facebook_fallback_enabled": bool(cfg.facebook_fallback_enabled),
+        "tiktok_fallback_enabled": bool(cfg.tiktok_fallback_enabled),
+        "instagram_fallback_enabled": bool(cfg.instagram_fallback_enabled),
+        "youtube_fallback_enabled": bool(cfg.youtube_fallback_enabled),
+        "reddit_fallback_enabled": bool(cfg.reddit_fallback_enabled),
+        "rumble_fallback_enabled": bool(cfg.rumble_fallback_enabled),
         "apify_enabled": apify_enabled(),
         "apify_configured": bool((getattr(settings, "APIFY_TOKEN", "") or "").strip()),
     }
@@ -61,6 +67,17 @@ def scrape_backend(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         setattr(cfg, field, val)
+    for field in (
+        "facebook_fallback_enabled",
+        "tiktok_fallback_enabled",
+        "instagram_fallback_enabled",
+        "youtube_fallback_enabled",
+        "reddit_fallback_enabled",
+        "rumble_fallback_enabled",
+    ):
+        if field not in data:
+            continue
+        setattr(cfg, field, bool(data[field]))
     cfg.save()
     out = _scrape_backend_to_dict(cfg)
     from accounts.apify_completion import count_active_apify_jobs

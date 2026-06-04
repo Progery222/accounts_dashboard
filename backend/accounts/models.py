@@ -289,6 +289,18 @@ class ScrapeBackendConfig(models.Model):
         choices=ScrapeBackendChoice.choices,
         default=ScrapeBackendChoice.PLAYWRIGHT,
     )
+    facebook_fallback_enabled = models.BooleanField(
+        default=False,
+        help_text="При сбое основного способа переключиться на запасной (логика по платформам).",
+    )
+    tiktok_fallback_enabled = models.BooleanField(
+        default=False,
+        help_text="TikTok: Playwright→Apify при капче или 3 новых ошибках в одном прогоне.",
+    )
+    instagram_fallback_enabled = models.BooleanField(default=False)
+    youtube_fallback_enabled = models.BooleanField(default=False)
+    reddit_fallback_enabled = models.BooleanField(default=False)
+    rumble_fallback_enabled = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -305,6 +317,12 @@ class ScrapeBackendConfig(models.Model):
                 "youtube_backend": ScrapeBackendChoice.PLAYWRIGHT,
                 "reddit_backend": ScrapeBackendChoice.PLAYWRIGHT,
                 "rumble_backend": ScrapeBackendChoice.PLAYWRIGHT,
+                "facebook_fallback_enabled": False,
+                "tiktok_fallback_enabled": False,
+                "instagram_fallback_enabled": False,
+                "youtube_fallback_enabled": False,
+                "reddit_fallback_enabled": False,
+                "rumble_fallback_enabled": False,
             },
         )
         return obj

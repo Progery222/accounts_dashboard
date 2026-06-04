@@ -5,11 +5,30 @@ import uuid
 from typing import Any
 
 from accounts.models import Account, ScrapeBackendChoice, ScrapeBackendConfig
+from accounts.tiktok_scrape_fallback import BatchScrapeContext
 
 from platforms.apify.config import apify_enabled, use_apify_for_platform
 
+__all__ = [
+    "BatchScrapeContext",
+    "accounts_needing_playwright",
+    "apify_platforms_in_accounts",
+    "apify_run_detail_patch_for_job",
+    "dispatch_apify_for_batch_account",
+    "facebook_playwright_warm_needed",
+    "refresh_account_via_apify_sync",
+    "scheduled_auto_refresh_worker_count",
+    "should_use_apify_for_account",
+]
 
-def should_use_apify_for_account(account: Account) -> bool:
+
+def should_use_apify_for_account(
+    account: Account,
+    *,
+    batch_ctx: "BatchScrapeContext | None" = None,
+) -> bool:
+    if batch_ctx is not None:
+        return batch_ctx.use_apify(account)
     return use_apify_for_platform(account.platform)
 
 
@@ -96,6 +115,7 @@ def refresh_account_via_apify_sync(
     *,
     trigger: str,
     parent_batch_id: uuid.UUID,
+    batch_ctx: BatchScrapeContext | None = None,
 ) -> Account:
     """
     Синхронный Apify refresh для batch / автообновления:
@@ -108,6 +128,7 @@ def refresh_account_via_apify_sync(
             account,
             trigger=trigger,
             parent_batch_id=parent_batch_id,
+            batch_ctx=batch_ctx,
         )
 
     return run_facebook_serialized(_run, platform=account.platform)
@@ -118,6 +139,7 @@ def _refresh_account_via_apify_sync_impl(
     *,
     trigger: str,
     parent_batch_id: uuid.UUID,
+    batch_ctx: BatchScrapeContext | None = None,
 ) -> Account:
     from django.utils import timezone
 
@@ -127,7 +149,7 @@ def _refresh_account_via_apify_sync_impl(
 
     if not apify_enabled():
         raise ValueError("Apify отключён (APIFY_ENABLED=0 или нет APIFY_TOKEN)")
-    if not use_apify_for_platform(account.platform):
+    if not should_use_apify_for_account(account, batch_ctx=batch_ctx):
         raise ValueError(f"Для {account.platform} не выбран backend Apify")
 
     abort_active_apify_jobs_for_account(account.pk)

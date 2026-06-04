@@ -742,6 +742,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
             fb_batch_guard = FacebookRefreshBatchGuard()
+        from .scrape_backend import BatchScrapeContext
+
+        batch_scrape = BatchScrapeContext.for_accounts(accounts)
 
         from .facebook_refresh_lane import (
             begin_facebook_batch,
@@ -961,7 +964,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             worker=slot,
                             detail=(
                                 "Apify (синхронно)…"
-                                if should_use_apify_for_account(account)
+                                if should_use_apify_for_account(account, batch_ctx=batch_scrape)
                                 else "запуск браузера…"
                             ),
                         )
@@ -1002,7 +1005,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             elif (
                                 account.platform == "facebook"
                                 and fb_batch_guard is not None
-                                and not should_use_apify_for_account(account)
+                                and not should_use_apify_for_account(account, batch_ctx=batch_scrape)
                                 and fb_batch_guard.is_tripped()
                             ):
                                 account.refresh_from_db()
@@ -1036,7 +1039,43 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     worker=None,
                                     detail=skip_detail,
                                 )
-                            elif should_use_apify_for_account(account):
+                            elif (
+                                account.platform == "tiktok"
+                                and batch_scrape.tiktok_captcha_tripped()
+                                and not should_use_apify_for_account(account, batch_ctx=batch_scrape)
+                            ):
+                                account.refresh_from_db()
+                                fb = int(account.follower_count or 0)
+                                lb = int(account.like_count or 0)
+                                vb = int(account.view_count or 0)
+                                pb = int(account.post_count or 0)
+                                err_detail = batch_scrape.tiktok_captcha_skip_detail()
+                                report_by_index[idx] = {
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "profile_name": _profile_name(account),
+                                    "status": "ошибка",
+                                    "follower_before": fb,
+                                    "follower_after": fb,
+                                    "like_before": lb,
+                                    "like_after": lb,
+                                    "view_before": vb,
+                                    "view_after": vb,
+                                    "post_before": pb,
+                                    "post_after": pb,
+                                    "elapsed_sec": round(
+                                        max(0.0, time.perf_counter() - row_started), 3
+                                    ),
+                                    "detail": err_detail,
+                                }
+                                _mark_progress(success=False, failed=True, last_error=err_detail)
+                                _persist_run_item(
+                                    account.id,
+                                    status="error",
+                                    worker=None,
+                                    detail=err_detail,
+                                )
+                            elif should_use_apify_for_account(account, batch_ctx=batch_scrape):
                                 from accounts.models import ApifyRefreshJobStatus
 
                                 account.refresh_from_db()
@@ -1058,6 +1097,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                         account,
                                         trigger=ApifyRefreshJobTrigger.SCHEDULER,
                                         parent_batch_id=apify_batch_id,
+                                        batch_ctx=batch_scrape,
                                     )
                                 except Exception as e:
                                     detail = humanize_refresh_run_detail(e)
@@ -1268,6 +1308,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     shutdown_facebook_worker()
                                     if fb_batch_guard is not None:
                                         fb_batch_guard.trip(str(e))
+                            batch_scrape.on_tiktok_playwright_error(account, e)
                             _mark_profile_unavailable_if_applicable(account, e)
                             detail = humanize_refresh_run_detail(e)
                             logger.warning(
@@ -1311,7 +1352,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             if attempted_network and not is_refresh_cancel_requested():
                                 delay_sec = (
                                     0.0
-                                    if should_use_apify_for_account(account)
+                                    if should_use_apify_for_account(account, batch_ctx=batch_scrape)
                                     else _refresh_all_delay_seconds(account)
                                 )
                                 if delay_sec > 0:
