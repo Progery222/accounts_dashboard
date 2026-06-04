@@ -19,6 +19,7 @@ from .models import (
     Account,
     AccountSnapshot,
     AutoRefreshPoint,
+    Owner,
     Platform,
     Post,
     PostSnapshot,
@@ -28,6 +29,7 @@ from .models import (
 SECTION_ACCOUNTS = "ACCOUNTS"
 SECTION_POSTS = "POSTS"
 SECTION_PROFILES = "PROFILES"
+SECTION_OWNERS = "OWNERS"
 SECTION_ACCOUNT_SNAPSHOTS = "ACCOUNT_SNAPSHOTS"
 SECTION_POST_SNAPSHOTS = "POST_SNAPSHOTS"
 SECTION_AUTO_REFRESH_POINTS = "AUTO_REFRESH_POINTS"
@@ -444,7 +446,7 @@ def build_snapshot_csv() -> bytes:
     out.write("\ufeff")
 
     out.write(f"# {SECTION_PROFILES}\n")
-    prof_headers = ["id", "name", "color", "description", "avatar_url", "is_hidden"]
+    prof_headers = ["id", "name", "color", "is_hidden"]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(prof_headers)
     for p in Profile.objects.order_by("id"):
@@ -452,22 +454,29 @@ def build_snapshot_csv() -> bytes:
             p.id,
             p.name,
             p.color,
-            p.description,
-            p.avatar_url,
             _bool_csv(p.is_hidden),
         ])
+
+    out.write("\n")
+    out.write(f"# {SECTION_OWNERS}\n")
+    owner_headers = ["id", "name", "color"]
+    w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+    w.writerow(owner_headers)
+    for o in Owner.objects.order_by("id"):
+        w.writerow([o.id, o.name, o.color])
 
     out.write("\n")
     out.write(f"# {SECTION_ACCOUNTS}\n")
     acc_headers = [
         "id", "username", "platform", "profile_id", "profile_name", "profile_color",
+        "owner_id", "owner_name", "owner_color",
         "display_name", "avatar_url", "bio",
         "follower_count", "like_count", "view_count", "post_count",
         "link_click_count", "profile_unavailable", "updated_at",
     ]
     w = csv.writer(out, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
     w.writerow(acc_headers)
-    for a in Account.objects.select_related("profile").order_by("id"):
+    for a in Account.objects.select_related("profile", "owner").order_by("id"):
         w.writerow([
             a.id,
             a.username,
@@ -475,6 +484,9 @@ def build_snapshot_csv() -> bytes:
             a.profile_id or "",
             (a.profile.name if a.profile else ""),
             (a.profile.color if a.profile else ""),
+            a.owner_id or "",
+            (a.owner.name if a.owner else ""),
+            (a.owner.color if a.owner else ""),
             a.display_name,
             a.avatar_url,
             a.bio,
@@ -583,6 +595,7 @@ def _parse_sections(text: str) -> dict[str, list[list[str]]]:
             part = stripped.lstrip("#").strip().upper()
             if part in {
                 SECTION_PROFILES,
+                SECTION_OWNERS,
                 SECTION_ACCOUNTS,
                 SECTION_POSTS,
                 SECTION_ACCOUNT_SNAPSHOTS,
@@ -654,6 +667,31 @@ def _resolve_profile(*, profile_id_raw: str, profile_name_raw: str, profile_colo
     return None
 
 
+def _resolve_owner(*, owner_id_raw: str, owner_name_raw: str, owner_color_raw: str) -> int | None:
+    name = (owner_name_raw or "").strip()
+    color = (owner_color_raw or "").strip() or "#71717a"
+
+    if name:
+        existing = Owner.objects.filter(name=name).order_by("id").first()
+        if existing:
+            if color and existing.color != color:
+                existing.color = color
+                existing.save(update_fields=["color"])
+            return existing.id
+        return Owner.objects.create(name=name, color=color).id
+
+    raw = (owner_id_raw or "").strip()
+    if not raw:
+        return None
+    try:
+        oid = int(raw)
+    except ValueError:
+        return None
+    if Owner.objects.filter(pk=oid).exists():
+        return oid
+    return None
+
+
 def _parse_hashtags(cell: str) -> list[str]:
     cell = (cell or "").strip()
     if not cell:
@@ -709,6 +747,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
 
     sections = _parse_sections(text)
     prof_rows = sections.get(SECTION_PROFILES, [])
+    owner_rows = sections.get(SECTION_OWNERS, [])
     acc_rows = sections.get(SECTION_ACCOUNTS, [])
     post_rows = sections.get(SECTION_POSTS, [])
     acc_snap_rows = sections.get(SECTION_ACCOUNT_SNAPSHOTS, [])
@@ -730,6 +769,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
 
     if (
         not prof_rows
+        and not owner_rows
         and not acc_rows
         and not post_rows
         and not acc_snap_rows
@@ -791,17 +831,43 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     if (not created) and color and obj.color != color:
                         obj.color = color
                         update_fields.append("color")
-                    if has_col("description"):
-                        obj.description = col("description")
-                        update_fields.append("description")
-                    if has_col("avatar_url"):
-                        obj.avatar_url = col("avatar_url")
-                        update_fields.append("avatar_url")
                     if has_col("is_hidden"):
                         obj.is_hidden = _parse_bool(col("is_hidden"))
                         update_fields.append("is_hidden")
                     if update_fields:
                         obj.save(update_fields=list(dict.fromkeys(update_fields)))
+
+    # ── OWNERS ──
+    owner_rows = sections.get(SECTION_OWNERS, [])
+    if owner_rows:
+        header = [c.strip() for c in owner_rows[0]]
+        hmap = {h.lower(): i for i, h in enumerate(header)}
+
+        if "name" not in hmap:
+            row_err(SECTION_OWNERS, 1, "В шапке OWNERS нужна колонка name")
+        else:
+            with transaction.atomic():
+                for rnum, row in enumerate(owner_rows[1:], start=2):
+                    if not row or not any((c or "").strip() for c in row):
+                        continue
+
+                    def col(name: str, default="") -> str:
+                        j = hmap.get(name.lower())
+                        if j is None or j >= len(row):
+                            return default
+                        return row[j] if row[j] is not None else default
+
+                    name = (col("name") or "").strip()
+                    color = (col("color") or "").strip() or "#71717a"
+                    if not name:
+                        row_err(SECTION_OWNERS, rnum, "Пустое имя владельца")
+                        continue
+                    obj = Owner.objects.filter(name=name).order_by("id").first()
+                    if obj is None:
+                        Owner.objects.create(name=name, color=color)
+                    elif color and obj.color != color:
+                        obj.color = color
+                        obj.save(update_fields=["color"])
 
     # ── ACCOUNTS ──
     if acc_rows:
@@ -845,6 +911,11 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                         profile_name_raw=col("profile_name"),
                         profile_color_raw=col("profile_color"),
                     )
+                    own = _resolve_owner(
+                        owner_id_raw=col("owner_id") if has_col("owner_id") else "",
+                        owner_name_raw=col("owner_name") if has_col("owner_name") else "",
+                        owner_color_raw=col("owner_color") if has_col("owner_color") else "",
+                    )
                     display_name = col("display_name")
                     avatar_url = col("avatar_url")
                     bio = col("bio")
@@ -871,6 +942,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
 
                     defaults = {
                         "profile_id": prof,
+                        "owner_id": own,
                         "display_name": display_name,
                         "avatar_url": avatar_url,
                         "bio": bio,
@@ -889,6 +961,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     )
                     if not created:
                         obj.profile_id = prof
+                        obj.owner_id = own
                         obj.display_name = display_name
                         obj.avatar_url = avatar_url
                         obj.bio = bio

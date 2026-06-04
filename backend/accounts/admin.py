@@ -5,6 +5,7 @@ from .models import (
     AccountSnapshot,
     PostSnapshot,
     Profile,
+    Owner,
     ScrapeBackendConfig,
     ApifyRefreshJob,
 )
@@ -21,11 +22,24 @@ class ProfileAdmin(admin.ModelAdmin):
         return obj.accounts.count()
 
 
+@admin.register(Owner)
+class OwnerAdmin(admin.ModelAdmin):
+    list_display = ["name", "color", "account_count", "created_at"]
+    search_fields = ["name"]
+    readonly_fields = ["created_at", "updated_at"]
+
+    @admin.display(description="Аккаунтов")
+    def account_count(self, obj):
+        return obj.accounts.count()
+
+
 @admin.register(Account)
 class AccountAdmin(admin.ModelAdmin):
     list_display = [
         "username",
         "platform",
+        "profile",
+        "owner",
         "display_name",
         "avatar_missing",
         "follower_count",

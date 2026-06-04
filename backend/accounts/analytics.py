@@ -55,6 +55,8 @@ def _normalize_scrape_filter(raw: str | None) -> str:
 def _annotated_qs(
     account_id=None,
     platform=None,
+    profile_id=None,
+    owner_id=None,
     period="1d",
     min_views=MIN_VIEWS_DEFAULT,
     scrape_filter: str = "active",
@@ -73,6 +75,20 @@ def _annotated_qs(
         qs = qs.filter(account_id=account_id)
     if platform:
         qs = qs.filter(account__platform=platform)
+    if profile_id == "none":
+        qs = qs.filter(account__profile__isnull=True)
+    elif profile_id:
+        try:
+            qs = qs.filter(account__profile_id=int(profile_id))
+        except (TypeError, ValueError):
+            pass
+    if owner_id == "none":
+        qs = qs.filter(account__owner__isnull=True)
+    elif owner_id:
+        try:
+            qs = qs.filter(account__owner_id=int(owner_id))
+        except (TypeError, ValueError):
+            pass
 
     days = PERIOD_DAYS.get(period, 7)
     period_start = today - datetime.timedelta(days=days)
@@ -158,6 +174,8 @@ def top_posts(request):
     sort_by   = request.query_params.get("sort_by", "view_delta")
     platform  = request.query_params.get("platform") or None
     account_id = request.query_params.get("account_id") or None
+    profile_id = request.query_params.get("profile_id") or None
+    owner_id = request.query_params.get("owner_id") or None
     min_views = int(request.query_params.get("min_views", MIN_VIEWS_DEFAULT))
     hashtag   = request.query_params.get("hashtag") or None
     page      = max(1, int(request.query_params.get("page", 1)))
@@ -167,6 +185,8 @@ def top_posts(request):
     qs = _annotated_qs(
         account_id=account_id,
         platform=platform,
+        profile_id=profile_id,
+        owner_id=owner_id,
         period=period,
         min_views=min_views,
         scrape_filter=scrape_filter,
@@ -197,12 +217,16 @@ def insights(request):
     period     = request.query_params.get("period", "1d")
     platform   = request.query_params.get("platform") or None
     account_id = request.query_params.get("account_id") or None
+    profile_id = request.query_params.get("profile_id") or None
+    owner_id = request.query_params.get("owner_id") or None
     min_views  = int(request.query_params.get("min_views", MIN_VIEWS_DEFAULT))
 
     scrape_filter = _normalize_scrape_filter(request.query_params.get("scrape_filter"))
     qs = _annotated_qs(
         account_id=account_id,
         platform=platform,
+        profile_id=profile_id,
+        owner_id=owner_id,
         period=period,
         min_views=min_views,
         scrape_filter=scrape_filter,

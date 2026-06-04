@@ -509,6 +509,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "auto_refresh_telegram_chat_ids",
                 "auto_refresh_platforms",
                 "auto_refresh_profile_ids",
+                "auto_refresh_owner_ids",
             ],
         )
     except Exception:

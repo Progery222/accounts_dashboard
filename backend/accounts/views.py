@@ -44,6 +44,7 @@ from .models import (
     Platform,
     Post,
     Profile,
+    Owner,
     AccountSnapshot,
     PostSnapshot,
     AutoRefreshPoint,
@@ -58,6 +59,7 @@ from .serializers import (
     AudienceMemberListSerializer,
     PostSerializer,
     ProfileSerializer,
+    OwnerSerializer,
 )
 from .snapshot_io import build_snapshot_csv, import_snapshot_csv, _is_deadlock_error
 from platforms.profile_unavailable import (
@@ -402,6 +404,13 @@ _ACCOUNT_REFRESH_SAVE_FIELDS = (
     "profile_unavailable",
     "updated_at",
 )
+_ACCOUNT_ASSIGNMENT_FIELDS = frozenset({"profile", "owner"})
+
+
+def _account_assignment_only_validated(validated_data: dict) -> bool:
+    if not validated_data:
+        return False
+    return set(validated_data.keys()).issubset(_ACCOUNT_ASSIGNMENT_FIELDS)
 
 
 def _restore_account_updated_at(account_id: int, preserved) -> None:
@@ -499,12 +508,12 @@ def _refresh_all_delay_seconds(account: Account) -> float:
     Instagram is already preloaded in batch and generally doesn't need extra delay.
     Other platforms keep a short jitter to reduce burst traffic / anti-bot friction.
     Facebook: 2–5 мин между аккаунтами (120–300 с) — Playwright + антибот.
-    TikTok: пауза между аккаунтами 30–90 с (снижает капчу на профилях; env REFRESH_ALL_DELAY_TIKTOK_*).
+    TikTok: пауза между аккаунтами 20–40 с (снижает капчу на профилях; env REFRESH_ALL_DELAY_TIKTOK_*).
     YouTube: пауза 5–10 с между аккаунтами — снижает риск квот/блокировок при серии запросов.
     """
     platform_defaults: dict[str, tuple[float, float]] = {
         Platform.INSTAGRAM: (0.0, 0.0),
-        Platform.TIKTOK: (30.0, 90.0),
+        Platform.TIKTOK: (20.0, 40.0),
         Platform.X: (0.8, 1.6),
         Platform.THREADS: (2.0, 4.0),
         Platform.FACEBOOK: (120.0, 300.0),
@@ -2562,6 +2571,14 @@ class AccountViewSet(viewsets.ModelViewSet):
         _stamp_new_account_updated_at(serializer.instance.pk)
         serializer.instance.refresh_from_db(fields=["updated_at"])
 
+    def perform_update(self, serializer):
+        """Смена профиля/владельца не двигает «Обновлён» — только успешный refresh статистики."""
+        validated = serializer.validated_data
+        if _account_assignment_only_validated(validated):
+            serializer.save(update_fields=list(validated.keys()))
+            return
+        serializer.save()
+
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
         ctx["hidden_platforms"] = _get_hidden_platforms()
@@ -2570,8 +2587,8 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """
-        Импорт списка: существующий аккаунт — только смена профиля (статистика не трогаем).
-        Тот же профиль — без изменений.
+        Импорт списка: существующий аккаунт — только смена профиля/владельца (статистика не трогаем).
+        Без изменений — если профиль и владелец те же.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -2579,19 +2596,28 @@ class AccountViewSet(viewsets.ModelViewSet):
         username = validated["username"]
         platform = validated["platform"]
         profile = validated.get("profile")
+        owner = validated.get("owner")
         new_profile_id = profile.pk if profile else None
+        new_owner_id = owner.pk if owner else None
 
         existing = Account.objects.filter(username=username, platform=platform).first()
         if existing is not None:
             ctx = self.get_serializer_context()
-            if existing.profile_id == new_profile_id:
+            if existing.profile_id == new_profile_id and existing.owner_id == new_owner_id:
                 data = self.get_serializer(existing, context=ctx).data
                 data["import_action"] = "unchanged"
                 return Response(data, status=status.HTTP_200_OK)
-            existing.profile = profile
-            existing.save(update_fields=["profile", "updated_at"])
+            changed_fields = []
+            if existing.profile_id != new_profile_id:
+                changed_fields.append("profile")
+                existing.profile = profile
+            if existing.owner_id != new_owner_id:
+                changed_fields.append("owner")
+                existing.owner = owner
+            existing.save(update_fields=changed_fields)
             data = self.get_serializer(existing, context=ctx).data
-            data["import_action"] = "profile_updated"
+            data["import_action"] = "assignment_updated"
+            data["changed_fields"] = changed_fields
             return Response(data, status=status.HTTP_200_OK)
 
         self.perform_create(serializer)
@@ -3020,6 +3046,18 @@ class AccountViewSet(viewsets.ModelViewSet):
         return Response(result)
 
 
+class OwnerViewSet(viewsets.ModelViewSet):
+    serializer_class = OwnerSerializer
+
+    def get_queryset(self):
+        return Owner.objects.annotate(account_count=Count("accounts"))
+
+    def destroy(self, request, *args, **kwargs):
+        owner = self.get_object()
+        owner.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class ProfileViewSet(viewsets.ModelViewSet):
     serializer_class = ProfileSerializer
 
@@ -3284,6 +3322,7 @@ def _schedule_to_dict(config) -> dict:
     from .auto_refresh_scope import (
         normalize_auto_refresh_platforms,
         normalize_auto_refresh_profile_ids,
+        normalize_auto_refresh_owner_ids,
     )
 
     return {
@@ -3297,6 +3336,9 @@ def _schedule_to_dict(config) -> dict:
         ),
         "auto_refresh_profile_ids": normalize_auto_refresh_profile_ids(
             getattr(config, "auto_refresh_profile_ids", None),
+        ),
+        "auto_refresh_owner_ids": normalize_auto_refresh_owner_ids(
+            getattr(config, "auto_refresh_owner_ids", None),
         ),
         "auto_refresh_csv_report": True,
         "auto_refresh_telegram_enabled": bool(
@@ -3505,6 +3547,12 @@ def refresh_schedule(request):
 
             config.auto_refresh_profile_ids = normalize_auto_refresh_profile_ids(
                 data["auto_refresh_profile_ids"],
+            )
+        if "auto_refresh_owner_ids" in data:
+            from .auto_refresh_scope import normalize_auto_refresh_owner_ids
+
+            config.auto_refresh_owner_ids = normalize_auto_refresh_owner_ids(
+                data["auto_refresh_owner_ids"],
             )
         if "times" in data and isinstance(data["times"], list):
             valid = []

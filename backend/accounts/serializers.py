@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 import re
-from .models import Account, Platform, Post, Profile, AudienceMember, AudienceMemberPost
+from .models import Account, Platform, Post, Profile, Owner, AudienceMember, AudienceMemberPost
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -12,7 +12,22 @@ class ProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Profile
-        fields = ["id", "name", "description", "color", "avatar_url", "is_hidden", "account_count", "created_at", "updated_at"]
+        fields = ["id", "name", "color", "is_hidden", "account_count", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_account_count(self, obj):
+        prefetched = getattr(obj, "account_count", None)
+        if prefetched is not None:
+            return prefetched
+        return obj.accounts.count()
+
+
+class OwnerSerializer(serializers.ModelSerializer):
+    account_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Owner
+        fields = ["id", "name", "color", "account_count", "created_at", "updated_at"]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def get_account_count(self, obj):
@@ -29,6 +44,11 @@ class AccountSerializer(serializers.ModelSerializer):
     )
     profile_name = serializers.CharField(source="profile.name", read_only=True, allow_null=True)
     profile_color = serializers.CharField(source="profile.color", read_only=True, allow_null=True)
+    owner_id = serializers.PrimaryKeyRelatedField(
+        queryset=Owner.objects.all(), source="owner", allow_null=True, required=False,
+    )
+    owner_name = serializers.CharField(source="owner.name", read_only=True, allow_null=True)
+    owner_color = serializers.CharField(source="owner.color", read_only=True, allow_null=True)
     follower_delta = serializers.SerializerMethodField()
     like_delta = serializers.SerializerMethodField()
     view_delta = serializers.SerializerMethodField()
@@ -46,6 +66,7 @@ class AccountSerializer(serializers.ModelSerializer):
         fields = [
             "id", "username", "platform", "platform_label",
             "profile_id", "profile_name", "profile_color",
+            "owner_id", "owner_name", "owner_color",
             "display_name", "avatar_url", "bio",
             "follower_count", "like_count", "view_count", "post_count",
             "link_click_count",

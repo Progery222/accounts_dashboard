@@ -11,6 +11,7 @@ from accounts.models import (
     Account,
     AccountSnapshot,
     AutoRefreshPoint,
+    Owner,
     Platform,
     Post,
     PostSnapshot,
@@ -22,11 +23,10 @@ from accounts.snapshot_io import build_snapshot_csv, import_snapshot_csv
 
 class SnapshotIoRoundTripTests(TestCase):
     def test_export_import_preserves_extended_fields(self):
+        owner = Owner.objects.create(name="Петя", color="#22c55e")
         prof = Profile.objects.create(
             name="Team A",
             color="#ff0000",
-            description="Desc",
-            avatar_url="https://example.com/p.png",
             is_hidden=True,
         )
         posted = timezone.now() - timedelta(days=3)
@@ -34,6 +34,7 @@ class SnapshotIoRoundTripTests(TestCase):
             username="snap_user",
             platform=Platform.TIKTOK,
             profile=prof,
+            owner=owner,
             display_name="Snap",
             follower_count=1000,
             like_count=200,
@@ -75,9 +76,9 @@ class SnapshotIoRoundTripTests(TestCase):
         self.assertEqual(acc2.link_click_count, 42)
         self.assertTrue(acc2.profile_unavailable)
         prof2 = Profile.objects.get(name="Team A")
-        self.assertEqual(prof2.description, "Desc")
-        self.assertEqual(prof2.avatar_url, "https://example.com/p.png")
         self.assertTrue(prof2.is_hidden)
+        acc2_owner = Account.objects.get(username="snap_user", platform=Platform.TIKTOK).owner
+        self.assertEqual(acc2_owner.name, "Петя")
         hist = AccountSnapshot.objects.get(account=acc2, date=snap_date)
         self.assertEqual(hist.link_click_count, 30)
         post2 = Post.objects.get(account=acc2, external_id="vid1")

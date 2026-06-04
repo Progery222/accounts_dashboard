@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .subs_api import subs_tiktok_audience_bulk
 from .scrape_backend_views import scrape_backend
 from .views import (
-    AccountViewSet, ProfileViewSet, platforms, summary, refresh_schedule, tv_emu_config,
+    AccountViewSet, ProfileViewSet, OwnerViewSet, platforms, summary, refresh_schedule, tv_emu_config,
     auto_refresh_status, auto_refresh_series, auto_refresh_run_now, auto_refresh_stop,
     auto_refresh_reset_state,
     auto_refresh_report_download,
@@ -20,6 +20,9 @@ accounts_router.register("", AccountViewSet, basename="account")
 
 profiles_router = DefaultRouter()
 profiles_router.register("", ProfileViewSet, basename="profile")
+
+owners_router = DefaultRouter()
+owners_router.register("", OwnerViewSet, basename="owner")
 
 urlpatterns = [
     path("platforms/", platforms),
@@ -44,5 +47,6 @@ urlpatterns = [
     path("analytics/top-posts/", top_posts),
     path("analytics/insights/", insights),
     path("profiles/", include(profiles_router.urls)),
+    path("owners/", include(owners_router.urls)),
     path("", include(accounts_router.urls)),
 ]
