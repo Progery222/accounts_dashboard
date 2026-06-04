@@ -16,6 +16,10 @@ _batch_mode = threading.local()
 MERGE_WINDOW = timedelta(minutes=45)
 
 _INCREMENTAL_SOURCES = frozenset({"refresh", "refresh_all", "api"})
+_PULSE_INTERVAL_MINUTES = 30
+_INTERVAL_SOURCE = "interval"
+# legacy alias (старые точки в БД)
+_HOURLY_SOURCE = _INTERVAL_SOURCE
 
 
 def enter_refresh_pulse_batch() -> None:
@@ -53,6 +57,13 @@ def _current_views_total() -> int:
 
 
 def _point_totals_at(finished, current_total: int) -> tuple[int, int]:
+    """
+    d_prev — прирост с прошлой точки графика.
+    d_day — накопленный прирост с начала календарных суток (local_date).
+
+    Первая точка за день: d_day = d_prev (первое автообновление, напр. 06:00).
+    Дальше: от базового total на начало суток (total первой точки − её d_day).
+    """
     local_dt = timezone.localtime(finished)
     local_date = local_dt.date()
     prev_point = (
@@ -60,14 +71,22 @@ def _point_totals_at(finished, current_total: int) -> tuple[int, int]:
         .order_by("-measured_at")
         .first()
     )
+    prev_total = int(prev_point.view_count_total) if prev_point else current_total
+    d_prev = max(0, int(current_total) - prev_total)
+
     first_today = (
         AutoRefreshPoint.objects.filter(local_date=local_date)
         .order_by("measured_at")
         .first()
     )
-    prev_total = int(prev_point.view_count_total) if prev_point else current_total
-    day_start_total = int(first_today.view_count_total) if first_today else current_total
-    return current_total - prev_total, current_total - day_start_total
+    if not first_today:
+        d_day = d_prev
+    else:
+        baseline = int(first_today.view_count_total) - int(
+            first_today.view_delta_from_day_start or 0
+        )
+        d_day = max(0, int(current_total) - baseline)
+    return d_prev, d_day
 
 
 def record_account_refresh_platform_delta(
@@ -162,6 +181,107 @@ def platform_deltas_from_report_rows(report_rows: list) -> dict[str, int]:
             platform, raw
         )
     return platform_deltas
+
+
+def recompute_day_start_for_local_date(local_date) -> int:
+    """Пересчитать view_delta_from_day_start для всех точек одного календарного дня."""
+    rows = list(
+        AutoRefreshPoint.objects.filter(local_date=local_date).order_by("measured_at")
+    )
+    if not rows:
+        return 0
+    baseline: int | None = None
+    updated = 0
+    for i, pt in enumerate(rows):
+        total = int(pt.view_count_total or 0)
+        d_prev = max(0, int(pt.view_delta_from_prev_point or 0))
+        if i == 0:
+            new_day = d_prev
+            baseline = total - d_prev
+        else:
+            assert baseline is not None
+            new_day = max(0, total - baseline)
+        if int(pt.view_delta_from_day_start or 0) != new_day:
+            pt.view_delta_from_day_start = new_day
+            pt.save(update_fields=["view_delta_from_day_start"])
+            updated += 1
+    return updated
+
+
+def _local_interval_start(dt, *, interval_minutes: int = _PULSE_INTERVAL_MINUTES):
+    local = timezone.localtime(dt)
+    step = max(1, int(interval_minutes))
+    minute = (local.minute // step) * step
+    start = local.replace(minute=minute, second=0, microsecond=0)
+    if timezone.is_naive(start):
+        start = timezone.make_aware(start, timezone.get_current_timezone())
+    return start
+
+
+def record_interval_pulse_snapshot(
+    *,
+    finished=None,
+    interval_minutes: int = _PULSE_INTERVAL_MINUTES,
+) -> bool:
+    """
+    Снимок суммы view_count по всем аккаунтам в БД на границе интервала (по умолчанию 30 мин).
+    d_prev — прирост с последней точки (любой source) строго до начала слота.
+    """
+    finished = finished or timezone.now()
+    step = max(1, int(interval_minutes))
+    slot_start = _local_interval_start(finished, interval_minutes=step)
+    slot_end = slot_start + timedelta(minutes=step)
+    current_total = _current_views_total()
+    prev_point = (
+        AutoRefreshPoint.objects.filter(measured_at__lt=slot_start)
+        .order_by("-measured_at")
+        .first()
+    )
+    prev_total = int(prev_point.view_count_total) if prev_point else current_total
+    d_prev = max(0, int(current_total) - prev_total)
+    _, d_day = _point_totals_at(finished, current_total)
+    slot_label = slot_start.strftime("%H:%M")
+
+    existing = (
+        AutoRefreshPoint.objects.filter(
+            source=_INTERVAL_SOURCE,
+            measured_at__gte=slot_start,
+            measured_at__lt=slot_end,
+        )
+        .order_by("-measured_at")
+        .first()
+    )
+    if existing:
+        existing.view_count_total = current_total
+        existing.view_delta_from_prev_point = d_prev
+        existing.view_delta_from_day_start = d_day
+        existing.slot_label = slot_label
+        existing.save(
+            update_fields=[
+                "view_count_total",
+                "view_delta_from_prev_point",
+                "view_delta_from_day_start",
+                "slot_label",
+            ],
+        )
+        return True
+
+    local_dt = timezone.localtime(finished)
+    AutoRefreshPoint.objects.create(
+        local_date=local_dt.date(),
+        source=_INTERVAL_SOURCE,
+        slot_label=slot_label,
+        view_count_total=current_total,
+        view_delta_from_prev_point=d_prev,
+        view_delta_from_day_start=d_day,
+        platform_deltas={},
+    )
+    return True
+
+
+def record_hourly_pulse_snapshot(*, finished=None) -> bool:
+    """Обратная совместимость: то же, что 30-минутный снимок."""
+    return record_interval_pulse_snapshot(finished=finished)
 
 
 def create_auto_refresh_point_from_report_rows(

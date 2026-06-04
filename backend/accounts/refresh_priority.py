@@ -33,6 +33,16 @@ def interrupt_audience_scrape_for_account_refresh() -> None:
             "refresh_priority.interrupt_failed",
             extra={"error": str(exc)},
         )
+    finally:
+        # shutdown_all_workers() ставит force_stop, чтобы демоны не поднялись во время kill.
+        # Сразу после прерывания снимаем флаг — иначе ручной refresh получает
+        # «Остановлено пользователем» до запуска Facebook/Playwright worker.
+        try:
+            from platforms.worker_pool import clear_playwright_refresh_force_stop
+
+            clear_playwright_refresh_force_stop()
+        except Exception:
+            pass
 
 
 @contextmanager

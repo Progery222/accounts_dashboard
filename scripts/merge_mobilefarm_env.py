@@ -40,6 +40,8 @@ COPY_IF_SET = frozenset(
         "TELEGRAM_API_HASH",
         "TELEGRAM_PHONE",
         "TELEGRAM_SESSION_FILE",
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_AUTO_REFRESH_CHAT_ID",
         "FACEBOOK_EMAIL",
         "FACEBOOK_PASSWORD",
         "TIKTOK_USERNAME",

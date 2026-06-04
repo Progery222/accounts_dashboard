@@ -1,0 +1,10 @@
+# Шаблон для /etc/logrotate.d/dashboard (копирует setup-mobilefarm-log-retention.sh)
+/home/atom/dashboard/var/log/dashboard/*.log /home/atom/dashboard/var/log/dashboard/backend.log.* {
+    daily
+    rotate 7
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

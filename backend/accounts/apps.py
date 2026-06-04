@@ -317,12 +317,27 @@ class AccountsConfig(AppConfig):
                     pass
 
             job_kw = _scheduler_job_defaults()
+            from apscheduler.triggers.cron import CronTrigger
             from apscheduler.triggers.interval import IntervalTrigger
+
+            from .auto_refresh_pulse import record_interval_pulse_snapshot
 
             _scheduler.add_job(
                 sync_schedule_from_db,
                 IntervalTrigger(seconds=30, timezone=SCHEDULER_TZ),
                 id=SCHEDULE_SYNC_JOB_ID,
+                replace_existing=True,
+                **job_kw,
+            )
+            for legacy_id in ("pulse_hourly_snapshot",):
+                try:
+                    _scheduler.remove_job(legacy_id)
+                except Exception:
+                    pass
+            _scheduler.add_job(
+                record_interval_pulse_snapshot,
+                CronTrigger(minute="0,30", timezone=SCHEDULER_TZ),
+                id="pulse_interval_snapshot",
                 replace_existing=True,
                 **job_kw,
             )
@@ -596,18 +611,17 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         from .scrape_backend import scheduled_auto_refresh_worker_count
 
         worker_count_early = scheduled_auto_refresh_worker_count(accounts)
+        from .refresh_skip_recent import build_initial_run_detail_items
+
+        run_items_early, skip_initial = build_initial_run_detail_items(
+            accounts,
+            skip_recent_hours=skip_recent_hours,
+            cutoff=cutoff,
+        )
+        state.processed_accounts = skip_initial
+        state.success_accounts = skip_initial
         state.run_detail = {
-            "items": [
-                {
-                    "account_id": a.id,
-                    "platform": a.platform,
-                    "username": a.username,
-                    "status": "queued",
-                    "worker": None,
-                    "detail": "в очереди",
-                }
-                for a in accounts
-            ],
+            "items": run_items_early,
             "worker_count": worker_count_early,
         }
         state.save(update_fields=[
@@ -728,6 +742,21 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
             fb_batch_guard = FacebookRefreshBatchGuard()
 
+        from .facebook_refresh_lane import (
+            begin_facebook_batch,
+            batch_has_facebook,
+            end_facebook_batch,
+            ensure_facebook_playwright_daemon_ready,
+            platform_claim_filter,
+            submit_refresh_workers,
+            try_mark_facebook_account_started,
+            filter_accounts_for_playwright_prewarm,
+            allocate_worker_slot,
+            facebook_serial_lock,
+        )
+
+        has_fb_accounts = batch_has_facebook(accounts)
+        begin_facebook_batch()
         try:
             from .parallel_account_queue import ParallelAccountQueue
             from .refresh_all_warm import RefreshAllWarmTracker
@@ -739,17 +768,29 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             report_by_index: list[dict | None] = [None] * len(accounts)
             platform_limits = _platform_limits()
             account_queue = ParallelAccountQueue(len(accounts), platform_limits)
+            from .refresh_skip_recent import apply_upfront_skip_recent
+
+            apply_upfront_skip_recent(
+                accounts,
+                cutoff=cutoff,
+                skip_recent_hours=skip_recent_hours,
+                account_queue=account_queue,
+                report_by_index=report_by_index,
+                profile_name=_profile_name,
+            )
             worker_count = scheduled_auto_refresh_worker_count(accounts)
 
             thread_slot_map: dict[int, int] = {}
             thread_slot_lock = threading.Lock()
 
-            def _worker_slot() -> int:
-                tid = threading.get_ident()
-                with thread_slot_lock:
-                    if tid not in thread_slot_map:
-                        thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
-                    return thread_slot_map[tid]
+            _fb_daemon_prepared = threading.Event()
+
+            def _worker_slot(*, facebook_lane: bool) -> int:
+                return allocate_worker_slot(
+                    facebook_lane=facebook_lane,
+                    thread_slot_map=thread_slot_map,
+                    thread_slot_lock=thread_slot_lock,
+                )
 
             def _persist_run_item(account_id: int, **kwargs) -> None:
                 from accounts.run_detail_items import merge_run_detail_item
@@ -774,23 +815,11 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 except Exception as e:
                     print(f"[scheduled_refresh] run_detail update failed for {account_id}: {e}")
 
-            run_items = [
-                {
-                    "account_id": a.id,
-                    "platform": a.platform,
-                    "username": a.username,
-                    "status": "queued",
-                    "worker": None,
-                    "detail": "",
-                }
-                for a in accounts
-            ]
             st_plan = AutoRefreshState.objects.get(pk=1)
-            st_plan.run_detail = {
-                "items": run_items,
-                "worker_count": worker_count,
-                "apify_batch_id": str(apify_batch_id),
-            }
+            rd_plan = dict(st_plan.run_detail or {})
+            rd_plan["worker_count"] = worker_count
+            rd_plan["apify_batch_id"] = str(apify_batch_id)
+            st_plan.run_detail = rd_plan
             st_plan.save(update_fields=["run_detail", "updated_at"])
 
             def _finalize_run_detail_stale() -> None:
@@ -838,7 +867,17 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 ensure_fresh_db_connections()
                 return Account.objects.select_related("profile").get(pk=accounts[idx].pk)
 
-            def _worker() -> None:
+            def _worker(facebook_lane: bool) -> None:
+                if facebook_lane and not _fb_daemon_prepared.is_set():
+                    try:
+                        ensure_facebook_playwright_daemon_ready()
+                    except Exception as exc:
+                        print(
+                            f"[scheduled_refresh] Facebook daemon: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    _fb_daemon_prepared.set()
                 while True:
                     if stop_requested.is_set():
                         return
@@ -876,11 +915,19 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     idx = account_queue.claim(
                         lambda i: accounts[i].platform,
                         stop_event=stop_requested,
+                        platform_filter=platform_claim_filter(facebook_lane=facebook_lane),
                     )
                     if idx is None:
                         return
 
                     account = _reload_account(idx)
+                    if (
+                        facebook_lane
+                        and str(account.platform) == "facebook"
+                        and not try_mark_facebook_account_started(account.id)
+                    ):
+                        account_queue.abandon(idx, account.platform)
+                        continue
                     from .warm_run_detail import is_refresh_cancel_requested
 
                     if is_refresh_cancel_requested():
@@ -899,7 +946,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         if stop_requested.is_set():
                             return
 
-                        slot = _worker_slot()
+                        slot = _worker_slot(facebook_lane=facebook_lane)
 
                         def _mark_current_account() -> None:
                             state.current_account = f"{account.platform}/@{account.username}"
@@ -1137,7 +1184,11 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     detail="съём данных…",
                                 )
                                 try:
-                                    _refresh_with_retry(account, scraped=scraped)
+                                    if account.platform == "facebook":
+                                        with facebook_serial_lock():
+                                            _refresh_with_retry(account, scraped=scraped)
+                                    else:
+                                        _refresh_with_retry(account, scraped=scraped)
                                 except RefreshCancelledError:
                                     _restore_account_refresh_baseline(account.pk, refresh_baseline)
                                     raise
@@ -1276,7 +1327,9 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
             from .warm_run_detail import is_refresh_cancel_requested as _refresh_cancel_poll
 
-            pw_accounts = accounts_needing_playwright(accounts)
+            pw_accounts = filter_accounts_for_playwright_prewarm(
+                accounts_needing_playwright(accounts),
+            )
             if pw_accounts and bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
                 print(
                     "[scheduled_refresh] подъём окон Playwright (по платформам)…",
@@ -1294,7 +1347,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     )
 
             executor = ThreadPoolExecutor(max_workers=worker_count)
-            futures = [executor.submit(_worker) for _ in range(worker_count)]
+            futures = submit_refresh_workers(
+                executor,
+                _worker,
+                worker_count=worker_count,
+                has_facebook=has_fb_accounts,
+            )
             pending = set(futures)
             try:
                 while pending:
@@ -1357,6 +1415,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         },
                     )
         finally:
+            end_facebook_batch()
             leave_sync_apify_batch()
             finished = timezone.now()
             state.is_running = False

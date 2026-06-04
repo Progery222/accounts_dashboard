@@ -53,9 +53,10 @@ extra = [
     "# --- Mobile Farm GPU (сгенерировано при деплое) ---",
     f"DASHBOARD_HTTP_PORT={http_port}",
     f"DASHBOARD_PUBLIC_URL={public_http}",
-    "# DISPLAY для видимых окон Playwright в Docker (уточните в RDP: echo $DISPLAY)",
-    "MOBILEFARM_DISPLAY=:0",
+    "# Playwright: Xvfb :99 (по умолчанию). На сервере: ./scripts/enable-mobilefarm-xvfb.sh",
+    "MOBILEFARM_DISPLAY=:99",
     "MOBILEFARM_HEADED_BROWSER=1",
+    "MOBILEFARM_BROWSER_MODE=xvfb",
 ]
 out = "\n".join(lines) + "\n" + "\n".join(extra) + "\n"
 env_path = root / ".env"

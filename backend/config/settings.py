@@ -324,6 +324,9 @@ TIKTOK_PASSWORD = os.getenv("TIKTOK_PASSWORD", "")
 # Автозаполнение формы входа TikTok в UI настроек: false — только ручной ввод (по умолчанию);
 # true — подставлять TIKTOK_USERNAME / TIKTOK_PASSWORD при наличии пары.
 TIKTOK_AUTH_AUTOFILL = os.getenv("TIKTOK_AUTH_AUTOFILL", "false")
+# true — каждый refresh TikTok через Playwright (окно на RDP), не только при пустом SSR.
+_tiktok_force_worker = _optional_env_bool("TIKTOK_FORCE_WORKER")
+TIKTOK_FORCE_WORKER = bool(_tiktok_force_worker) if _tiktok_force_worker is not None else False
 # SadCaptcha (tiktok-captcha-solver): ключ в worker_accounts.env, не коммитить.
 SADCAPTCHA_API_KEY = os.getenv("SADCAPTCHA_API_KEY", "").strip()
 
@@ -387,3 +390,16 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [],
     "DEFAULT_PERMISSION_CLASSES": [],
 }
+
+# Файловые логи: backend/var/log/backend.log (локально) или /app/var/log (Docker volume).
+# Ротация по дням, хранение DASHBOARD_LOG_RETENTION_DAYS (по умолчанию 7). DASHBOARD_FILE_LOG=0 — выкл.
+# stderr (scheduled_refresh, worker_pool) дублируется скриптом scripts/archive-dashboard-docker-logs.sh на сервере.
+_file_logging = None
+try:
+    from config.dashboard_logging import build_file_logging
+
+    _file_logging = build_file_logging(base_dir=BASE_DIR)
+except Exception as _log_cfg_exc:
+    print(f"[django settings] dashboard file logging skipped: {_log_cfg_exc}", file=sys.stderr)
+if _file_logging is not None:
+    LOGGING = _file_logging

@@ -8,6 +8,35 @@ import threading
 import time
 from pathlib import Path
 
+_REFRESH_FORCE_STOP = threading.Event()
+
+
+def mark_playwright_refresh_force_stop() -> None:
+    """Сразу после «Остановить» — не поднимать новые демоны до сброса флага."""
+    _REFRESH_FORCE_STOP.set()
+
+
+def clear_playwright_refresh_force_stop() -> None:
+    _REFRESH_FORCE_STOP.clear()
+
+
+def refresh_stop_requested() -> bool:
+    if _REFRESH_FORCE_STOP.is_set():
+        return True
+    try:
+        from accounts.warm_run_detail import is_refresh_cancel_requested
+
+        return bool(is_refresh_cancel_requested())
+    except Exception:
+        return False
+
+
+def _abort_if_refresh_stop() -> None:
+    if refresh_stop_requested():
+        from accounts.refresh_cancel import RefreshCancelledError
+
+        raise RefreshCancelledError("Остановлено пользователем")
+
 
 def _backend_dir_for_worker(worker_path: Path) -> Path:
     """
@@ -406,6 +435,7 @@ def _is_recoverable_playwright_error(message: str) -> bool:
 
 def _prepare_worker_spawn(worker_path: Path) -> None:
     """Освободить профиль Chrome и снять зомби-воркеры перед новым демоном."""
+    _abort_if_refresh_stop()
     _kill_chromium_after_worker(_chrome_roots_for_worker(worker_path))
     time.sleep(0.45)
     reconcile_orphan_worker_daemons(worker_path)
@@ -481,6 +511,7 @@ def call_worker(
     key = pool_storage_key(worker_path)
     last_exc: BaseException | None = None
     for _attempt in range(3):
+        _abort_if_refresh_stop()
         spawned = False
         handle = None
         need_prepare = False
@@ -516,6 +547,10 @@ def call_worker(
             return handle.call(payload, timeout_sec=timeout_sec)
         except Exception as exc:
             last_exc = exc
+            if refresh_stop_requested():
+                from accounts.refresh_cancel import RefreshCancelledError
+
+                raise RefreshCancelledError("Остановлено пользователем") from exc
             if not _is_recoverable_playwright_error(str(exc)):
                 raise
             # Не пересоздаём процесс «на всякий случай» после успешного первого вызова:
@@ -540,6 +575,8 @@ def call_worker(
 
 def _spawn_worker_daemon(worker_path: Path, *, reconcile: bool = True) -> None:
     """Поднять один демон в пуле (без глобального kill_all после старта)."""
+    if refresh_stop_requested():
+        return
     key = pool_storage_key(worker_path)
     need_spawn = False
     with _GLOBAL_LOCK:
@@ -643,6 +680,7 @@ def _shutdown_workers() -> None:
 
 def shutdown_all_workers() -> None:
     """Закрыть все демоны Playwright — после сброса сессии в настройках."""
+    mark_playwright_refresh_force_stop()
     with _GLOBAL_LOCK:
         for h in list(_HANDLES.values()):
             try:

@@ -255,6 +255,39 @@ def _normalize_imported_chart_totals(
     return True
 
 
+def _recompute_chart_day_start(rows: list[dict[str, Any]]) -> None:
+    """
+    Единая семантика d_day: первая точка календарного дня = d_prev, далее от базы суток.
+    Выравнивает локаль / сервер после импорта CSV.
+    """
+    if not rows:
+        return
+    rows.sort(key=lambda r: r["measured_at"])
+    by_date: dict[date, list[dict[str, Any]]] = {}
+    for row in rows:
+        ld = row.get("local_date")
+        measured = row.get("measured_at")
+        if ld is None and measured is not None:
+            ld = timezone.localtime(measured).date()
+            row["local_date"] = ld
+        if ld is None:
+            continue
+        by_date.setdefault(ld, []).append(row)
+
+    for day_rows in by_date.values():
+        day_rows.sort(key=lambda r: r["measured_at"])
+        baseline: int | None = None
+        for i, row in enumerate(day_rows):
+            total = int(row.get("view_count_total") or 0)
+            d_prev = max(0, int(row.get("view_delta_from_prev_point") or 0))
+            if i == 0:
+                row["view_delta_from_day_start"] = d_prev
+                baseline = total - d_prev
+            else:
+                assert baseline is not None
+                row["view_delta_from_day_start"] = max(0, total - baseline)
+
+
 def _parse_platform_deltas(cell: str) -> dict[str, int]:
     cell = (cell or "").strip()
     if not cell:
@@ -1115,6 +1148,7 @@ def import_snapshot_csv(uploaded_file) -> dict[str, Any]:
                     result["auto_refresh_chart_totals_rebuilt"] = _normalize_imported_chart_totals(
                         parsed_rows,
                     )
+                    _recompute_chart_day_start(parsed_rows)
                     with transaction.atomic():
                         AutoRefreshPoint.objects.all().delete()
                         for row in parsed_rows:

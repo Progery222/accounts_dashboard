@@ -532,6 +532,21 @@ def kill_worker_process_pids(pids: list[int]) -> int:
     return killed
 
 
+def release_chromium_profile_lock(profile_dir: Path | str) -> None:
+    """Снять SingletonLock и зависший Chrome перед launch_persistent_context."""
+    base = Path(profile_dir)
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        p = base / name
+        try:
+            if p.exists() or p.is_symlink():
+                p.unlink()
+                print(f"[worker_utils] removed profile lock: {name}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[worker_utils] could not remove {name}: {exc}", file=sys.stderr)
+    kill_chrome_processes_for_profile(base)
+    cleanup_chrome_artifacts(base)
+
+
 def cleanup_chrome_artifacts(profile_dir: Path) -> None:
     """
     Remove stale .CHROME_DELETE / Snapshots artefacts that prevent Chrome from
@@ -903,6 +918,7 @@ async def launch_context(
         # демона (в отличие от временного user-data-dir у chromium.launch).
         launch_dir = base / "facebook_from_state"
         launch_dir.mkdir(parents=True, exist_ok=True)
+        release_chromium_profile_lock(launch_dir)
         print(
             f"[{platform}_worker] loading state from {sf.name} → {launch_dir.name}/",
             file=sys.stderr,

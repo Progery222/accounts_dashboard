@@ -232,6 +232,33 @@ class SnapshotIoRoundTripTests(TestCase):
         window_start = timezone.now() - timedelta(hours=24)
         self.assertGreaterEqual(pts[0].measured_at, window_start - timedelta(seconds=5))
 
+    def test_import_recomputes_day_start_per_calendar_day(self):
+        t0 = timezone.now().replace(hour=6, minute=0, second=0, microsecond=0)
+        t1 = t0 + timedelta(hours=1)
+        AutoRefreshPoint.objects.all().delete()
+        for i, (ts, d_prev, total) in enumerate(
+            [
+                (t0, 1000, 50_000),
+                (t1, 3000, 53_000),
+            ],
+        ):
+            AutoRefreshPoint.objects.create(
+                measured_at=ts,
+                local_date=timezone.localtime(ts).date(),
+                source="scheduler",
+                view_count_total=total,
+                view_delta_from_prev_point=d_prev,
+                view_delta_from_day_start=0,
+                platform_deltas={"tiktok": d_prev},
+            )
+        csv_bytes = build_snapshot_csv()
+        AutoRefreshPoint.objects.all().delete()
+        summary = import_snapshot_csv(BytesIO(csv_bytes))
+        self.assertEqual(summary["errors"], [])
+        pts = list(AutoRefreshPoint.objects.order_by("measured_at"))
+        self.assertEqual(pts[0].view_delta_from_day_start, 1000)
+        self.assertEqual(pts[1].view_delta_from_day_start, 4000)
+
     def test_import_rebuilds_flat_chart_totals(self):
         t0 = timezone.now() - timedelta(hours=3)
         for i in range(4):

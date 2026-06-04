@@ -30,6 +30,16 @@ class ParallelAccountQueueTests(SimpleTestCase):
         i4 = q.claim(get_platform)
         self.assertEqual(i4, 1 if i3 == 2 else 2)
 
+    def test_platform_filter_excludes_platform(self):
+        q = ParallelAccountQueue(3, {"facebook": 1, "tiktok": 1})
+        platforms = ["facebook", "tiktok", "tiktok"]
+        idx = q.claim(
+            lambda i: platforms[i],
+            platform_filter=lambda p: p != "facebook",
+            wait=False,
+        )
+        self.assertEqual(idx, 1)
+
     def test_cooldown_skips_platform_until_ready(self):
         q = ParallelAccountQueue(2, {"x": 1})
         q.set_platform_cooldown("x", 60.0)

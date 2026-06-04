@@ -9,6 +9,8 @@ from accounts.auto_refresh_pulse import (
     enter_refresh_pulse_batch,
     exit_refresh_pulse_batch,
     record_account_refresh_platform_delta,
+    record_hourly_pulse_snapshot,
+    record_interval_pulse_snapshot,
 )
 from accounts.models import Account, AccountSnapshot, AutoRefreshPoint, Platform
 
@@ -48,6 +50,36 @@ class AutoRefreshPulseTests(APITestCase):
         self.assertEqual(pt.platform_deltas.get("facebook"), 16)
         self.assertEqual(pt.source, "scheduler")
 
+    def test_first_point_of_day_day_start_equals_prev_delta(self):
+        AutoRefreshPoint.objects.all().delete()
+        Account.objects.create(platform=Platform.TIKTOK, username="day0", view_count=10_000)
+        create_auto_refresh_point_from_report_rows(
+            [{"platform": "tiktok", "view_before": 9900, "view_after": 10_009}],
+            source="scheduler",
+        )
+        pt = AutoRefreshPoint.objects.get()
+        self.assertGreater(pt.view_delta_from_prev_point, 0)
+        self.assertEqual(pt.view_delta_from_day_start, pt.view_delta_from_prev_point)
+
+    def test_second_point_day_start_cumulative(self):
+        AutoRefreshPoint.objects.all().delete()
+        Account.objects.create(platform=Platform.TIKTOK, username="day1", view_count=10_000)
+        create_auto_refresh_point_from_report_rows(
+            [{"platform": "tiktok", "view_before": 9900, "view_after": 10_009}],
+            source="scheduler",
+        )
+        first = AutoRefreshPoint.objects.get()
+        first_day = int(first.view_delta_from_day_start)
+        Account.objects.filter(username="day1").update(view_count=13_000)
+        create_auto_refresh_point_from_report_rows(
+            [{"platform": "tiktok", "view_before": 10_000, "view_after": 13_000}],
+            source="scheduler",
+        )
+        pts = list(AutoRefreshPoint.objects.order_by("measured_at"))
+        self.assertEqual(len(pts), 2)
+        self.assertGreaterEqual(pts[1].view_delta_from_day_start, pts[0].view_delta_from_day_start)
+        self.assertGreater(pts[1].view_delta_from_day_start, first_day)
+
     def test_merge_incremental_within_window(self):
         AutoRefreshPoint.objects.all().delete()
         now = timezone.now()
@@ -65,6 +97,42 @@ class AutoRefreshPulseTests(APITestCase):
         self.assertEqual(AutoRefreshPoint.objects.count(), 1)
         pt = AutoRefreshPoint.objects.get()
         self.assertEqual(pt.platform_deltas.get("tiktok"), 9)
+
+
+    def test_interval_snapshot_records_30min_delta(self):
+        AutoRefreshPoint.objects.all().delete()
+        Account.objects.create(platform=Platform.TIKTOK, username="interval_tt", view_count=1000)
+        t0 = timezone.now().replace(minute=5, second=0, microsecond=0)
+        record_interval_pulse_snapshot(finished=t0)
+        self.assertEqual(AutoRefreshPoint.objects.count(), 1)
+        pt0 = AutoRefreshPoint.objects.get()
+        self.assertEqual(pt0.source, "interval")
+        self.assertEqual(pt0.slot_label, timezone.localtime(t0).strftime("%H:00"))
+        self.assertEqual(pt0.view_delta_from_prev_point, 0)
+
+        Account.objects.filter(username="interval_tt").update(view_count=1150)
+        t1 = t0 + timedelta(minutes=30)
+        record_interval_pulse_snapshot(finished=t1)
+        pts = list(AutoRefreshPoint.objects.order_by("measured_at"))
+        self.assertEqual(len(pts), 2)
+        self.assertEqual(pts[1].view_delta_from_prev_point, 150)
+
+    def test_interval_snapshot_idempotent_within_slot(self):
+        AutoRefreshPoint.objects.all().delete()
+        Account.objects.create(platform=Platform.TIKTOK, username="interval_idem", view_count=500)
+        t = timezone.now().replace(minute=10, second=0, microsecond=0)
+        record_interval_pulse_snapshot(finished=t)
+        Account.objects.filter(username="interval_idem").update(view_count=520)
+        record_interval_pulse_snapshot(finished=t + timedelta(minutes=12))
+        self.assertEqual(AutoRefreshPoint.objects.filter(source="interval").count(), 1)
+        pt = AutoRefreshPoint.objects.get(source="interval")
+        self.assertEqual(pt.view_delta_from_prev_point, 20)
+
+    def test_hourly_alias_calls_interval(self):
+        AutoRefreshPoint.objects.all().delete()
+        Account.objects.create(platform=Platform.TIKTOK, username="alias_tt", view_count=100)
+        record_hourly_pulse_snapshot()
+        self.assertEqual(AutoRefreshPoint.objects.get().source, "interval")
 
 
 class SummaryPlatformViewDeltaTests(APITestCase):

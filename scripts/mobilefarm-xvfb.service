@@ -1,0 +1,17 @@
+# Виртуальный дисплей для Playwright в Docker (без RDP).
+# Установка (на сервере, один раз):
+#   sudo cp ~/dashboard/scripts/mobilefarm-xvfb.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mobilefarm-xvfb
+[Unit]
+Description=Mobile Farm Xvfb :99 for dashboard Playwright
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

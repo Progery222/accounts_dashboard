@@ -53,6 +53,7 @@ class ParallelAccountQueue:
         *,
         stop_event: threading.Event | None = None,
         wait: bool = True,
+        platform_filter: Callable[[str], bool] | None = None,
     ) -> int | None:
         """Возвращает индекс аккаунта или None, если все обработаны / остановка."""
         while True:
@@ -75,6 +76,8 @@ class ParallelAccountQueue:
                     if idx in self._completed or idx in self._claimed:
                         continue
                     platform = str(get_platform(idx))
+                    if platform_filter is not None and not platform_filter(platform):
+                        continue
                     if self._cooldown_until.get(platform, 0.0) > now:
                         continue
                     sem = self._sem(platform)
@@ -86,6 +89,14 @@ class ParallelAccountQueue:
                 if not wait:
                     return None
                 self._cond.wait(timeout=0.2)
+
+    def mark_done_without_processing(self, idx: int) -> None:
+        """Убрать индекс из очереди без съёма (пропуск «недавно обновлён» в начале прогона)."""
+        i = int(idx)
+        with self._cond:
+            self._claimed.discard(i)
+            self._completed.add(i)
+            self._cond.notify_all()
 
     def finish(self, idx: int, platform: str) -> None:
         p = str(platform)

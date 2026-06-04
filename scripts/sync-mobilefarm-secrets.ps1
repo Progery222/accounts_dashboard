@@ -128,7 +128,7 @@ if (-not $SkipBrowserProfile) {
 
 Write-Step "Restart backend"
 if (-not $DryRun) {
-    $restart = "cd $RemoteRoot; if groups | grep -qw docker; then docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d backend; else sudo docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d backend; fi"
+    $restart = "cd $RemoteRoot; if groups | grep -qw docker; then docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --force-recreate backend; else sudo docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --force-recreate backend; fi"
     Invoke-Expression "$ssh `"$restart`""
     Start-Sleep -Seconds 6
     $copySessions = @()

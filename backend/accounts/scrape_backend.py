@@ -100,7 +100,25 @@ def refresh_account_via_apify_sync(
     """
     Синхронный Apify refresh для batch / автообновления:
     один job на аккаунт, все стадии подряд, запись в БД до возврата.
-  """
+    """
+    from accounts.facebook_refresh_lane import run_facebook_serialized
+
+    def _run() -> Account:
+        return _refresh_account_via_apify_sync_impl(
+            account,
+            trigger=trigger,
+            parent_batch_id=parent_batch_id,
+        )
+
+    return run_facebook_serialized(_run, platform=account.platform)
+
+
+def _refresh_account_via_apify_sync_impl(
+    account: Account,
+    *,
+    trigger: str,
+    parent_batch_id: uuid.UUID,
+) -> Account:
     from django.utils import timezone
 
     from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus

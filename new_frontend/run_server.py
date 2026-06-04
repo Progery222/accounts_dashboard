@@ -33,6 +33,13 @@ SPA_PATHS = frozenset({
     "/accounts",
 })
 
+FAVICON_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    b'<circle cx="16" cy="16" r="14" fill="#050608" stroke="#6aa9ff" stroke-width="2"/>'
+    b'<circle cx="16" cy="16" r="4" fill="#6aa9ff"/>'
+    b"</svg>"
+)
+
 
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
@@ -76,10 +83,19 @@ class AtomicHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         last = clean.rsplit("/", 1)[-1]
         return bool(last) and "." not in last
 
+    def _send_favicon(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml")
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(FAVICON_SVG)
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         fs_path = self._strip_deploy_prefix(parsed.path)
         clean = fs_path.rstrip("/") or "/"
+        if clean in ("/favicon.ico", "/favicon.svg"):
+            return self._send_favicon()
         qs = f"?{parsed.query}" if parsed.query else ""
         if self._local_file(fs_path) is None and clean.startswith("/api"):
             self.path = fs_path + qs

@@ -131,6 +131,13 @@ def force_stop_auto_refresh(*, reason: str = "Остановлено польз�
 
     from .models import AutoRefreshState, RefreshAllState
 
+    try:
+        from platforms.worker_pool import mark_playwright_refresh_force_stop
+
+        mark_playwright_refresh_force_stop()
+    except Exception:
+        pass
+
     now = timezone.now()
     msg = (reason or "")[:500]
 
@@ -188,6 +195,12 @@ def should_clear_stale_refresh_on_startup() -> bool:
 
 def clear_orphan_cancel_flags() -> None:
     """После force_stop поток мог умереть, оставив cancel_requested=True при is_running=False."""
+    try:
+        from platforms.worker_pool import clear_playwright_refresh_force_stop
+
+        clear_playwright_refresh_force_stop()
+    except Exception:
+        pass
     from .models import AutoRefreshState, RefreshAllState
 
     for model in (AutoRefreshState, RefreshAllState):

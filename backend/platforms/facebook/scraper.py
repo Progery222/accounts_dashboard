@@ -125,5 +125,11 @@ def _run_worker(worker_path: Path, payload: dict, platform_name: str) -> dict:
 
 def fetch_facebook_profile(username: str) -> dict:
     """Данные страницы/профиля Facebook: username, vanity-URL или profile.php?id=…"""
+    from accounts.facebook_refresh_lane import run_facebook_serialized
+
     username = username.lstrip("@")
-    return _run_worker(_WORKER, {"username": username}, f"Facebook @{username}")
+
+    def _fetch() -> dict:
+        return _run_worker(_WORKER, {"username": username}, f"Facebook @{username}")
+
+    return run_facebook_serialized(_fetch, platform="facebook")

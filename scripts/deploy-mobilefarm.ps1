@@ -162,8 +162,20 @@ cd ${RemoteRoot} && if [ ! -f .env ]; then python3 write_mobilefarm_env.py; else
         }
         Write-Step "docker compose up -d --build $services"
         # atom часто ещё не в группе docker после apt install (нужен re-login).
+        $gitCommit = ""
+        $gitDate = ""
+        try {
+            Push-Location $repoRoot
+            $gitCommit = (git rev-parse HEAD 2>$null).Trim()
+            $gitDate = (git log -1 --format="%ci" 2>$null).Trim()
+        }
+        finally {
+            Pop-Location
+        }
+        if (-not $gitCommit) { $gitCommit = "unknown" }
+        if (-not $gitDate) { $gitDate = "unknown" }
         $composeCmd = @"
-cd $RemoteRoot && if groups | grep -qw docker; then
+cd $RemoteRoot && export GIT_COMMIT='$gitCommit' GIT_COMMIT_DATE='$gitDate' && if groups | grep -qw docker; then
   docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --build $services
 else
   sudo docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --build $services
@@ -183,8 +195,9 @@ fi
         Invoke-DeployCommand "$sshBase `"curl -sf http://127.0.0.1:9080/healthz/`""
         Write-Host ""
         Write-Host "Deploy OK: http://${SshHost}:9080/" -ForegroundColor Green
-        Write-Host "На сервере (RDP-терминал): bash ~/dashboard/enable-mobilefarm-headed-browser.sh" -ForegroundColor DarkGray
-        Write-Host "  (то же: ~/dashboard/scripts/enable-mobilefarm-headed-browser.sh)" -ForegroundColor DarkGray
+        Write-Host "На сервере (SSH): bash ~/dashboard/scripts/enable-mobilefarm-xvfb.sh" -ForegroundColor DarkGray
+        Write-Host "Окна на RDP: ~/dashboard/scripts/enable-mobilefarm-headed-browser.sh" -ForegroundColor DarkGray
+        Write-Host "Логи на сервере: bash ~/dashboard/scripts/setup-mobilefarm-log-retention.sh" -ForegroundColor DarkGray
         Write-Host "Секреты/cookies с Windows: .\scripts\sync-mobilefarm-secrets.ps1" -ForegroundColor DarkGray
     }
     elseif ($DryRun) {

@@ -11,6 +11,12 @@ def interrupt_refresh_playwright_workers(*, label: str = "refresh_stop") -> None
     не висел до таймаута (Instagram 180 с, TikTok navigation и т.д.).
     """
     try:
+        from platforms.worker_pool import mark_playwright_refresh_force_stop
+
+        mark_playwright_refresh_force_stop()
+    except Exception:
+        pass
+    try:
         from .refresh_all_warm import stop_facebook_parallel_warm
 
         stop_facebook_parallel_warm(label=label, progress_path=None)

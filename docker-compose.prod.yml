@@ -40,8 +40,17 @@ services:
     restart: unless-stopped
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        GIT_COMMIT: "${GIT_COMMIT:-unknown}"
+        GIT_COMMIT_DATE: "${GIT_COMMIT_DATE:-unknown}"
     container_name: dashboard-backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "10"
     env_file:
       - .env
     environment:
@@ -57,10 +66,15 @@ services:
       RUN_SCHEDULER: "true"
       BROWSER_PROFILE_DIR: /app/.browser-profile
       PORT: "8000"
+      DASHBOARD_LOG_DIR: /app/var/log
+      DASHBOARD_FILE_LOG: "${DASHBOARD_FILE_LOG:-1}"
+      DASHBOARD_LOG_RETENTION_DAYS: "${DASHBOARD_LOG_RETENTION_DAYS:-7}"
+      GIT_COMMIT: "${GIT_COMMIT:-unknown}"
     expose:
       - "8000"
     volumes:
       - browser_profile:/app/.browser-profile
+      - ./var/log/dashboard:/app/var/log
     depends_on:
       postgres:
         condition: service_healthy

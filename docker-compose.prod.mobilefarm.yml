@@ -1,8 +1,8 @@
-# Mobile Farm GPU: Atomic UI (new_frontend) + видимые окна Playwright (как локальная Windows).
+# Mobile Farm GPU: Atomic UI (new_frontend) + Playwright (headed на X11).
 # Запуск: docker compose -f docker-compose.prod.yml -f docker-compose.prod.mobilefarm.yml up -d --build
 #
-# Перед первым headed-запуском из RDP-сессии на сервере:
-#   ./scripts/enable-mobilefarm-headed-browser.sh
+# По умолчанию (без RDP): ./scripts/enable-mobilefarm-xvfb.sh  → DISPLAY :99, systemd Xvfb
+# Окна на монитор RDP:     ./scripts/enable-mobilefarm-headed-browser.sh  (из RDP-терминала)
 #
 # Секреты: scripts/sync-mobilefarm-secrets.ps1
 
@@ -13,15 +13,31 @@ services:
       dockerfile: deploy/nginx-atomic/Dockerfile
 
   backend:
+    build:
+      context: ./backend
+      args:
+        GIT_COMMIT: "${GIT_COMMIT:-unknown}"
+        GIT_COMMIT_DATE: "${GIT_COMMIT_DATE:-unknown}"
     ipc: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "14"
     environment:
       BROWSER_HEADLESS: "${BROWSER_HEADLESS:-false}"
-      DISPLAY: "${MOBILEFARM_DISPLAY:-:0}"
+      TIKTOK_FORCE_WORKER: "${TIKTOK_FORCE_WORKER:-true}"
+      DISPLAY: "${MOBILEFARM_DISPLAY:-:99}"
+      DASHBOARD_LOG_DIR: /app/var/log
+      DASHBOARD_FILE_LOG: "${DASHBOARD_FILE_LOG:-1}"
+      DASHBOARD_LOG_RETENTION_DAYS: "${DASHBOARD_LOG_RETENTION_DAYS:-7}"
+      GIT_COMMIT: "${GIT_COMMIT:-unknown}"
       # Путь внутри контейнера (volume ниже); на хосте — XAUTHORITY из RDP-сессии.
       XAUTHORITY: /root/.Xauthority
     volumes:
       - browser_profile:/app/.browser-profile
       - ./backend/media:/app/media
+      - ./var/log/dashboard:/app/var/log
       - ./backend/config/worker_accounts.env:/app/config/worker_accounts.env:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-/home/atom/.Xauthority}:/root/.Xauthority:ro

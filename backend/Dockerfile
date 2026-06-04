@@ -23,6 +23,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# Версия образа для диагностики (деплой передаёт --build-arg из git).
+ARG GIT_COMMIT=unknown
+ARG GIT_COMMIT_DATE=unknown
+ENV GIT_COMMIT=${GIT_COMMIT} \
+    GIT_COMMIT_DATE=${GIT_COMMIT_DATE}
+RUN printf '%s %s\n' "$GIT_COMMIT" "$GIT_COMMIT_DATE" > /app/BUILD_COMMIT.txt
+
 COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && pip install -r requirements.txt

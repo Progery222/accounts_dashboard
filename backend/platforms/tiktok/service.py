@@ -421,6 +421,18 @@ def _tiktok_worker_timeout_sec() -> float:
         return 600.0
 
 
+def _tiktok_force_worker() -> bool:
+    """TIKTOK_FORCE_WORKER=true — всегда вызывать Playwright при refresh (видимое окно на RDP)."""
+    try:
+        from django.conf import settings as _s
+
+        return bool(getattr(_s, "TIKTOK_FORCE_WORKER", False))
+    except Exception:
+        pass
+    raw = (os.environ.get("TIKTOK_FORCE_WORKER") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "y"}
+
+
 def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], dict]:
     # Read browser settings from Django settings so the subprocess
     # always gets the correct values even if os.environ wasn't updated.
@@ -587,6 +599,13 @@ def fetch_tiktok_profile(username: str) -> dict:
             and (video_count_stat == 0 or video_count_stat <= _FIRST_PAGE_CAP)
         )
     )
+    if _tiktok_force_worker():
+        if not need_posts_worker:
+            print(
+                f"[tiktok] TIKTOK_FORCE_WORKER: forcing Playwright worker for @{username}",
+                file=sys.stderr,
+            )
+        need_posts_worker = True
 
     worker_avatar = ""
     if need_posts_worker:

@@ -820,6 +820,19 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
             from platforms.apify.batch_guard import enter_sync_apify_batch, leave_sync_apify_batch
 
             enter_sync_apify_batch(apify_batch_id)
+            from .facebook_refresh_lane import (
+                begin_facebook_batch,
+                end_facebook_batch,
+                batch_has_facebook,
+                platform_claim_filter,
+                submit_refresh_workers,
+                try_mark_facebook_account_started,
+                allocate_worker_slot,
+                ensure_facebook_playwright_daemon_ready,
+            )
+
+            has_fb_accounts = batch_has_facebook(accounts)
+            begin_facebook_batch()
             try:
                 has_facebook = facebook_playwright_warm_needed(accounts)
                 fb_batch_guard = None
@@ -835,6 +848,14 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
 
                 platform_limits = _refresh_platform_limits(accounts)
                 account_queue = ParallelAccountQueue(len(accounts), platform_limits)
+                from .refresh_skip_recent import apply_upfront_skip_recent
+
+                apply_upfront_skip_recent(
+                    accounts,
+                    cutoff=cutoff,
+                    skip_recent_hours=skip_recent_hours,
+                    account_queue=account_queue,
+                )
                 worker_count = _parallel_refresh_worker_count(accounts)
 
                 with state_lock:
@@ -846,13 +867,14 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
 
                 thread_slot_map: dict[int, int] = {}
                 thread_slot_lock = threading.Lock()
+                _fb_daemon_prepared = threading.Event()
 
-                def _worker_slot() -> int:
-                    tid = threading.get_ident()
-                    with thread_slot_lock:
-                        if tid not in thread_slot_map:
-                            thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
-                        return thread_slot_map[tid]
+                def _worker_slot(*, facebook_lane: bool) -> int:
+                    return allocate_worker_slot(
+                        facebook_lane=facebook_lane,
+                        thread_slot_map=thread_slot_map,
+                        thread_slot_lock=thread_slot_lock,
+                    )
 
                 def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
                     _keep_bulk_refresh_running(state)
@@ -868,7 +890,17 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             "last_error", "updated_at",
                         ])
 
-                def _worker() -> None:
+                def _worker(facebook_lane: bool) -> None:
+                    if facebook_lane and not _fb_daemon_prepared.is_set():
+                        try:
+                            ensure_facebook_playwright_daemon_ready()
+                        except Exception as exc:
+                            print(
+                                f"[bulk_refresh] Facebook daemon: {exc}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                        _fb_daemon_prepared.set()
                     while True:
                         if stop_requested.is_set():
                             return
@@ -883,6 +915,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         idx = account_queue.claim(
                             lambda i: accounts[i].platform,
                             stop_event=stop_requested,
+                            platform_filter=platform_claim_filter(facebook_lane=facebook_lane),
                         )
                         if idx is None:
                             return
@@ -890,6 +923,13 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         close_old_connections()
                         _keep_bulk_refresh_running(state)
                         account = accounts[idx]
+                        if (
+                            facebook_lane
+                            and account.platform == Platform.FACEBOOK
+                            and not try_mark_facebook_account_started(account.id)
+                        ):
+                            account_queue.abandon(idx, account.platform)
+                            continue
                         from .warm_run_detail import is_refresh_cancel_requested
 
                         if is_refresh_cancel_requested():
@@ -906,7 +946,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             if stop_requested.is_set():
                                 return
 
-                            slot = _worker_slot()
+                            slot = _worker_slot(facebook_lane=facebook_lane)
                             with state_lock:
                                 state.current_account = f"{account.platform}/@{account.username}"
                                 state.save(update_fields=["current_account", "updated_at"])
@@ -1090,7 +1130,12 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 account_queue.finish(idx, account.platform)
 
                 with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                    futures = [executor.submit(_worker) for _ in range(worker_count)]
+                    futures = submit_refresh_workers(
+                        executor,
+                        _worker,
+                        worker_count=worker_count,
+                        has_facebook=has_fb_accounts,
+                    )
                     for f in futures:
                         f.result()
 
@@ -1116,6 +1161,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         state.last_error = ""
                         state.save(update_fields=["last_error", "updated_at"])
             finally:
+                end_facebook_batch()
                 leave_sync_apify_batch()
     finally:
         if warm_tracker is not None:
@@ -1138,16 +1184,9 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
 
 
 def _schedule_skip_recent_cutoff() -> tuple[int, datetime.datetime | None]:
-    """(часы из расписания, cutoff updated_at) или (0, None) если пропуск выключен."""
-    cfg = RefreshScheduleConfig.get()
-    try:
-        cfg.refresh_from_db(fields=["skip_recent_hours"])
-    except Exception:
-        pass
-    hours = max(0, int(getattr(cfg, "skip_recent_hours", 0) or 0))
-    if hours <= 0:
-        return 0, None
-    return hours, timezone.now() - datetime.timedelta(hours=hours)
+    from .refresh_skip_recent import schedule_skip_recent_cutoff
+
+    return schedule_skip_recent_cutoff()
 
 
 def _persist_auto_refresh_run_item(account_id: int, **kwargs) -> None:
@@ -1441,20 +1480,17 @@ def _run_refresh_all_background(
         worker_count = _parallel_refresh_worker_count(accounts)
         _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
-        run_items = [
-            {
-                "account_id": a.id,
-                "platform": a.platform,
-                "username": a.username,
-                "status": "queued",
-                "worker": None,
-                "detail": "",
-            }
-            for a in accounts
-        ]
+        skip_recent_hours, skip_cutoff = _schedule_skip_recent_cutoff()
+        from .refresh_skip_recent import build_initial_run_detail_items
+
+        run_items, skip_initial = build_initial_run_detail_items(
+            accounts,
+            skip_recent_hours=skip_recent_hours,
+            cutoff=skip_cutoff,
+        )
         state.total_accounts = len(accounts)
-        state.processed_accounts = 0
-        state.success_accounts = 0
+        state.processed_accounts = skip_initial
+        state.success_accounts = skip_initial
         state.failed_accounts = 0
         state.run_detail = {
             "items": run_items,
@@ -1484,6 +1520,21 @@ def _run_refresh_all_background(
         from platforms.apify.batch_guard import enter_sync_apify_batch, leave_sync_apify_batch
 
         enter_sync_apify_batch(apify_batch_id)
+        from .facebook_refresh_lane import (
+            begin_facebook_batch,
+            end_facebook_batch,
+            batch_has_facebook,
+            platform_claim_filter,
+            submit_refresh_workers,
+            try_mark_facebook_account_started,
+            allocate_worker_slot,
+            ensure_facebook_playwright_daemon_ready,
+            facebook_serial_lock,
+            filter_accounts_for_playwright_prewarm,
+        )
+
+        has_fb_accounts = batch_has_facebook(accounts)
+        begin_facebook_batch()
 
         skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
 
@@ -1516,7 +1567,9 @@ def _run_refresh_all_background(
 
             from django.conf import settings as dj_settings
 
-            pw_accounts = accounts_needing_playwright(accounts)
+            pw_accounts = filter_accounts_for_playwright_prewarm(
+                accounts_needing_playwright(accounts),
+            )
             if pw_accounts and bool(
                 getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
             ):
@@ -1527,6 +1580,7 @@ def _run_refresh_all_background(
 
             report_lock = threading.Lock()
             stop_requested = threading.Event()
+            _fb_daemon_prepared = threading.Event()
 
             warm_tracker = RefreshAllWarmTracker(accounts, label="refresh_all")
             if _refresh_all_cancel_requested():
@@ -1534,18 +1588,36 @@ def _run_refresh_all_background(
             report_by_index: list[dict | None] = [None] * len(accounts)
             platform_limits = _refresh_platform_limits(accounts)
             account_queue = ParallelAccountQueue(len(accounts), platform_limits)
+            from .refresh_skip_recent import apply_upfront_skip_recent
+
+            apply_upfront_skip_recent(
+                accounts,
+                cutoff=cutoff,
+                skip_recent_hours=skip_recent_hours,
+                account_queue=account_queue,
+            )
 
             thread_slot_map: dict[int, int] = {}
             thread_slot_lock = threading.Lock()
 
-            def _worker_slot() -> int:
-                tid = threading.get_ident()
-                with thread_slot_lock:
-                    if tid not in thread_slot_map:
-                        thread_slot_map[tid] = len(thread_slot_map) % max(1, worker_count)
-                    return thread_slot_map[tid]
+            def _worker_slot(*, facebook_lane: bool) -> int:
+                return allocate_worker_slot(
+                    facebook_lane=facebook_lane,
+                    thread_slot_map=thread_slot_map,
+                    thread_slot_lock=thread_slot_lock,
+                )
 
-            def _worker() -> None:
+            def _worker(facebook_lane: bool) -> None:
+                if facebook_lane and not _fb_daemon_prepared.is_set():
+                    try:
+                        ensure_facebook_playwright_daemon_ready()
+                    except Exception as exc:
+                        print(
+                            f"[refresh_all] Facebook daemon: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    _fb_daemon_prepared.set()
                 while True:
                     if stop_requested.is_set():
                         return
@@ -1556,11 +1628,19 @@ def _run_refresh_all_background(
                     idx = account_queue.claim(
                         lambda i: accounts[i].platform,
                         stop_event=stop_requested,
+                        platform_filter=platform_claim_filter(facebook_lane=facebook_lane),
                     )
                     if idx is None:
                         return
                     close_old_connections()
                     account = accounts[idx]
+                    if (
+                        facebook_lane
+                        and account.platform == Platform.FACEBOOK
+                        and not try_mark_facebook_account_started(account.id)
+                    ):
+                        account_queue.abandon(idx, account.platform)
+                        continue
                     from .warm_run_detail import is_refresh_cancel_requested
 
                     if is_refresh_cancel_requested():
@@ -1588,7 +1668,7 @@ def _run_refresh_all_background(
                             stop_requested.set()
                             return
 
-                        slot = _worker_slot()
+                        slot = _worker_slot(facebook_lane=facebook_lane)
                         RefreshAllState.objects.filter(pk=1).update(
                             current_account=f"{account.platform}/@{account.username}",
                             updated_at=timezone.now(),
@@ -1792,7 +1872,11 @@ def _run_refresh_all_background(
                                 attempted_network = True
                                 refresh_baseline = _account_refresh_baseline(account)
                                 with _account_refresh_mutex(account.id):
-                                    _refresh_with_retry(account, scraped=scraped)
+                                    if account.platform == Platform.FACEBOOK:
+                                        with facebook_serial_lock():
+                                            _refresh_with_retry(account, scraped=scraped)
+                                    else:
+                                        _refresh_with_retry(account, scraped=scraped)
                                 if is_refresh_cancel_requested():
                                     _restore_account_refresh_baseline(account.pk, refresh_baseline)
                                     row = {
@@ -1941,7 +2025,12 @@ def _run_refresh_all_background(
             run_wall_start = timezone.now()
             run_mono_start = time.monotonic()
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                futures = [executor.submit(_worker) for _ in range(worker_count)]
+                futures = submit_refresh_workers(
+                    executor,
+                    _worker,
+                    worker_count=worker_count,
+                    has_facebook=has_fb_accounts,
+                )
                 for f in futures:
                     f.result()
 
@@ -2013,6 +2102,12 @@ def _run_refresh_all_background(
             pass
     finally:
         try:
+            from .facebook_refresh_lane import end_facebook_batch
+
+            end_facebook_batch()
+        except Exception:
+            pass
+        try:
             from platforms.apify.batch_guard import leave_sync_apify_batch
 
             leave_sync_apify_batch()
@@ -2080,7 +2175,9 @@ def _apply_refresh(account: Account, scraped: dict | None = None) -> Account:
             from .refresh_cancel import raise_if_refresh_cancel_requested
 
             raise_if_refresh_cancel_requested()
-            payload = _scrape(acc)
+            from .facebook_refresh_lane import run_facebook_serialized
+
+            payload = run_facebook_serialized(lambda: _scrape(acc), platform=acc.platform)
         ensure_fresh_db_connections()
         data = dict(payload)
         snap_pk = snap.pk
@@ -2524,6 +2621,13 @@ class AccountViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_202_ACCEPTED,
             )
         with _account_refresh_mutex(account.id):
+            # После «Остановить автообновление» force_stop блокирует Playwright до сброса.
+            try:
+                from .refresh_state import clear_orphan_cancel_flags
+
+                clear_orphan_cancel_flags()
+            except Exception:
+                pass
             refreshed, detail, code = _refresh_account_for_api(account)
             if refreshed is not None:
                 return Response(AccountSerializer(refreshed, context=self.get_serializer_context()).data)
@@ -2568,23 +2672,20 @@ class AccountViewSet(viewsets.ModelViewSet):
                     {"detail": "Сейчас уже выполняется другое автообновление/обновление."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            run_items = [
-                {
-                    "account_id": a.id,
-                    "platform": a.platform,
-                    "username": a.username,
-                    "status": "queued",
-                    "worker": None,
-                    "detail": "",
-                }
-                for a in ordered
-            ]
+            skip_recent_hours, skip_cutoff = _schedule_skip_recent_cutoff()
+            from .refresh_skip_recent import build_initial_run_detail_items
+
+            run_items, skip_initial = build_initial_run_detail_items(
+                ordered,
+                skip_recent_hours=skip_recent_hours,
+                cutoff=skip_cutoff,
+            )
             state.is_running = True
             state.source = "bulk_refresh"
             state.cancel_requested = False
             state.total_accounts = len(ordered)
-            state.processed_accounts = 0
-            state.success_accounts = 0
+            state.processed_accounts = skip_initial
+            state.success_accounts = skip_initial
             state.failed_accounts = 0
             state.current_account = ""
             state.last_error = ""
