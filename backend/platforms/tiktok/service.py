@@ -471,6 +471,10 @@ def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], di
         # Propagate it so API can mark account.profile_unavailable in a uniform way.
         if is_profile_unavailable_error(str(e)):
             raise
+        from platforms.tiktok.captcha_batch import is_tiktok_captcha_stall_error
+
+        if is_tiktok_captcha_stall_error(e):
+            raise
         print(f"[worker] error: {e}", file=sys.stderr)
         return [], {}
 

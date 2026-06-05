@@ -756,7 +756,6 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             try_mark_facebook_account_started,
             filter_accounts_for_playwright_prewarm,
             allocate_worker_slot,
-            facebook_serial_lock,
         )
 
         has_fb_accounts = batch_has_facebook(accounts)
@@ -1225,11 +1224,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     detail="съём данных…",
                                 )
                                 try:
-                                    if account.platform == "facebook":
-                                        with facebook_serial_lock():
-                                            _refresh_with_retry(account, scraped=scraped)
-                                    else:
-                                        _refresh_with_retry(account, scraped=scraped)
+                                    _refresh_with_retry(account, scraped=scraped)
                                 except RefreshCancelledError:
                                     _restore_account_refresh_baseline(account.pk, refresh_baseline)
                                     raise
@@ -1309,45 +1304,115 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     if fb_batch_guard is not None:
                                         fb_batch_guard.trip(str(e))
                             batch_scrape.on_tiktok_playwright_error(account, e)
-                            _mark_profile_unavailable_if_applicable(account, e)
-                            detail = humanize_refresh_run_detail(e)
-                            logger.warning(
-                                "scheduled_refresh.account_failed",
-                                extra={
+                            apify_recovered = False
+                            if account.platform == "tiktok":
+                                from accounts.models import ApifyRefreshJobTrigger
+                                from accounts.tiktok_scrape_fallback import (
+                                    retry_tiktok_via_apify_after_captcha,
+                                )
+
+                                try:
+                                    apify_acc = retry_tiktok_via_apify_after_captcha(
+                                        account,
+                                        e,
+                                        batch_ctx=batch_scrape,
+                                        trigger=ApifyRefreshJobTrigger.SCHEDULER,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as apify_exc:
+                                    e = apify_exc
+                                else:
+                                    if apify_acc is not None:
+                                        account = apify_acc
+                                        ensure_fresh_db_connections()
+                                        account = _reload_account(idx)
+                                        after = (
+                                            int(account.follower_count or 0),
+                                            int(account.like_count or 0),
+                                            int(account.view_count or 0),
+                                            int(account.post_count or 0),
+                                        )
+                                        if before is None:
+                                            before = after
+                                        unchanged = before == after
+                                        report_by_index[idx] = {
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "profile_name": _profile_name(account),
+                                            "status": (
+                                                "успешно (данные без изменений)"
+                                                if unchanged
+                                                else "успешно"
+                                            ),
+                                            "follower_before": before[0],
+                                            "follower_after": after[0],
+                                            "like_before": before[1],
+                                            "like_after": after[1],
+                                            "view_before": before[2],
+                                            "view_after": after[2],
+                                            "post_before": before[3],
+                                            "post_after": after[3],
+                                            "elapsed_sec": round(
+                                                max(0.0, time.perf_counter() - row_started), 3
+                                            ),
+                                            "detail": batch_scrape.tiktok_fallback.fallback_detail_suffix()
+                                            if batch_scrape.tiktok_fallback is not None
+                                            else "",
+                                        }
+                                        _mark_progress(success=True, failed=False)
+                                        _persist_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail=report_by_index[idx]["detail"],
+                                        )
+                                        apify_recovered = True
+                            if not apify_recovered:
+                                _mark_profile_unavailable_if_applicable(account, e)
+                                detail = humanize_refresh_run_detail(e)
+                                logger.warning(
+                                    "scheduled_refresh.account_failed",
+                                    extra={
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "error": str(e)[:500],
+                                    },
+                                    exc_info=True,
+                                )
+                                ensure_fresh_db_connections()
+                                account = _reload_account(idx)
+                                if before is not None:
+                                    fb, lb, vb, pb = before
+                                else:
+                                    fb = int(account.follower_count or 0)
+                                    lb = int(account.like_count or 0)
+                                    vb = int(account.view_count or 0)
+                                    pb = int(account.post_count or 0)
+                                report_by_index[idx] = {
                                     "platform": account.platform,
                                     "username": account.username,
-                                    "error": str(e)[:500],
-                                },
-                                exc_info=True,
-                            )
-                            ensure_fresh_db_connections()
-                            account = _reload_account(idx)
-                            if before is not None:
-                                fb, lb, vb, pb = before
-                            else:
-                                fb = int(account.follower_count or 0)
-                                lb = int(account.like_count or 0)
-                                vb = int(account.view_count or 0)
-                                pb = int(account.post_count or 0)
-                            report_by_index[idx] = {
-                                "platform": account.platform,
-                                "username": account.username,
-                                "profile_name": _profile_name(account),
-                                "status": "ошибка",
-                                "follower_before": fb,
-                                "follower_after": fb,
-                                "like_before": lb,
-                                "like_after": lb,
-                                "view_before": vb,
-                                "view_after": vb,
-                                "post_before": pb,
-                                "post_after": pb,
-                                "elapsed_sec": round(max(0.0, time.perf_counter() - row_started), 3),
-                                "detail": detail,
-                            }
-                            _mark_progress(success=False, failed=True, last_error=str(e))
-                            _persist_run_item(account.id, status="error", worker=None, detail=detail)
-                            print(f"[scheduled_refresh] {account.platform}/@{account.username}: {e}")
+                                    "profile_name": _profile_name(account),
+                                    "status": "ошибка",
+                                    "follower_before": fb,
+                                    "follower_after": fb,
+                                    "like_before": lb,
+                                    "like_after": lb,
+                                    "view_before": vb,
+                                    "view_after": vb,
+                                    "post_before": pb,
+                                    "post_after": pb,
+                                    "elapsed_sec": round(
+                                        max(0.0, time.perf_counter() - row_started), 3
+                                    ),
+                                    "detail": detail,
+                                }
+                                _mark_progress(success=False, failed=True, last_error=str(e))
+                                _persist_run_item(
+                                    account.id, status="error", worker=None, detail=detail
+                                )
+                                print(
+                                    f"[scheduled_refresh] {account.platform}/@{account.username}: {e}"
+                                )
                         finally:
                             if attempted_network and not is_refresh_cancel_requested():
                                 delay_sec = (

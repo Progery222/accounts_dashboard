@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from typing import TYPE_CHECKING
 
 from accounts.models import Account, Platform, ScrapeBackendChoice, ScrapeBackendConfig
@@ -185,3 +186,35 @@ class BatchScrapeContext:
         return bool(
             self.tiktok_captcha_guard is not None and self.tiktok_captcha_guard.is_tripped()
         )
+
+
+def retry_tiktok_via_apify_after_captcha(
+    account: Account,
+    exc: BaseException,
+    *,
+    batch_ctx: BatchScrapeContext | None,
+    trigger: str,
+    parent_batch_id: uuid.UUID | None,
+) -> Account | None:
+    """
+    После таймаута капчи Playwright — повторить тот же TikTok через Apify,
+    если в batch включён fallback. Вызывать после on_tiktok_playwright_error.
+    """
+    if account.platform != Platform.TIKTOK or not is_tiktok_captcha_stall_error(exc):
+        return None
+    if batch_ctx is None or parent_batch_id is None:
+        return None
+    from accounts.scrape_backend import (
+        refresh_account_via_apify_sync,
+        should_use_apify_for_account,
+    )
+
+    if not should_use_apify_for_account(account, batch_ctx=batch_ctx):
+        return None
+
+    return refresh_account_via_apify_sync(
+        account,
+        trigger=trigger,
+        parent_batch_id=parent_batch_id,
+        batch_ctx=batch_ctx,
+    )

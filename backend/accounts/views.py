@@ -668,6 +668,31 @@ def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -
     except RefreshCancelledError:
         return None, "Остановлено пользователем", None
     except Exception as exc:
+        if account.platform == Platform.TIKTOK:
+            import uuid
+
+            from accounts.models import ApifyRefreshJobTrigger
+            from accounts.tiktok_scrape_fallback import (
+                BatchScrapeContext,
+                retry_tiktok_via_apify_after_captcha,
+            )
+            from platforms.tiktok.captcha_batch import is_tiktok_captcha_stall_error
+
+            if is_tiktok_captcha_stall_error(exc):
+                batch_ctx = BatchScrapeContext.for_accounts([account])
+                batch_ctx.on_tiktok_playwright_error(account, exc)
+                try:
+                    recovered = retry_tiktok_via_apify_after_captcha(
+                        account,
+                        exc,
+                        batch_ctx=batch_ctx,
+                        trigger=ApifyRefreshJobTrigger.MANUAL,
+                        parent_batch_id=uuid.uuid4(),
+                    )
+                    if recovered is not None:
+                        return recovered, None, None
+                except Exception as apify_exc:
+                    exc = apify_exc
         logger.warning(
             "refresh.account_failed",
             extra={
@@ -1087,18 +1112,48 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                     stop_requested.set()
                                 else:
                                     err_msg = str(detail or "")
+                                    captcha_exc = ValueError(err_msg)
                                     batch_scrape.on_tiktok_playwright_error(
                                         account,
-                                        ValueError(err_msg),
+                                        captcha_exc,
                                     )
-                                    _persist_auto_refresh_run_item(
-                                        account.id,
-                                        status="error",
-                                        worker=None,
-                                        detail=err_msg[:800],
-                                    )
-                                    _mark_progress(success=False, failed=True, last_error=err_msg)
-                                    errors_out.append({"id": account.id, "detail": detail})
+                                    apify_recovered = False
+                                    if account.platform == Platform.TIKTOK:
+                                        from accounts.tiktok_scrape_fallback import (
+                                            retry_tiktok_via_apify_after_captcha,
+                                        )
+
+                                        try:
+                                            apify_acc = retry_tiktok_via_apify_after_captcha(
+                                                account,
+                                                captcha_exc,
+                                                batch_ctx=batch_scrape,
+                                                trigger=ApifyRefreshJobTrigger.BULK,
+                                                parent_batch_id=apify_batch_id,
+                                            )
+                                        except Exception as apify_exc:
+                                            err_msg = str(apify_exc)
+                                        else:
+                                            if apify_acc is not None:
+                                                _persist_auto_refresh_run_item(
+                                                    account.id,
+                                                    status="done",
+                                                    worker=None,
+                                                    detail="",
+                                                )
+                                                _mark_progress(success=True, failed=False)
+                                                apify_recovered = True
+                                    if not apify_recovered:
+                                        _persist_auto_refresh_run_item(
+                                            account.id,
+                                            status="error",
+                                            worker=None,
+                                            detail=err_msg[:800],
+                                        )
+                                        _mark_progress(
+                                            success=False, failed=True, last_error=err_msg
+                                        )
+                                        errors_out.append({"id": account.id, "detail": detail})
                         except RefreshCancelledError:
                             if attempted_network:
                                 _restore_account_refresh_baseline(account.pk, refresh_baseline)
@@ -1561,7 +1616,6 @@ def _run_refresh_all_background(
             try_mark_facebook_account_started,
             allocate_worker_slot,
             ensure_facebook_playwright_daemon_ready,
-            facebook_serial_lock,
             filter_accounts_for_playwright_prewarm,
         )
 
@@ -1936,11 +1990,7 @@ def _run_refresh_all_background(
                                 attempted_network = True
                                 refresh_baseline = _account_refresh_baseline(account)
                                 with _account_refresh_mutex(account.id):
-                                    if account.platform == Platform.FACEBOOK:
-                                        with facebook_serial_lock():
-                                            _refresh_with_retry(account, scraped=scraped)
-                                    else:
-                                        _refresh_with_retry(account, scraped=scraped)
+                                    _refresh_with_retry(account, scraped=scraped)
                                 if is_refresh_cancel_requested():
                                     _restore_account_refresh_baseline(account.pk, refresh_baseline)
                                     row = {
@@ -2039,29 +2089,88 @@ def _run_refresh_all_background(
                                     if fb_batch_guard is not None:
                                         fb_batch_guard.trip(str(e))
                             batch_scrape.on_tiktok_playwright_error(account, e)
-                            detail, _ = _format_refresh_error(account, e)
-                            row = {
-                                "id": account.id,
-                                "platform": account.platform,
-                                "username": account.username,
-                                "status": "ошибка",
-                                "error": detail,
-                                "follower_count": before["follower_count"],
-                                "follower_delta": None,
-                                "like_count": before["like_count"],
-                                "like_delta": None,
-                                "view_count": before["view_count"],
-                                "view_delta": None,
-                                "post_count": before["post_count"],
-                                "post_delta": None,
-                            }
-                            _refresh_all_atomic_progress(failed=True, last_error=str(detail or ""))
-                            _persist_refresh_all_run_item(
-                                account.id,
-                                status="error",
-                                worker=None,
-                                detail=str(detail or "")[:800],
-                            )
+                            apify_recovered = False
+                            if account.platform == Platform.TIKTOK:
+                                from accounts.models import ApifyRefreshJobTrigger
+                                from accounts.tiktok_scrape_fallback import (
+                                    retry_tiktok_via_apify_after_captcha,
+                                )
+
+                                try:
+                                    apify_acc = retry_tiktok_via_apify_after_captcha(
+                                        account,
+                                        e,
+                                        batch_ctx=batch_scrape,
+                                        trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as apify_exc:
+                                    e = apify_exc
+                                else:
+                                    if apify_acc is not None:
+                                        account = apify_acc
+                                        account.refresh_from_db()
+                                        row = {
+                                            "id": account.id,
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "status": "успешно",
+                                            "error": "",
+                                            "follower_count": account.follower_count,
+                                            "follower_delta": (
+                                                int(account.follower_count or 0)
+                                                - before["follower_count"]
+                                            ),
+                                            "like_count": account.like_count,
+                                            "like_delta": (
+                                                int(account.like_count or 0)
+                                                - before["like_count"]
+                                            ),
+                                            "view_count": account.view_count,
+                                            "view_delta": (
+                                                int(account.view_count or 0)
+                                                - before["view_count"]
+                                            ),
+                                            "post_count": account.post_count,
+                                            "post_delta": (
+                                                int(account.post_count or 0)
+                                                - before["post_count"]
+                                            ),
+                                        }
+                                        _refresh_all_atomic_progress(failed=False)
+                                        _persist_refresh_all_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail="",
+                                        )
+                                        apify_recovered = True
+                            if not apify_recovered:
+                                detail, _ = _format_refresh_error(account, e)
+                                row = {
+                                    "id": account.id,
+                                    "platform": account.platform,
+                                    "username": account.username,
+                                    "status": "ошибка",
+                                    "error": detail,
+                                    "follower_count": before["follower_count"],
+                                    "follower_delta": None,
+                                    "like_count": before["like_count"],
+                                    "like_delta": None,
+                                    "view_count": before["view_count"],
+                                    "view_delta": None,
+                                    "post_count": before["post_count"],
+                                    "post_delta": None,
+                                }
+                                _refresh_all_atomic_progress(
+                                    failed=True, last_error=str(detail or "")
+                                )
+                                _persist_refresh_all_run_item(
+                                    account.id,
+                                    status="error",
+                                    worker=None,
+                                    detail=str(detail or "")[:800],
+                                )
                         acc_mono_end = time.monotonic()
                         acc_wall_end = timezone.now()
                         if row is not None:

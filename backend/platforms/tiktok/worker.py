@@ -798,6 +798,10 @@ async def _run_with_context(
     except Exception as e:
         if str(e).startswith(PROFILE_UNAVAILABLE_MARK):
             raise
+        from platforms.tiktok.captcha_batch import is_tiktok_captcha_stall_error
+
+        if is_tiktok_captcha_stall_error(e):
+            raise
         print(f"[worker] error: {e}", file=sys.stderr)
     finally:
         if own_page:

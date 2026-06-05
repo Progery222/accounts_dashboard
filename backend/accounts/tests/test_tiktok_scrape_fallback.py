@@ -1,3 +1,6 @@
+import uuid
+from unittest.mock import patch
+
 from django.test import TestCase
 
 from accounts.models import Account, Platform, ScrapeBackendChoice, ScrapeBackendConfig
@@ -5,6 +8,7 @@ from accounts.tiktok_scrape_fallback import (
     TIKTOK_NEW_ERROR_THRESHOLD,
     BatchScrapeContext,
     TikTokBatchFallback,
+    retry_tiktok_via_apify_after_captcha,
 )
 
 
@@ -63,3 +67,41 @@ class TikTokBatchFallbackTests(TestCase):
         exc = ValueError("TikTok: время ожидания капчи истекло.")
         ctx.on_tiktok_playwright_error(accounts[0], exc)
         self.assertTrue(ctx.tiktok_captcha_tripped())
+
+    def test_retry_apify_after_captcha_when_fallback_active(self) -> None:
+        with self.settings(APIFY_ENABLED=True, APIFY_TOKEN="tok"):
+            accounts = [Account(pk=7, platform=Platform.TIKTOK, username="cap")]
+            ctx = BatchScrapeContext.for_accounts(accounts)
+            exc = ValueError(
+                "TikTok: SadCaptcha не снял капчу за отведённое время. "
+                "Проверьте баланс/ключ на sadcaptcha.com."
+            )
+            ctx.on_tiktok_playwright_error(accounts[0], exc)
+            with patch(
+                "accounts.scrape_backend.refresh_account_via_apify_sync",
+                return_value=accounts[0],
+            ) as mock_sync:
+                out = retry_tiktok_via_apify_after_captcha(
+                    accounts[0],
+                    exc,
+                    batch_ctx=ctx,
+                    trigger="scheduler",
+                    parent_batch_id=uuid.uuid4(),
+                )
+            self.assertIs(out, accounts[0])
+            mock_sync.assert_called_once()
+
+    def test_retry_apify_skipped_without_fallback(self) -> None:
+        ScrapeBackendConfig.objects.filter(pk=1).update(tiktok_fallback_enabled=False)
+        accounts = [Account(pk=8, platform=Platform.TIKTOK, username="x")]
+        ctx = BatchScrapeContext.for_accounts(accounts)
+        exc = ValueError("TikTok: SadCaptcha не снял капчу за отведённое время.")
+        ctx.on_tiktok_playwright_error(accounts[0], exc)
+        out = retry_tiktok_via_apify_after_captcha(
+            accounts[0],
+            exc,
+            batch_ctx=ctx,
+            trigger="scheduler",
+            parent_batch_id=uuid.uuid4(),
+        )
+        self.assertIsNone(out)
