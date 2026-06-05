@@ -140,7 +140,7 @@ class TikTokBatchFallback:
 
 
 class BatchScrapeContext:
-    """Контекст batch-прогона: Apify/Playwright + TikTok fallback."""
+    """Контекст batch-прогона: Apify/Playwright + TikTok/Facebook fallback."""
 
     def __init__(
         self,
@@ -148,25 +148,43 @@ class BatchScrapeContext:
         *,
         tiktok_fallback: TikTokBatchFallback | None = None,
         tiktok_captcha_guard: TikTokRefreshBatchGuard | None = None,
+        facebook_fallback=None,
     ) -> None:
         self.tiktok_fallback = tiktok_fallback
         self.tiktok_captcha_guard = tiktok_captcha_guard
+        self.facebook_fallback = facebook_fallback
 
     @classmethod
     def for_accounts(cls, accounts: list[Account]) -> BatchScrapeContext:
+        from accounts.facebook_scrape_fallback import FacebookBatchFallback
+
         tt_fb = TikTokBatchFallback.for_accounts(accounts)
+        fb_fb = FacebookBatchFallback.for_accounts(accounts)
         guard = None
         if tt_fb is None or not tt_fb.enabled:
             if any(getattr(a, "platform", None) == Platform.TIKTOK for a in accounts):
                 guard = TikTokRefreshBatchGuard()
-        return cls(accounts, tiktok_fallback=tt_fb, tiktok_captcha_guard=guard)
+        return cls(
+            accounts,
+            tiktok_fallback=tt_fb,
+            tiktok_captcha_guard=guard,
+            facebook_fallback=fb_fb,
+        )
 
     def use_apify(self, account: Account) -> bool:
+        if self.facebook_fallback is not None:
+            override = self.facebook_fallback.effective_use_apify(account)
+            if override is not None:
+                return override
         if self.tiktok_fallback is not None:
             override = self.tiktok_fallback.effective_use_apify(account)
             if override is not None:
                 return override
         return use_apify_for_platform(account.platform)
+
+    def on_facebook_playwright_error(self, account: Account, exc: BaseException) -> None:
+        if self.facebook_fallback is not None and self.facebook_fallback.enabled:
+            self.facebook_fallback.on_playwright_failure(account, exc)
 
     def on_tiktok_playwright_error(self, account: Account, exc: BaseException) -> None:
         if self.tiktok_fallback is not None and self.tiktok_fallback.enabled:

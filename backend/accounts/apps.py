@@ -737,14 +737,16 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
 
         enter_sync_apify_batch(apify_batch_id)
         has_facebook = facebook_playwright_warm_needed(accounts)
+        from .scrape_backend import BatchScrapeContext
+
+        batch_scrape = BatchScrapeContext.for_accounts(accounts)
         fb_batch_guard = None
         if has_facebook:
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
-            fb_batch_guard = FacebookRefreshBatchGuard()
-        from .scrape_backend import BatchScrapeContext
-
-        batch_scrape = BatchScrapeContext.for_accounts(accounts)
+            fb_fb = batch_scrape.facebook_fallback
+            if fb_fb is None or not fb_fb.enabled:
+                fb_batch_guard = FacebookRefreshBatchGuard()
 
         from .facebook_refresh_lane import (
             begin_facebook_batch,
@@ -1293,20 +1295,20 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             )
                             stop_requested.set()
                         except Exception as e:
-                            if account.platform == "facebook":
-                                from platforms.facebook.rate_limit import (
-                                    is_facebook_rate_limited_error,
-                                    shutdown_facebook_worker,
-                                )
+                            from accounts.facebook_scrape_fallback import (
+                                handle_facebook_playwright_batch_error,
+                                retry_facebook_via_apify_after_playwright_failure,
+                            )
 
-                                if is_facebook_rate_limited_error(e):
-                                    shutdown_facebook_worker()
-                                    if fb_batch_guard is not None:
-                                        fb_batch_guard.trip(str(e))
+                            handle_facebook_playwright_batch_error(
+                                account,
+                                e,
+                                batch_ctx=batch_scrape,
+                                fb_batch_guard=fb_batch_guard,
+                            )
                             batch_scrape.on_tiktok_playwright_error(account, e)
                             apify_recovered = False
                             if account.platform == "tiktok":
-                                from accounts.models import ApifyRefreshJobTrigger
                                 from accounts.tiktok_scrape_fallback import (
                                     retry_tiktok_via_apify_after_captcha,
                                 )
@@ -1365,6 +1367,66 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                             status="done",
                                             worker=None,
                                             detail=report_by_index[idx]["detail"],
+                                        )
+                                        apify_recovered = True
+                            elif account.platform == "facebook":
+                                try:
+                                    apify_acc = retry_facebook_via_apify_after_playwright_failure(
+                                        account,
+                                        e,
+                                        batch_ctx=batch_scrape,
+                                        trigger=ApifyRefreshJobTrigger.SCHEDULER,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as apify_exc:
+                                    e = apify_exc
+                                else:
+                                    if apify_acc is not None:
+                                        account = apify_acc
+                                        ensure_fresh_db_connections()
+                                        account = _reload_account(idx)
+                                        after = (
+                                            int(account.follower_count or 0),
+                                            int(account.like_count or 0),
+                                            int(account.view_count or 0),
+                                            int(account.post_count or 0),
+                                        )
+                                        if before is None:
+                                            before = after
+                                        unchanged = before == after
+                                        detail_fb = (
+                                            batch_scrape.facebook_fallback.fallback_detail_suffix()
+                                            if batch_scrape.facebook_fallback is not None
+                                            else ""
+                                        )
+                                        report_by_index[idx] = {
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "profile_name": _profile_name(account),
+                                            "status": (
+                                                "успешно (данные без изменений)"
+                                                if unchanged
+                                                else "успешно"
+                                            ),
+                                            "follower_before": before[0],
+                                            "follower_after": after[0],
+                                            "like_before": before[1],
+                                            "like_after": after[1],
+                                            "view_before": before[2],
+                                            "view_after": after[2],
+                                            "post_before": before[3],
+                                            "post_after": after[3],
+                                            "elapsed_sec": round(
+                                                max(0.0, time.perf_counter() - row_started), 3
+                                            ),
+                                            "detail": detail_fb,
+                                        }
+                                        _mark_progress(success=True, failed=False)
+                                        _persist_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail=detail_fb,
                                         )
                                         apify_recovered = True
                             if not apify_recovered:

@@ -869,14 +869,16 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
             begin_facebook_batch()
             try:
                 has_facebook = facebook_playwright_warm_needed(accounts)
+                from .scrape_backend import BatchScrapeContext
+
+                batch_scrape = BatchScrapeContext.for_accounts(accounts)
                 fb_batch_guard = None
                 if has_facebook:
                     from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
-                    fb_batch_guard = FacebookRefreshBatchGuard()
-                from .scrape_backend import BatchScrapeContext
-
-                batch_scrape = BatchScrapeContext.for_accounts(accounts)
+                    fb_fb = batch_scrape.facebook_fallback
+                    if fb_fb is None or not fb_fb.enabled:
+                        fb_batch_guard = FacebookRefreshBatchGuard()
 
                 if not stop_requested.is_set():
                     preload: dict[str, dict] = {}
@@ -1166,32 +1168,60 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             _mark_progress(success=False, failed=False)
                             stop_requested.set()
                         except Exception as e:
-                            if account.platform == Platform.FACEBOOK:
-                                from platforms.facebook.rate_limit import (
-                                    is_facebook_rate_limited_error,
-                                    shutdown_facebook_worker,
-                                )
+                            from accounts.facebook_scrape_fallback import (
+                                handle_facebook_playwright_batch_error,
+                                retry_facebook_via_apify_after_playwright_failure,
+                            )
 
-                                if is_facebook_rate_limited_error(e):
-                                    shutdown_facebook_worker()
-                                    if fb_batch_guard is not None:
-                                        fb_batch_guard.trip(str(e))
+                            handle_facebook_playwright_batch_error(
+                                account,
+                                e,
+                                batch_ctx=batch_scrape,
+                                fb_batch_guard=fb_batch_guard,
+                            )
                             batch_scrape.on_tiktok_playwright_error(account, e)
-                            detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
-                            if len(detail) > 800:
-                                detail = detail[:797] + "..."
-                            _persist_auto_refresh_run_item(
-                                account.id,
-                                status="error",
-                                worker=None,
-                                detail=detail,
-                            )
-                            _mark_progress(success=False, failed=True, last_error=detail)
-                            errors_out.append({"id": account.id, "detail": detail})
-                            print(
-                                f"[bulk_refresh] {account.platform}/@{account.username}: {e}",
-                                file=sys.stderr,
-                            )
+                            apify_recovered = False
+                            if account.platform == Platform.FACEBOOK:
+                                try:
+                                    apify_acc = retry_facebook_via_apify_after_playwright_failure(
+                                        account,
+                                        e,
+                                        batch_ctx=batch_scrape,
+                                        trigger=ApifyRefreshJobTrigger.BULK,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as apify_exc:
+                                    e = apify_exc
+                                else:
+                                    if apify_acc is not None:
+                                        _persist_auto_refresh_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail=(
+                                                batch_scrape.facebook_fallback.fallback_detail_suffix()
+                                                if batch_scrape.facebook_fallback is not None
+                                                else ""
+                                            ),
+                                        )
+                                        _mark_progress(success=True, failed=False)
+                                        apify_recovered = True
+                            if not apify_recovered:
+                                detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
+                                if len(detail) > 800:
+                                    detail = detail[:797] + "..."
+                                _persist_auto_refresh_run_item(
+                                    account.id,
+                                    status="error",
+                                    worker=None,
+                                    detail=detail,
+                                )
+                                _mark_progress(success=False, failed=True, last_error=detail)
+                                errors_out.append({"id": account.id, "detail": detail})
+                                print(
+                                    f"[bulk_refresh] {account.platform}/@{account.username}: {e}",
+                                    file=sys.stderr,
+                                )
                         finally:
                             if attempted_network and not is_refresh_cancel_requested():
                                 delay_sec = (
@@ -1635,14 +1665,16 @@ def _run_refresh_all_background(
         from accounts.models import ApifyRefreshJob, ApifyRefreshJobStatus, ApifyRefreshJobTrigger
 
         has_facebook = facebook_playwright_warm_needed(accounts)
+        from .scrape_backend import BatchScrapeContext
+
+        batch_scrape = BatchScrapeContext.for_accounts(accounts)
         fb_batch_guard = None
         if has_facebook:
             from platforms.facebook.rate_limit import FacebookRefreshBatchGuard
 
-            fb_batch_guard = FacebookRefreshBatchGuard()
-        from .scrape_backend import BatchScrapeContext
-
-        batch_scrape = BatchScrapeContext.for_accounts(accounts)
+            fb_fb = batch_scrape.facebook_fallback
+            if fb_fb is None or not fb_fb.enabled:
+                fb_batch_guard = FacebookRefreshBatchGuard()
 
         from .refresh_priority import account_refresh_priority_session
 
@@ -2078,20 +2110,20 @@ def _run_refresh_all_background(
                             )
                             stop_requested.set()
                         except Exception as e:
-                            if account.platform == Platform.FACEBOOK:
-                                from platforms.facebook.rate_limit import (
-                                    is_facebook_rate_limited_error,
-                                    shutdown_facebook_worker,
-                                )
+                            from accounts.facebook_scrape_fallback import (
+                                handle_facebook_playwright_batch_error,
+                                retry_facebook_via_apify_after_playwright_failure,
+                            )
 
-                                if is_facebook_rate_limited_error(e):
-                                    shutdown_facebook_worker()
-                                    if fb_batch_guard is not None:
-                                        fb_batch_guard.trip(str(e))
+                            handle_facebook_playwright_batch_error(
+                                account,
+                                e,
+                                batch_ctx=batch_scrape,
+                                fb_batch_guard=fb_batch_guard,
+                            )
                             batch_scrape.on_tiktok_playwright_error(account, e)
                             apify_recovered = False
                             if account.platform == Platform.TIKTOK:
-                                from accounts.models import ApifyRefreshJobTrigger
                                 from accounts.tiktok_scrape_fallback import (
                                     retry_tiktok_via_apify_after_captcha,
                                 )
@@ -2143,6 +2175,60 @@ def _run_refresh_all_background(
                                             status="done",
                                             worker=None,
                                             detail="",
+                                        )
+                                        apify_recovered = True
+                            elif account.platform == Platform.FACEBOOK:
+                                try:
+                                    apify_acc = retry_facebook_via_apify_after_playwright_failure(
+                                        account,
+                                        e,
+                                        batch_ctx=batch_scrape,
+                                        trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
+                                        parent_batch_id=apify_batch_id,
+                                    )
+                                except Exception as apify_exc:
+                                    e = apify_exc
+                                else:
+                                    if apify_acc is not None:
+                                        account = apify_acc
+                                        account.refresh_from_db()
+                                        row = {
+                                            "id": account.id,
+                                            "platform": account.platform,
+                                            "username": account.username,
+                                            "status": "успешно",
+                                            "error": "",
+                                            "follower_count": account.follower_count,
+                                            "follower_delta": (
+                                                int(account.follower_count or 0)
+                                                - before["follower_count"]
+                                            ),
+                                            "like_count": account.like_count,
+                                            "like_delta": (
+                                                int(account.like_count or 0)
+                                                - before["like_count"]
+                                            ),
+                                            "view_count": account.view_count,
+                                            "view_delta": (
+                                                int(account.view_count or 0)
+                                                - before["view_count"]
+                                            ),
+                                            "post_count": account.post_count,
+                                            "post_delta": (
+                                                int(account.post_count or 0)
+                                                - before["post_count"]
+                                            ),
+                                        }
+                                        _refresh_all_atomic_progress(failed=False)
+                                        _persist_refresh_all_run_item(
+                                            account.id,
+                                            status="done",
+                                            worker=None,
+                                            detail=(
+                                                batch_scrape.facebook_fallback.fallback_detail_suffix()
+                                                if batch_scrape.facebook_fallback is not None
+                                                else ""
+                                            ),
                                         )
                                         apify_recovered = True
                             if not apify_recovered:

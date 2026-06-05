@@ -291,7 +291,7 @@ class ScrapeBackendConfig(models.Model):
     )
     facebook_fallback_enabled = models.BooleanField(
         default=False,
-        help_text="При сбое основного способа переключиться на запасной (логика по платформам).",
+        help_text="Facebook: Playwright→Apify при rate limit, антиботе или недоступном профиле в одном прогоне.",
     )
     tiktok_fallback_enabled = models.BooleanField(
         default=False,
