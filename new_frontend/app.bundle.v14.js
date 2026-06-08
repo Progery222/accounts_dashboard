@@ -5149,6 +5149,152 @@ function _growthBarColor(color, platformId) {
   if (fixed) return fixed;
   return _shiftPlatformColorToGrowthTint(color);
 }
+function _tvProfileDialGridLayout(count) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  if (n <= 0) return { rows: [], staggerRowIdxes: [] };
+  if (n <= 6) return { rows: [n], staggerRowIdxes: [] };
+  if (n === 7) return { rows: [4, 3], staggerRowIdxes: [1] };
+  if (n === 8) return { rows: [4, 4], staggerRowIdxes: [] };
+  if (n === 9) return { rows: [3, 3, 3], staggerRowIdxes: [] };
+  const rows = [];
+  let left = n;
+  while (left > 0) {
+    rows.push(Math.min(4, left));
+    left -= rows[rows.length - 1];
+  }
+  const maxCols = Math.max(...rows);
+  const staggerRowIdxes = [];
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i] < maxCols) staggerRowIdxes.push(i);
+  }
+  return { rows, staggerRowIdxes };
+}
+let NF_TV_PROFILE_DIAL_W_CACHE = 0;
+function _tvProfileDialGuessWidth(cols) {
+  const c = Math.max(1, Math.floor(Number(cols) || 1));
+  const vw = Math.max(320, Number(window.innerWidth) || 1200);
+  const w = Math.floor(vw * 0.38);
+  return _tvProfileDialMetrics(w, c).dialSize;
+}
+function _tvProfileDialEffectiveWidth(w) {
+  const n = Math.max(0, Number(w) || 0);
+  if (n > 0) {
+    NF_TV_PROFILE_DIAL_W_CACHE = n;
+    return n;
+  }
+  return NF_TV_PROFILE_DIAL_W_CACHE || 0;
+}
+function _tvProfileDialMetrics(containerW, cols) {
+  const w = _tvProfileDialEffectiveWidth(containerW);
+  const c = Math.max(1, Math.floor(Number(cols) || 1));
+  if (w <= 0) {
+    const dialSize = _tvProfileDialGuessWidth(c);
+    return { dialSize, gap: Math.max(8, Math.floor(dialSize * 0.12)), edgePad: 10 };
+  }
+  const edgePad = Math.max(6, Math.floor(w * 0.02));
+  const gapSlots = Math.max(0, c - 1);
+  const gap = gapSlots > 0 ? Math.max(10, Math.floor((w * 0.08) / gapSlots)) : 0;
+  const dialSize = Math.max(40, Math.floor((w - 2 * edgePad - gapSlots * gap) / c));
+  return { dialSize, gap, edgePad };
+}
+function _tvProfileDialSize(containerW, cols) {
+  return _tvProfileDialMetrics(containerW, cols).dialSize;
+}
+function TvProfileDialsGrid({ profiles, totalAccounts }) {
+  const list = profiles || [];
+  const layout = _tvProfileDialGridLayout(list.length);
+  const maxCols = Math.max(1, ...(layout.rows.length ? layout.rows : [1]));
+  const rootRef = React.useRef(null);
+  const [containerW, setContainerW] = React.useState(() => NF_TV_PROFILE_DIAL_W_CACHE || 0);
+  const effectiveW = _tvProfileDialEffectiveWidth(containerW);
+  const maxDialInLayout = Math.max(
+    ...layout.rows.map(cols => _tvProfileDialSize(effectiveW || _tvProfileDialGuessWidth(cols), cols)),
+  );
+  React.useLayoutEffect(() => {
+    const el = rootRef.current;
+    if (!el) return undefined;
+    const measure = () => {
+      const w = Math.round(el.clientWidth || el.getBoundingClientRect().width || 0);
+      if (w <= 0) return;
+      const prev = NF_TV_PROFILE_DIAL_W_CACHE;
+      if (prev > 0 && Math.abs(w - prev) < 3) return;
+      NF_TV_PROFILE_DIAL_W_CACHE = w;
+      setContainerW(w);
+    };
+    measure();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(measure);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [list.length]);
+  if (!list.length) {
+    return /*#__PURE__*/React.createElement("div", {
+      className: "mono",
+      style: { fontSize: 12, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.08em' }
+    }, "\u041D\u0435\u0442 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u043E\u0432 \u043F\u043E \u043F\u0440\u043E\u0444\u0438\u043B\u044F\u043C");
+  }
+  const rowGap = 8;
+  let idx = 0;
+  return /*#__PURE__*/React.createElement("div", {
+    ref: rootRef,
+    style: {
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: rowGap,
+      width: '100%',
+      flex: 1,
+      minHeight: maxDialInLayout + 28,
+      overflow: 'hidden',
+      boxSizing: 'border-box',
+      padding: '2px 0'
+    }
+  }, layout.rows.map((cols, ri) => {
+    const chunk = list.slice(idx, idx + cols);
+    idx += cols;
+    const met = _tvProfileDialMetrics(effectiveW, cols);
+    const refMet = _tvProfileDialMetrics(effectiveW, maxCols);
+    const stagger = layout.staggerRowIdxes.includes(ri) && cols < maxCols;
+    const rowW = cols * met.dialSize + Math.max(0, cols - 1) * met.gap;
+    const refRowW = maxCols * refMet.dialSize + Math.max(0, maxCols - 1) * refMet.gap;
+    const offset = stagger ? Math.max(0, (refRowW - rowW) / 2) : 0;
+    return /*#__PURE__*/React.createElement("div", {
+      key: ri,
+      style: {
+        display: 'flex',
+        flexDirection: 'row',
+        justifyContent: 'flex-start',
+        alignItems: 'center',
+        width: '100%',
+        boxSizing: 'border-box',
+        paddingLeft: met.edgePad + offset,
+        paddingRight: met.edgePad,
+        gap: met.gap,
+        flexShrink: 0
+      }
+    }, chunk.map(p => /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      style: {
+        textAlign: 'center',
+        flex: '0 0 auto',
+        width: met.dialSize,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center'
+      }
+    }, /*#__PURE__*/React.createElement(RadialDial, {
+      value: Math.min(1, Math.max(0, Number(p.accounts || 0) / totalAccounts)),
+      size: met.dialSize,
+      color: p.color,
+      label: p.accounts,
+      sub: p.label
+    }))));
+  }));
+}
 function SceneTop({
   accent
 }) {
@@ -5157,7 +5303,9 @@ function SceneTop({
   const maxViews = topViews.length > 0 ? Math.max(1, Number(topViews[0].dViews || 0)) : 1;
   const maxClicks = topClicks.length > 0 ? Math.max(1, Number(topClicks[0].dClicks || 0)) : 1;
   const totalAccounts = Math.max(1, Number(TOTAL.accounts || ACCOUNTS.length || 1));
-  const profilesVisible = (PROFILES || []).filter(p => Number(p.accounts || 0) > 0);
+  const profilesVisible = (PROFILES || []).filter(
+    p => Number(p.accounts || 0) > 0 && String(p.id) !== 'none' && !(typeof HIDDEN_PROFILE_IDS !== 'undefined' && HIDDEN_PROFILE_IDS.has(String(p.id))),
+  );
   const maxPlatformAccounts = Math.max(1, ...(PLATFORMS || []).map(p => Number(p.accounts || 0)));
   const platformClicks = (PLATFORMS || []).map(p => {
     const accs = ACCOUNTS.filter(a => a.platform === p.id);
@@ -5229,33 +5377,10 @@ function SceneTop({
       letterSpacing: '0.24em',
       marginBottom: 14
     }
-  }, "BY PROFILE"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: 'flex',
-      justifyContent: 'space-around',
-      alignItems: 'center',
-      flexWrap: 'wrap',
-      gap: 12
-    }
-  }, profilesVisible.length === 0 ? /*#__PURE__*/React.createElement("div", {
-    className: "mono",
-    style: {
-      fontSize: 12,
-      color: 'rgba(255,255,255,0.35)',
-      letterSpacing: '0.08em'
-    }
-  }, "\u041D\u0435\u0442 \u0430\u043A\u043A\u0430\u0443\u043D\u0442\u043E\u0432 \u043F\u043E \u043F\u0440\u043E\u0444\u0438\u043B\u044F\u043C") : profilesVisible.map(p => /*#__PURE__*/React.createElement("div", {
-    key: p.id,
-    style: {
-      textAlign: 'center'
-    }
-  }, /*#__PURE__*/React.createElement(RadialDial, {
-    value: Math.min(1, Math.max(0, Number(p.accounts || 0) / totalAccounts)),
-    size: 120,
-    color: p.color,
-    label: p.accounts,
-    sub: p.label
-  }))))), /*#__PURE__*/React.createElement("div", {
+  }, "BY PROFILE"), /*#__PURE__*/React.createElement(TvProfileDialsGrid, {
+    profiles: profilesVisible,
+    totalAccounts: totalAccounts
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       borderRadius: 20,
       border: '1px solid rgba(255,255,255,0.06)',
@@ -10504,7 +10629,33 @@ function ProfileEditorModal({
   }, "\u0426\u0412\u0415\u0422"), /*#__PURE__*/React.createElement(ProfileColorPicker, {
     value: color,
     onChange: setColor
-  }))), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: 10,
+      marginTop: 10,
+      cursor: 'pointer'
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "color",
+    value: /^#[0-9a-fA-F]{6}$/.test(String(color || '')) ? color : '#6366f1',
+    onChange: e => setColor(e.target.value),
+    style: {
+      width: 44,
+      height: 32,
+      padding: 2,
+      border: '1px solid var(--line-2)',
+      borderRadius: 8,
+      background: 'transparent',
+      cursor: 'pointer'
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: 'var(--ink-dim)'
+    }
+  }, "\u0421\u0432\u043E\u0439 \u043E\u0442\u0442\u0435\u043D\u043E\u043A"))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: 'flex',
       justifyContent: 'space-between',

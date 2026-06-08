@@ -508,12 +508,12 @@ def _refresh_all_delay_seconds(account: Account) -> float:
     Instagram is already preloaded in batch and generally doesn't need extra delay.
     Other platforms keep a short jitter to reduce burst traffic / anti-bot friction.
     Facebook: 2–5 мин между аккаунтами (120–300 с) — Playwright + антибот.
-    TikTok: пауза между аккаунтами 20–40 с (снижает капчу на профилях; env REFRESH_ALL_DELAY_TIKTOK_*).
+    TikTok: пауза между аккаунтами 30–60 с (env REFRESH_ALL_DELAY_TIKTOK_*).
     YouTube: пауза 5–10 с между аккаунтами — снижает риск квот/блокировок при серии запросов.
     """
     platform_defaults: dict[str, tuple[float, float]] = {
         Platform.INSTAGRAM: (0.0, 0.0),
-        Platform.TIKTOK: (20.0, 40.0),
+        Platform.TIKTOK: (30.0, 60.0),
         Platform.X: (0.8, 1.6),
         Platform.THREADS: (2.0, 4.0),
         Platform.FACEBOOK: (120.0, 300.0),
