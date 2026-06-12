@@ -82,7 +82,6 @@ class AccountSerializer(serializers.ModelSerializer):
             "id",
             "created_at",
             "updated_at",
-            "profile_unavailable",
             "audience_last_synced_at",
         ]
 

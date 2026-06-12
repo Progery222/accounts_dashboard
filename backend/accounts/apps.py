@@ -376,7 +376,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         _apply_visibility_filters,
         _mark_profile_unavailable_if_applicable,
         _prewarm_workers,
-        _refresh_all_delay_seconds,
+        _refresh_all_cooldown_seconds,
         _refresh_link_clicks_for_accounts,
         _refresh_with_retry,
         _restore_account_refresh_baseline,
@@ -946,6 +946,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     account = _reload_account(idx)
                     row_started = time.perf_counter()
                     attempted_network = False
+                    refresh_failure_exc = None
                     refresh_baseline = None
                     try:
                         if stop_requested.is_set():
@@ -1300,6 +1301,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                 retry_facebook_via_apify_after_playwright_failure,
                             )
 
+                            refresh_failure_exc = e
                             handle_facebook_playwright_batch_error(
                                 account,
                                 e,
@@ -1323,8 +1325,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     )
                                 except Exception as apify_exc:
                                     e = apify_exc
+                                    refresh_failure_exc = apify_exc
                                 else:
                                     if apify_acc is not None:
+                                        refresh_failure_exc = None
                                         account = apify_acc
                                         ensure_fresh_db_connections()
                                         account = _reload_account(idx)
@@ -1380,8 +1384,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                     )
                                 except Exception as apify_exc:
                                     e = apify_exc
+                                    refresh_failure_exc = apify_exc
                                 else:
                                     if apify_acc is not None:
+                                        refresh_failure_exc = None
                                         account = apify_acc
                                         ensure_fresh_db_connections()
                                         account = _reload_account(idx)
@@ -1480,7 +1486,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                                 delay_sec = (
                                     0.0
                                     if should_use_apify_for_account(account, batch_ctx=batch_scrape)
-                                    else _refresh_all_delay_seconds(account)
+                                    else _refresh_all_cooldown_seconds(
+                                        account,
+                                        refresh_failure_exc,
+                                    )
                                 )
                                 if delay_sec > 0:
                                     account_queue.set_platform_cooldown(

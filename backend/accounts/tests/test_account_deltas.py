@@ -194,3 +194,38 @@ class AccountDeltaSerializerTests(TestCase):
         acc = Account.objects.get(username="move_user2", platform=Platform.TIKTOK)
         self.assertEqual(acc.profile_id, new.id)
         self.assertEqual(acc.view_count, 500)
+
+    def test_patch_profile_unavailable_manual_toggle(self):
+        from rest_framework.test import APIRequestFactory
+
+        acc = Account.objects.create(
+            username="manual_unavail",
+            platform=Platform.TIKTOK,
+            profile_unavailable=False,
+            view_count=100,
+        )
+        before = acc.updated_at
+        factory = APIRequestFactory()
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"patch": "partial_update"})
+        request = factory.patch(
+            f"/api/accounts/{acc.id}/",
+            {"profile_unavailable": True},
+            format="json",
+        )
+        response = view(request, pk=acc.id)
+        self.assertEqual(response.status_code, 200)
+        acc.refresh_from_db()
+        self.assertTrue(acc.profile_unavailable)
+        self.assertEqual(acc.updated_at, before)
+
+        request = factory.patch(
+            f"/api/accounts/{acc.id}/",
+            {"profile_unavailable": False},
+            format="json",
+        )
+        response = view(request, pk=acc.id)
+        self.assertEqual(response.status_code, 200)
+        acc.refresh_from_db()
+        self.assertFalse(acc.profile_unavailable)

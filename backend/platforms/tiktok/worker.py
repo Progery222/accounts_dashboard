@@ -86,22 +86,162 @@ def _is_item_list_url(url: str) -> bool:
     ))
 
 
-async def _page_indicates_profile_unavailable(page) -> bool:
-    try:
-        return bool(await page.evaluate(
-            """() => {
-                const t = ((document.body && document.body.innerText) || '').toLowerCase();
-                return (
-                    t.includes("couldn't find this account") ||
-                    t.includes("could not find this account") ||
-                    t.includes("account not found") ||
-                    t.includes("профиль не найден") ||
-                    t.includes("аккаунт не найден")
-                );
-            }"""
-        ))
-    except Exception:
+_TIKTOK_NOT_FOUND_MARKERS = (
+    "couldn't find this account",
+    "couldn\u2019t find this account",
+    "could not find this account",
+    "account not found",
+    "профиль не найден",
+    "аккаунт не найден",
+)
+
+# Явные statusCode из webapp.user-detail, когда профиля нет на площадке.
+_TIKTOK_USER_GONE_STATUS_CODES = frozenset({10101, 10202, 10221, 10223})
+
+
+def _should_mark_tiktok_profile_unavailable(
+    *,
+    body_text: str,
+    title: str,
+    og_title: str,
+    username: str,
+    has_avatar: bool,
+    has_stats: bool,
+    has_post_items: bool,
+) -> bool:
+    """DOM-эвристика (не используется для финального PROFILE_UNAVAILABLE)."""
+    text = (body_text or "").lower()
+    if not any(marker in text for marker in _TIKTOK_NOT_FOUND_MARKERS):
         return False
+    user = (username or "").strip().lower()
+    if user:
+        needle = f"@{user}"
+        if needle in (title or "").lower() or needle in (og_title or "").lower():
+            return False
+    if has_avatar or has_stats or has_post_items:
+        return False
+    return True
+
+
+def _parse_user_detail_availability(user_detail: object, username: str) -> str:
+    """
+    found — user-detail подтверждает профиль;
+    missing — TikTok явно сообщил, что аккаунта нет;
+    unknown — неоднозначно (антибот/пустая сессия): не помечаем недоступным.
+    """
+    if not isinstance(user_detail, dict):
+        return "unknown"
+    ui = user_detail.get("userInfo")
+    if not isinstance(ui, dict):
+        return "unknown"
+    user = ui.get("user")
+    user_dict = user if isinstance(user, dict) else {}
+    uid = str(user_dict.get("uniqueId") or "").strip().lower()
+    sec = str(user_dict.get("secUid") or "").strip()
+    want = (username or "").strip().lower()
+    if want and uid == want:
+        return "found"
+    if sec:
+        return "found"
+
+    status_raw = user_detail.get("statusCode", user_detail.get("status_code"))
+    try:
+        status = int(status_raw) if status_raw is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status in _TIKTOK_USER_GONE_STATUS_CODES:
+        return "missing"
+
+    msg = str(user_detail.get("statusMsg") or user_detail.get("message") or "").lower()
+    if not uid and not sec:
+        if any(x in msg for x in ("not found", "doesn't exist", "does not exist", "не найден")):
+            return "missing"
+    return "unknown"
+
+
+def _profile_stats_from_user_detail(user_detail: object) -> dict:
+    if not isinstance(user_detail, dict):
+        return {}
+    ui = user_detail.get("userInfo")
+    if not isinstance(ui, dict):
+        return {}
+    user = ui.get("user") if isinstance(ui.get("user"), dict) else {}
+    stats = ui.get("stats") if isinstance(ui.get("stats"), dict) else {}
+    out: dict[str, str] = {}
+    if stats.get("followerCount") is not None:
+        out["follower_text"] = str(stats.get("followerCount"))
+    if stats.get("followingCount") is not None:
+        out["following_text"] = str(stats.get("followingCount"))
+    heart = stats.get("heartCount") if stats.get("heartCount") is not None else stats.get("heart")
+    if heart is not None:
+        out["like_text"] = str(heart)
+    avatar = str(user.get("avatarLarger") or user.get("avatarMedium") or "").strip()
+    if avatar:
+        out["avatar_url"] = avatar
+    return out
+
+
+async def _read_tiktok_profile_page_signals(page, profile_username: str) -> dict:
+    user_js = json.dumps((profile_username or "").strip().lower())
+    try:
+        raw = await page.evaluate(
+            f"""() => {{
+                const user = {user_js};
+                const bodyText = (document.body && document.body.innerText) || '';
+                const title = document.title || '';
+                const ogTitle = (
+                    document.querySelector('meta[property="og:title"]')?.getAttribute('content') || ''
+                );
+                const hasAvatar = !!(
+                    document.querySelector('[data-e2e="user-avatar"]') ||
+                    document.querySelector('span[data-e2e="user-avatar"] img[src]')
+                );
+                const hasStats = !!document.querySelector('h3 strong, [data-e2e="user-stats"] h3 strong');
+                const hasPostItems = !!(
+                    document.querySelector('[data-e2e="user-post-item"]') ||
+                    document.querySelector('a[href*="/video/"]')
+                );
+                let userDetail = null;
+                const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                if (scriptEl) {{
+                    try {{
+                        const scope = (JSON.parse(scriptEl.textContent) || {{}}).__DEFAULT_SCOPE__ || {{}};
+                        userDetail = scope['webapp.user-detail'] || null;
+                    }} catch (_) {{}}
+                }}
+                return {{
+                    body_text: bodyText,
+                    title,
+                    og_title: ogTitle,
+                    has_avatar: hasAvatar,
+                    has_stats: hasStats,
+                    has_post_items: hasPostItems,
+                    user_detail: userDetail,
+                }};
+            }}"""
+        )
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _tiktok_profile_availability(page, profile_username: str) -> str:
+    signals = await _read_tiktok_profile_page_signals(page, profile_username)
+    if not signals:
+        return "unknown"
+    return _parse_user_detail_availability(signals.get("user_detail"), profile_username)
+
+
+def _tiktok_profile_missing_error(profile_username: str) -> ValueError:
+    return ValueError(
+        f"{PROFILE_UNAVAILABLE_MARK}TikTok @{profile_username or 'unknown'}: "
+        "профиль не найден или недоступен на площадке."
+    )
+
+
+async def _raise_if_tiktok_profile_confirmed_missing(page, profile_username: str) -> None:
+    if await _tiktok_profile_availability(page, profile_username) == "missing":
+        raise _tiktok_profile_missing_error(profile_username)
 
 
 def _item_list_key(it: dict) -> str:
@@ -171,6 +311,7 @@ async def _run_with_context(
     url: str = data["url"]
     m_user = re.search(r"/@([^/?#]+)", url)
     profile_username = m_user.group(1).strip().lower() if m_user else ""
+    sec_uid_hint = str(data.get("sec_uid") or "").strip()
     target_post_count = int(data.get("target_post_count") or 0)
     collected: list[dict] = []
     profile_stats: dict = {}
@@ -213,6 +354,9 @@ async def _run_with_context(
                             author = it.get("author", {}) if isinstance(it, dict) else {}
                             a_user = str(author.get("uniqueId") or "").strip().lower()
                             if a_user == profile_username:
+                                filtered_items.append(it)
+                                continue
+                            if not a_user:
                                 filtered_items.append(it)
                         items = filtered_items
                     status_code = result.get("statusCode", "?")
@@ -364,6 +508,10 @@ async def _run_with_context(
                         return out;
                     }"""
                 )
+                signals = await _read_tiktok_profile_page_signals(page, profile_username)
+                for key, val in _profile_stats_from_user_detail(signals.get("user_detail")).items():
+                    if val and not profile_stats.get(key):
+                        profile_stats[key] = val
                 print(f"[worker] profile_stats for @{profile_username}: {profile_stats}", file=sys.stderr)
             except Exception:
                 profile_stats = {}
@@ -388,29 +536,35 @@ async def _run_with_context(
                 else:
                     await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
 
+            # Подтверждённо удалённый профиль — сразу выходим, без reload/goto.
+            await _raise_if_tiktok_profile_confirmed_missing(page, profile_username)
+
             # ── Error-page retry ─────────────────────────────────────────────
             # TikTok's SSR occasionally shows "Something went wrong" in a fresh
             # (cold-start) browser session. Сначала reload; если не помогло —
             # повторный goto на целевой URL профиля (без главной: у залогиненных
             # она часто открывает /foryou и мешает).
+            # «Couldn't find this account» без user-detail не ретраим — это либо
+            # реально удалённый аккаунт (см. проверку выше), либо антибот.
             for _err_retry in range(5):
                 if items_captured:
                     break
+                await _raise_if_tiktok_profile_confirmed_missing(page, profile_username)
                 await asyncio.sleep(1.5)
                 try:
-                    is_error_page = await page.evaluate("""
-                        () => {
-                            const t = (document.body || {}).innerText || '';
+                    is_error_page = await page.evaluate(
+                        """() => {
+                            const t = ((document.body && document.body.innerText) || '').toLowerCase();
                             return (
-                                t.includes('Something went wrong') ||
-                                t.includes('Что-то пошло не так') ||
-                                t.includes('Ошибка на странице') ||
+                                t.includes('something went wrong') ||
+                                t.includes('что-то пошло не так') ||
+                                t.includes('ошибка на странице') ||
                                 document.title === '' ||
                                 (document.body && document.body.children.length <= 1 &&
                                  !document.querySelector('#app'))
                             );
-                        }
-                    """)
+                        }"""
+                    )
                 except Exception:
                     is_error_page = False
 
@@ -457,13 +611,27 @@ async def _run_with_context(
                 else:
                     break  # page looks normal — proceed to XHR wait
 
-            # Явная страница "Couldn't find this account" на рендере браузера —
-            # это надёжный признак, что профиль недоступен на площадке.
-            if await _page_indicates_profile_unavailable(page):
-                raise ValueError(
-                    f"{PROFILE_UNAVAILABLE_MARK}TikTok @{profile_username or 'unknown'}: "
-                    "профиль не найден или недоступен на площадке."
-                )
+            # Недоступность — только по явному user-detail JSON, не по DOM/i18n-тексту.
+            availability = await _tiktok_profile_availability(page, profile_username)
+            if availability == "missing":
+                raise _tiktok_profile_missing_error(profile_username)
+            if availability == "unknown":
+                signals = await _read_tiktok_profile_page_signals(page, profile_username)
+                if _should_mark_tiktok_profile_unavailable(
+                    body_text=str(signals.get("body_text") or ""),
+                    title=str(signals.get("title") or ""),
+                    og_title=str(signals.get("og_title") or ""),
+                    username=profile_username,
+                    has_avatar=bool(signals.get("has_avatar")),
+                    has_stats=bool(signals.get("has_stats")),
+                    has_post_items=bool(signals.get("has_post_items")),
+                ):
+                    print(
+                        f"[worker] DOM not-found for @{profile_username} "
+                        "(user-detail неоднозначен) — считаем профиль удалённым",
+                        file=sys.stderr,
+                    )
+                    raise _tiktok_profile_missing_error(profile_username)
 
             if _wu is not None and hasattr(_wu, "wait_for_anti_bot_clear"):
                 await _wu.wait_for_anti_bot_clear(page, platform="tiktok")
@@ -495,6 +663,117 @@ async def _run_with_context(
                 except Exception:
                     pass
 
+            async def _try_inpage_item_list(sec_override: str = "") -> bool:
+                sec_arg = (sec_override or sec_uid_hint or "").strip()
+                print(
+                    f"[worker] trying in-page fetch() to item_list API "
+                    f"(sec_uid_hint={'yes' if sec_arg else 'no'})…",
+                    file=sys.stderr,
+                )
+                try:
+                    api_result = await page.evaluate(
+                        r"""
+                        async ({ profileUser, secUidHint }) => {
+                            const baseParams = {
+                                aid: '1988',
+                                app_name: 'tiktok_web',
+                                device_platform: 'web_pc',
+                                os: 'windows',
+                                coverFormat: '2',
+                                version_name: '32.5.0',
+                                language: 'en',
+                            };
+                            const fetchJson = async (path, extra) => {
+                                const params = new URLSearchParams(Object.assign({}, baseParams, extra || {}));
+                                const apiUrl = path + '?' + params.toString();
+                                const resp = await fetch(apiUrl, {
+                                    method: 'GET',
+                                    credentials: 'include',
+                                    headers: {
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'Referer': window.location.href,
+                                    },
+                                });
+                                const text = await resp.text();
+                                return { status: resp.status, text: text.slice(0, 12000) };
+                            };
+
+                            let secUid = String(secUidHint || '').trim();
+                            const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                            if (!secUid && scriptEl) {
+                                try {
+                                    const d = JSON.parse(scriptEl.textContent);
+                                    const sc = (d || {}).__DEFAULT_SCOPE__ || {};
+                                    const ud = sc['webapp.user-detail'];
+                                    secUid = ud?.userInfo?.user?.secUid || '';
+                                } catch (_) {}
+                            }
+                            if (!secUid && profileUser) {
+                                try {
+                                    const udResp = await fetchJson('/api/user/detail/', {
+                                        uniqueId: profileUser,
+                                    });
+                                    if (udResp.status === 200 && udResp.text) {
+                                        const udJson = JSON.parse(udResp.text);
+                                        secUid = udJson?.userInfo?.user?.secUid
+                                            || udJson?.user?.secUid
+                                            || '';
+                                    }
+                                } catch (_) {}
+                            }
+                            if (!secUid) return { error: 'no secUid on page' };
+
+                            const params = new URLSearchParams({
+                                secUid: secUid,
+                                count: '35',
+                                cursor: '0',
+                            });
+                            Object.entries(baseParams).forEach(([k, v]) => params.set(k, v));
+                            const apiUrl = '/api/post/item_list/?' + params.toString();
+                            try {
+                                const resp = await fetch(apiUrl, {
+                                    method: 'GET',
+                                    credentials: 'include',
+                                    headers: {
+                                        'Accept': 'application/json, text/plain, */*',
+                                        'Referer': window.location.href,
+                                    },
+                                });
+                                const text = await resp.text();
+                                return { status: resp.status, text: text.slice(0, 12000) };
+                            } catch (e) {
+                                return { error: String(e) };
+                            }
+                        }
+                    """,
+                        {
+                            "profileUser": profile_username or "",
+                            "secUidHint": sec_arg,
+                        },
+                    )
+                    print(
+                        f"[worker] in-page fetch result: status={api_result.get('status')!r} "
+                        f"err={api_result.get('error')!r}",
+                        file=sys.stderr,
+                    )
+                    if api_result.get("status") == 200:
+                        raw_text = (api_result.get("text") or "").strip()
+                        if not raw_text:
+                            print("[worker] in-page fetch: HTTP 200, пустое тело", file=sys.stderr)
+                            return False
+                        api_json = json.loads(raw_text)
+                        api_items = api_json.get("itemList") or []
+                        print(f"[worker] in-page fetch items={len(api_items)}", file=sys.stderr)
+                        if api_items:
+                            items_captured.extend(api_items)
+                            return True
+                except Exception as _fetch_exc:
+                    print(f"[worker] in-page fetch error: {_fetch_exc}", file=sys.stderr)
+                return False
+
+            if not items_captured and sec_uid_hint:
+                await _try_inpage_item_list(sec_uid_hint)
+
             # ── DOM / script fallback ────────────────────────────────────────
             # Three strategies tried in order:
             #  1. Parse __UNIVERSAL_DATA_FOR_REHYDRATION__ from the browser-rendered page
@@ -517,9 +796,15 @@ async def _run_with_context(
                     except Exception:
                         pass
 
-                    dom_result = await page.evaluate(r"""
-                        () => {
+                    dom_result = await page.evaluate(
+                        r"""
+                        (profileUser) => {
                             const out = { items: [], source: 'none', debug: {} };
+                            const hrefForProfile = (href) => {
+                                if (!profileUser) return true;
+                                const u = String(profileUser).toLowerCase();
+                                return String(href || '').toLowerCase().includes('/@' + u + '/');
+                            };
 
                             // ── Strategy 1: __UNIVERSAL_DATA_FOR_REHYDRATION__ ──────
                             const scriptEl = document.getElementById(
@@ -530,6 +815,28 @@ async def _run_with_context(
                                     const data = JSON.parse(scriptEl.textContent);
                                     const scope = (data || {}).__DEFAULT_SCOPE__ || {};
                                     out.debug.scopeKeys = Object.keys(scope);
+
+                                    const userDetail = scope['webapp.user-detail'];
+                                    if (userDetail && typeof userDetail === 'object') {
+                                        for (const lk of ['itemList', 'videoList', 'items']) {
+                                            if (Array.isArray(userDetail[lk]) && userDetail[lk].length > 0) {
+                                                out.items = userDetail[lk];
+                                                out.source = 'universal:user-detail.' + lk;
+                                                return out;
+                                            }
+                                        }
+                                        const im = userDetail.itemModule;
+                                        if (im && typeof im === 'object') {
+                                            const mod = Object.values(im).filter(function(it) {
+                                                return it && typeof it === 'object' && ('id' in it || 'aweme_id' in it);
+                                            });
+                                            if (mod.length > 0) {
+                                                out.items = mod;
+                                                out.source = 'universal:user-detail.itemModule';
+                                                return out;
+                                            }
+                                        }
+                                    }
 
                                     for (const k of Object.keys(scope)) {
                                         const v = scope[k];
@@ -588,6 +895,7 @@ async def _run_with_context(
                                 const link = el.querySelector('a[href*="/video/"]');
                                 if (!link) return null;
                                 const href = link.getAttribute('href') || link.href || '';
+                                if (!hrefForProfile(href)) return null;
                                 const m = href.match(/\/video\/(\d+)/);
                                 if (!m) return null;
                                 const img = el.querySelector('img');
@@ -629,6 +937,7 @@ async def _run_with_context(
                             out.debug.videoLinkCount = allLinks.length;
                             for (const link of allLinks) {
                                 const href = link.getAttribute('href') || link.href || '';
+                                if (!hrefForProfile(href)) continue;
                                 const m = href.match(/\/video\/(\d+)/);
                                 if (!m || seen.has(m[1])) continue;
                                 seen.add(m[1]);
@@ -642,7 +951,9 @@ async def _run_with_context(
                             if (out.items.length > 0) out.source = 'dom:links';
                             return out;
                         }
-                    """)
+                    """,
+                        profile_username or "",
+                    )
 
                     debug_info = dom_result.get("debug", {})
                     source = dom_result.get("source", "none")
@@ -656,71 +967,27 @@ async def _run_with_context(
                     if found_items:
                         items_captured.extend(found_items)
 
-                    # ── Strategy 4: in-page fetch() to item_list API ─────────
-                    # Uses the browser's own credentials + headers so TikTok
-                    # sees a same-origin request with all the right cookies/tokens.
                     if not items_captured:
-                        print("[worker] trying in-page fetch() to item_list API…", file=sys.stderr)
-                        try:
-                            api_result = await page.evaluate(r"""
-                                async () => {
-                                    // Extract secUid from SSR data
-                                    let secUid = '';
-                                    const scriptEl = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__');
-                                    if (scriptEl) {
-                                        try {
-                                            const d = JSON.parse(scriptEl.textContent);
-                                            const sc = (d || {}).__DEFAULT_SCOPE__ || {};
-                                            const ud = sc['webapp.user-detail'];
-                                            secUid = ud?.userInfo?.user?.secUid || '';
-                                        } catch (_) {}
-                                    }
-                                    if (!secUid) return { error: 'no secUid on page' };
-
-                                    const params = new URLSearchParams({
-                                        aid: '1988',
-                                        app_name: 'tiktok_web',
-                                        device_platform: 'web_pc',
-                                        os: 'windows',
-                                        secUid: secUid,
-                                        count: '35',
-                                        cursor: '0',
-                                        coverFormat: '2',
-                                        version_name: '32.5.0',
-                                        language: 'en',
-                                    });
-                                    const apiUrl = '/api/post/item_list/?' + params.toString();
-                                    try {
-                                        const resp = await fetch(apiUrl, {
-                                            method: 'GET',
-                                            credentials: 'include',
-                                            headers: {
-                                                'Accept': 'application/json, text/plain, */*',
-                                                'Referer': window.location.href,
-                                            }
-                                        });
-                                        const text = await resp.text();
-                                        return { status: resp.status, text: text.slice(0, 8000) };
-                                    } catch (e) {
-                                        return { error: String(e) };
-                                    }
-                                }
-                            """)
-                            print(f"[worker] in-page fetch result: status={api_result.get('status')!r} err={api_result.get('error')!r}", file=sys.stderr)
-                            if api_result.get("status") == 200 and api_result.get("text"):
-                                try:
-                                    api_json = json.loads(api_result["text"])
-                                    api_items = api_json.get("itemList") or []
-                                    print(f"[worker] in-page fetch items={len(api_items)}", file=sys.stderr)
-                                    if api_items:
-                                        items_captured.extend(api_items)
-                                except Exception as _parse_exc:
-                                    print(f"[worker] in-page fetch parse error: {_parse_exc}", file=sys.stderr)
-                        except Exception as _fetch_exc:
-                            print(f"[worker] in-page fetch error: {_fetch_exc}", file=sys.stderr)
+                        await _try_inpage_item_list()
 
                     if not items_captured:
-                        print("[worker] all fallback strategies failed — no posts found", file=sys.stderr)
+                        late_signals = await _read_tiktok_profile_page_signals(
+                            page, profile_username
+                        )
+                        if _should_mark_tiktok_profile_unavailable(
+                            body_text=str(late_signals.get("body_text") or ""),
+                            title=str(late_signals.get("title") or page_title or ""),
+                            og_title=str(late_signals.get("og_title") or ""),
+                            username=profile_username,
+                            has_avatar=bool(late_signals.get("has_avatar")),
+                            has_stats=bool(late_signals.get("has_stats")),
+                            has_post_items=bool(late_signals.get("has_post_items")),
+                        ):
+                            raise _tiktok_profile_missing_error(profile_username)
+                        print(
+                            "[worker] all fallback strategies failed — no posts found",
+                            file=sys.stderr,
+                        )
 
                 except Exception as exc:
                     print(f"[worker] DOM extraction error: {exc}", file=sys.stderr)

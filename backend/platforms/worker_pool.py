@@ -127,6 +127,14 @@ def _compose_worker_env(backend_root: str) -> dict:
     if not threads_nav:
         threads_nav = "60000"
     env["THREADS_NAV_TIMEOUT_MS"] = threads_nav
+    for threads_key in (
+        "THREADS_POST_VIEWS_MAX_POSTS",
+        "THREADS_HUMAN_BATCH_MAX_ROUNDS",
+        "THREADS_HUMAN_BATCH_SIZE",
+    ):
+        val = (os.environ.get(threads_key) or "").strip()
+        if val:
+            env[threads_key] = val
     auth_nav = (os.environ.get("AUTH_NAV_TIMEOUT_MS") or "").strip()
     if auth_nav:
         env["AUTH_NAV_TIMEOUT_MS"] = auth_nav

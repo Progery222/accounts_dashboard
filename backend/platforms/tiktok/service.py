@@ -337,7 +337,36 @@ def _filter_profile_items(items: list[dict], expected_username: str, expected_us
         if expected_user_id and author_id and author_id == expected_user_id:
             filtered.append(item)
             continue
+        # item_list с профиля иногда без author — не выкидываем всю ленту.
+        if not author_username and not author_id:
+            filtered.append(item)
     return filtered
+
+
+def _videos_from_profile_html(html: str, username: str) -> list[dict]:
+    """Ссылки /@user/video/id в SSR — когда itemList в JSON пустой, но посты есть на странице."""
+    uname = (username or "").strip().lstrip("@").lower()
+    if not uname or not html:
+        return []
+    seen: set[str] = set()
+    out: list[dict] = []
+    for pat in (
+        re.compile(rf"https?://(?:www\.)?tiktok\.com/@{re.escape(uname)}/video/(\d+)", re.I),
+        re.compile(rf"/@{re.escape(uname)}/video/(\d+)", re.I),
+    ):
+        for m in pat.finditer(html):
+            vid = m.group(1)
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            out.append({
+                "id": vid,
+                "desc": "",
+                "stats": {"playCount": 0, "diggCount": 0, "commentCount": 0, "shareCount": 0},
+                "video": {"cover": ""},
+                "createTime": 0,
+            })
+    return out
 
 
 def _extract_author_stats_from_items(items: list[dict]) -> dict:
@@ -433,7 +462,7 @@ def _tiktok_force_worker() -> bool:
     return raw in {"1", "true", "yes", "on", "y"}
 
 
-def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], dict]:
+def _run_worker(url: str, *, target_post_count: int = 0, sec_uid: str = "") -> tuple[list[dict], dict]:
     # Read browser settings from Django settings so the subprocess
     # always gets the correct values even if os.environ wasn't updated.
     try:
@@ -455,17 +484,40 @@ def _run_worker(url: str, *, target_post_count: int = 0) -> tuple[list[dict], di
 
     os.environ.update(browser_env)
 
-    try:
-        payload = {"url": url, "target_post_count": int(target_post_count or 0)}
-        # Всегда используем daemon worker pool: одно окно TikTok переиспользуется
-        # между аккаунтами и не закрывается после каждого refresh.
-        data = call_worker(_WORKER, payload, timeout_sec=_tiktok_worker_timeout_sec())
+    def _parse_worker_data(data) -> tuple[list[dict], dict]:
         if isinstance(data, list):
-            # Backward compatibility with old worker payload.
             return _filter_profile_items(data, _extract_username_from_url(url)), {}
         items = data.get("items") or []
         profile_stats = data.get("profile_stats") or {}
         return _filter_profile_items(items, _extract_username_from_url(url)), profile_stats
+
+    try:
+        payload = {"url": url, "target_post_count": int(target_post_count or 0)}
+        if (sec_uid or "").strip():
+            payload["sec_uid"] = str(sec_uid).strip()
+        # Всегда используем daemon worker pool: одно окно TikTok переиспользуется
+        # между аккаунтами и не закрывается после каждого refresh.
+        data = call_worker(_WORKER, payload, timeout_sec=_tiktok_worker_timeout_sec())
+        items, profile_stats = _parse_worker_data(data)
+        if not items and int(target_post_count or 0) > 0:
+            from platforms.tiktok.browser_profile import REFRESH_BROWSER_SECONDARY
+            from platforms.worker_pool import call_worker_oneshot
+
+            uname = _extract_username_from_url(url)
+            print(
+                f"[tiktok] worker без постов для @{uname}; повтор в гостевом Chrome…",
+                file=sys.stderr,
+            )
+            data_guest = call_worker_oneshot(
+                _WORKER,
+                payload,
+                timeout_sec=_tiktok_worker_timeout_sec(),
+                extra_env={"TIKTOK_REFRESH_BROWSER_SLOT": REFRESH_BROWSER_SECONDARY},
+            )
+            items_guest, stats_guest = _parse_worker_data(data_guest)
+            if items_guest:
+                items, profile_stats = items_guest, stats_guest or profile_stats
+        return items, profile_stats
     except Exception as e:
         # Worker may already return a user-facing "profile unavailable" style error.
         # Propagate it so API can mark account.profile_unavailable in a uniform way.
@@ -547,6 +599,30 @@ def fetch_tiktok_profile(username: str) -> dict:
     # TikTok periodically renames the scope key — search all known variants
     # and fall back to scanning every scope value for an itemList array.
     raw: list[dict] = []
+    user_detail = scope.get("webapp.user-detail") or {}
+    if isinstance(user_detail, dict):
+        for subkey in ("itemList", "videoList"):
+            items_candidate = user_detail.get(subkey)
+            if isinstance(items_candidate, list) and items_candidate:
+                print(
+                    f"[tiktok] found video list in scope['webapp.user-detail'][{subkey!r}] "
+                    f"({len(items_candidate)} items)"
+                )
+                raw = items_candidate
+                break
+        if not raw:
+            item_module = user_detail.get("itemModule")
+            if isinstance(item_module, dict) and item_module:
+                module_items = [
+                    v for v in item_module.values()
+                    if isinstance(v, dict) and ("id" in v or "aweme_id" in v)
+                ]
+                if module_items:
+                    print(
+                        f"[tiktok] found video list in scope['webapp.user-detail']['itemModule'] "
+                        f"({len(module_items)} items)"
+                    )
+                    raw = module_items
     for key in ("webapp.video-list", "webapp.videofeed", "webapp.feed"):
         candidate = scope.get(key, {})
         if isinstance(candidate, dict):
@@ -576,6 +652,10 @@ def fetch_tiktok_profile(username: str) -> dict:
 
     if not raw:
         print(f"[tiktok] no video list in HTML for @{username}; scope keys: {list(scope.keys())}")
+        html_videos = _videos_from_profile_html(html, username)
+        if html_videos:
+            print(f"[tiktok] found {len(html_videos)} video link(s) in HTML for @{username}")
+            raw = html_videos
 
     if raw:
         raw = _filter_profile_items(raw, username, str(user.get("id") or ""))
@@ -618,7 +698,11 @@ def fetch_tiktok_profile(username: str) -> dict:
         else:
             # Нет официального счётчика — крутим ленту до «второй-третьей» страницы (~40+).
             worker_post_target = max(ssr_n + 28, 45)
-        worker_items, worker_stats = _run_worker(url, target_post_count=worker_post_target)
+        worker_items, worker_stats = _run_worker(
+            url,
+            target_post_count=worker_post_target,
+            sec_uid=str(user.get("secUid") or ""),
+        )
         worker_avatar = _extract_author_avatar_from_items(
             worker_items,
             username,
@@ -636,7 +720,11 @@ def fetch_tiktok_profile(username: str) -> dict:
     # If core counters are still empty, ask Playwright worker for DOM-derived stats
     # (XPath/CSS selectors on rendered profile header).
     if (follower_count == 0 or like_count == 0) and not worker_stats:
-        _, worker_stats = _run_worker(url, target_post_count=0)
+        _, worker_stats = _run_worker(
+            url,
+            target_post_count=0,
+            sec_uid=str(user.get("secUid") or ""),
+        )
 
     worker_follower = _parse_short_count(worker_stats.get("follower_text", "")) if worker_stats else 0
     worker_following = _parse_short_count(worker_stats.get("following_text", "")) if worker_stats else 0

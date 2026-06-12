@@ -385,7 +385,16 @@ def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> N
     active_post_count = _posts_for_account_stats(account).count()
     prev_post_count = int(stats_before.get("post_count", 0) or 0)
     scraped_post_count = int(account.post_count or 0)
-    account.post_count = max(prev_post_count, active_post_count, scraped_post_count)
+    if account.platform == Platform.TIKTOK:
+        if active_post_count == 0:
+            # Нет постов в БД — не держим устаревший videoCount из шапки.
+            account.post_count = 0
+        else:
+            if scraped_post_count > active_post_count:
+                scraped_post_count = active_post_count
+            account.post_count = max(prev_post_count, active_post_count, scraped_post_count)
+    else:
+        account.post_count = max(prev_post_count, active_post_count, scraped_post_count)
 
 
 _STAT_FIELDS = frozenset(
@@ -404,13 +413,25 @@ _ACCOUNT_REFRESH_SAVE_FIELDS = (
     "profile_unavailable",
     "updated_at",
 )
-_ACCOUNT_ASSIGNMENT_FIELDS = frozenset({"profile", "owner"})
+_ACCOUNT_ASSIGNMENT_FIELDS = frozenset({"profile", "owner", "profile_unavailable"})
 
 
 def _account_assignment_only_validated(validated_data: dict) -> bool:
     if not validated_data:
         return False
     return set(validated_data.keys()).issubset(_ACCOUNT_ASSIGNMENT_FIELDS)
+
+
+def _account_assignment_update_fields(validated_data: dict) -> list[str]:
+    """Имена колонок для update_fields (FK — *_id, не source-имена serializer)."""
+    out: list[str] = []
+    if "profile" in validated_data:
+        out.append("profile_id")
+    if "owner" in validated_data:
+        out.append("owner_id")
+    if "profile_unavailable" in validated_data:
+        out.append("profile_unavailable")
+    return out
 
 
 def _restore_account_updated_at(account_id: int, preserved) -> None:
@@ -462,10 +483,18 @@ def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -
         # если требовать «не обнулять follower_count», весь refresh откатывается и **не сохраняются**
         # лайки постов после enrich. Не включаем follower_count и like_count в эту проверку.
         fields = ["view_count", "post_count"]
+    active_post_count = _posts_for_account_stats(account).count()
     for f in fields:
         prev = int(stats_before.get(f, 0) or 0)
         cur = int(getattr(account, f, 0) or 0)
         if prev > 0 and cur == 0:
+            if (
+                account.platform == Platform.TIKTOK
+                and f == "post_count"
+                and active_post_count == 0
+            ):
+                # Сбрасываем ложный videoCount из шапки, когда постов в БД нет.
+                continue
             return False
     return True
 
@@ -542,6 +571,18 @@ def _refresh_all_delay_seconds(account: Account) -> float:
     if a == b:
         return a
     return random.uniform(a, b)
+
+
+def _refresh_all_cooldown_seconds(
+    account: Account,
+    exc: BaseException | None = None,
+) -> float:
+    """Пауза между аккаунтами в серийном refresh; 0 если профиль не найден/удалён."""
+    if exc is not None and is_profile_unavailable_error(str(exc)):
+        return 0.0
+    if bool(getattr(account, "profile_unavailable", False)):
+        return 0.0
+    return _refresh_all_delay_seconds(account)
 
 
 def _refresh_int_env(name: str, default: int, *, min_v: int = 1, max_v: int = 32) -> int:
@@ -980,6 +1021,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             stop_requested.set()
                             return
                         attempted_network = False
+                        refresh_failure_exc: BaseException | None = None
                         refresh_baseline = None
                         try:
                             if stop_requested.is_set():
@@ -1173,6 +1215,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 retry_facebook_via_apify_after_playwright_failure,
                             )
 
+                            refresh_failure_exc = e
                             handle_facebook_playwright_batch_error(
                                 account,
                                 e,
@@ -1192,8 +1235,10 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                     )
                                 except Exception as apify_exc:
                                     e = apify_exc
+                                    refresh_failure_exc = apify_exc
                                 else:
                                     if apify_acc is not None:
+                                        refresh_failure_exc = None
                                         _persist_auto_refresh_run_item(
                                             account.id,
                                             status="done",
@@ -1207,6 +1252,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                         _mark_progress(success=True, failed=False)
                                         apify_recovered = True
                             if not apify_recovered:
+                                _mark_profile_unavailable_if_applicable(account, e)
                                 detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
                                 if len(detail) > 800:
                                     detail = detail[:797] + "..."
@@ -1227,7 +1273,10 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 delay_sec = (
                                     0.0
                                     if should_use_apify_for_account(account, batch_ctx=batch_scrape)
-                                    else _refresh_all_delay_seconds(account)
+                                    else _refresh_all_cooldown_seconds(
+                                        account,
+                                        refresh_failure_exc,
+                                    )
                                 )
                                 if delay_sec > 0:
                                     account_queue.set_platform_cooldown(
@@ -1780,6 +1829,7 @@ def _run_refresh_all_background(
                     }
                     row: dict | None = None
                     attempted_network = False
+                    refresh_failure_exc: BaseException | None = None
                     refresh_baseline: dict | None = None
                     try:
                         if stop_requested.is_set():
@@ -2115,6 +2165,7 @@ def _run_refresh_all_background(
                                 retry_facebook_via_apify_after_playwright_failure,
                             )
 
+                            refresh_failure_exc = e
                             handle_facebook_playwright_batch_error(
                                 account,
                                 e,
@@ -2138,8 +2189,10 @@ def _run_refresh_all_background(
                                     )
                                 except Exception as apify_exc:
                                     e = apify_exc
+                                    refresh_failure_exc = apify_exc
                                 else:
                                     if apify_acc is not None:
+                                        refresh_failure_exc = None
                                         account = apify_acc
                                         account.refresh_from_db()
                                         row = {
@@ -2188,8 +2241,10 @@ def _run_refresh_all_background(
                                     )
                                 except Exception as apify_exc:
                                     e = apify_exc
+                                    refresh_failure_exc = apify_exc
                                 else:
                                     if apify_acc is not None:
+                                        refresh_failure_exc = None
                                         account = apify_acc
                                         account.refresh_from_db()
                                         row = {
@@ -2271,7 +2326,10 @@ def _run_refresh_all_background(
                         if attempted_network and not is_refresh_cancel_requested():
                             account_queue.set_platform_cooldown(
                                 account.platform,
-                                _refresh_all_delay_seconds(account),
+                                _refresh_all_cooldown_seconds(
+                                    account,
+                                    refresh_failure_exc,
+                                ),
                             )
                             warm_tracker.after_network_refresh(account.platform)
                         if stop_requested.is_set() and row is None:
@@ -2509,6 +2567,9 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             int(stats_before.get("like_count", 0) or 0),
             int(account.like_count or 0),
         )
+        # videoCount из шапки без списка постов — только фактические посты в БД.
+        if has_posts_key and not posts_authoritative and not posts:
+            account.post_count = _posts_for_account_stats(account).count()
 
     seen_post_external_ids: set[str] = set()
     with transaction.atomic():
@@ -2826,7 +2887,7 @@ class AccountViewSet(viewsets.ModelViewSet):
         """Смена профиля/владельца не двигает «Обновлён» — только успешный refresh статистики."""
         validated = serializer.validated_data
         if _account_assignment_only_validated(validated):
-            serializer.save(update_fields=list(validated.keys()))
+            serializer.save(update_fields=_account_assignment_update_fields(validated))
             return
         serializer.save()
 
