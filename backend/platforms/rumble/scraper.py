@@ -1,113 +1,44 @@
-import json
-import re
-import sys
+"""Rumble profile fetch via Playwright worker_pool (как Threads/X)."""
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
-import httpx
+from platforms.rumble.parse import normalize_username
 from platforms.worker_pool import call_worker
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-}
 _WORKER = Path(__file__).parent / "worker.py"
 
 
-def _parse_count(text: str) -> int:
-    if not text:
-        return 0
-    raw = str(text).replace("\xa0", " ").replace("\u202f", " ").strip()
-    m = re.search(r"([\d][\d\s.,]*[KMB]?)", raw, flags=re.I)
-    if not m:
-        return 0
-    token = m.group(1).strip().replace(" ", "")
-    short = re.match(r"^([\d]+(?:\.[\d]+)?)\s*([KMB])$", token, flags=re.I)
-    if short:
-        num = float(short.group(1))
-        mul = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[short.group(2).upper()]
-        return int(num * mul)
-    digits = re.sub(r"[^\d]", "", token)
-    return int(digits) if digits else 0
-
-
-def _extract_metric(html: str, label_pattern: str) -> int:
+def playwright_fallback_enabled() -> bool:
     """
-    Extracts values like:
-      <span>119K Followers</span>
-      <p>3,476,028 views</p>
-      <p>730 videos</p>
+    Открывать Playwright при сбое FlareSolverr.
+    По умолчанию false — только FS; окно браузера не нужно.
     """
-    # Keep the metric capture strict: only the numeric chunk immediately before label.
-    patterns = [
-        rf">\s*([0-9][0-9,\.\s]*[KMB]?)\s+{label_pattern}\s*<",
-        rf"([0-9][0-9,\.\s]*[KMB]?)\s+{label_pattern}",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, html, flags=re.I)
-        if m:
-            return _parse_count(m.group(1))
-    return 0
+    raw = (os.environ.get("RUMBLE_PLAYWRIGHT_FALLBACK") or "0").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
-def _video_id_from_url(url: str) -> str:
-    m = re.search(r"/([a-z0-9]+)-", url, flags=re.I)
-    if m:
-        return m.group(1).lower()
-    m = re.search(r"/([a-z0-9]+)(?:$|[/?#])", url, flags=re.I)
-    return m.group(1).lower() if m else url
+def skip_playwright_prewarm() -> bool:
+    """Не поднимать демон Rumble, пока не включён явный Playwright-fallback."""
+    return not playwright_fallback_enabled()
 
 
-def _extract_json_ld_videos(html: str) -> list[dict]:
-    videos: list[dict] = []
-    for raw in re.findall(
-        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>',
-        html,
-        flags=re.I | re.DOTALL,
-    ):
+def release_batch_resources() -> None:
+    """Конец batch / сброс: FS-сессия и демон Playwright (если был)."""
+    from platforms.rumble import flaresolverr_client
+
+    flaresolverr_client.release_shared_session()
+    if skip_playwright_prewarm():
         try:
-            data = json.loads(raw.strip())
+            from platforms.worker_pool import shutdown_worker
+
+            shutdown_worker(_WORKER)
         except Exception:
-            continue
-
-        nodes = data if isinstance(data, list) else [data]
-        for node in nodes:
-            if not isinstance(node, dict):
-                continue
-            if node.get("@type") != "VideoObject":
-                continue
-            url = str(node.get("url") or "").strip()
-            if not url:
-                continue
-            if url.startswith("/"):
-                url = "https://rumble.com" + url
-            videos.append(
-                {
-                    "external_id": _video_id_from_url(url),
-                    "description": str(node.get("name") or "").strip(),
-                    "thumbnail_url": str(node.get("thumbnailUrl") or "").strip(),
-                    "post_url": url,
-                    "view_count": int(node.get("interactionStatistic", {}).get("userInteractionCount", 0))
-                    if isinstance(node.get("interactionStatistic"), dict)
-                    else 0,
-                    "like_count": 0,
-                    "comment_count": 0,
-                    "share_count": 0,
-                    "posted_at": node.get("uploadDate"),
-                }
-            )
-
-    dedup: dict[str, dict] = {}
-    for item in videos:
-        dedup[item["external_id"]] = item
-    return list(dedup.values())[:30]
+            pass
 
 
-def _run_worker(username: str, timeout: int = 120) -> dict:
+def _run_worker(username: str) -> dict:
     if not _WORKER.exists():
         raise ValueError(f"Внутренняя ошибка: worker не найден по пути {_WORKER}")
     data = call_worker(_WORKER, {"username": username})
@@ -118,151 +49,74 @@ def _run_worker(username: str, timeout: int = 120) -> dict:
     data.setdefault("_source", "worker")
     data.setdefault(
         "_quality_flags",
-        {"about_parsed": False, "feed_parsed": bool(data.get("_posts")), "partial_posts": not bool(data.get("_posts"))},
+        {
+            "about_parsed": False,
+            "feed_parsed": bool(data.get("_posts")),
+            "partial_posts": not bool(data.get("_posts")),
+        },
     )
     return data
 
 
-def _fetch_about_metrics(username: str) -> dict:
-    about_candidates = [
-        f"https://rumble.com/c/{username}/about",
-        f"https://rumble.com/user/{username}/about",
-    ]
-    about_html = ""
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=20.0) as client:
-        for url in about_candidates:
-            r = client.get(url)
-            if r.status_code >= 400:
-                continue
-            if "rumble" not in str(r.url):
-                continue
-            about_html = r.text
-            break
-    if not about_html:
-        return {"follower_count": 0, "view_count": 0, "post_count": 0}
-    return {
-        "follower_count": _extract_metric(about_html, r"followers?"),
-        "view_count": _extract_metric(about_html, r"views?"),
-        "post_count": _extract_metric(about_html, r"videos?"),
-    }
-
-
 def fetch_rumble_profile(username: str) -> dict:
-    username = username.strip().lstrip("@")
-    username = re.sub(r"^https?://(?:www\.)?rumble\.com/", "", username, flags=re.I)
-    username = username.split("?", 1)[0].split("#", 1)[0].strip("/")
-    parts = [p for p in username.split("/") if p]
-    if parts and parts[0].lower() in {"c", "user"}:
-        parts = parts[1:]
-    if parts and parts[-1].lower() == "about":
-        parts = parts[:-1]
-    if not parts:
-        raise ValueError("Некорректный Rumble username")
-    username = parts[0].strip()
-    # Primary path: Playwright worker (bypasses Cloudflare challenge).
-    try:
-        worker_data = _run_worker(username)
-        quality_flags = dict(worker_data.get("_quality_flags") or {})
-        source = str(worker_data.get("_source") or "worker")
+    username = normalize_username(username)
+    import sys
+
+    from platforms.rumble import flaresolverr_client
+
+    fs_tried = False
+    fs_error: str | None = None
+
+    if flaresolverr_client.is_available():
+        fs_tried = True
         try:
-            about_metrics = _fetch_about_metrics(username)
-            # About page metrics are the source of truth for channel-level counters.
-            if about_metrics["follower_count"] > 0:
-                worker_data["follower_count"] = about_metrics["follower_count"]
-            if about_metrics["view_count"] > 0:
-                worker_data["view_count"] = about_metrics["view_count"]
-            if about_metrics["post_count"] > 0:
-                worker_data["post_count"] = about_metrics["post_count"]
-            quality_flags["about_http_refined"] = True
-            if source == "worker":
-                source = "mixed"
-        except Exception as em:
-            print(f"[rumble] about metrics refine failed for @{username}: {em}", file=sys.stderr)
-            quality_flags["about_http_refined"] = False
-        quality_flags["partial_posts"] = not bool(worker_data.get("_posts"))
-        worker_data["_source"] = source
-        worker_data["_quality_flags"] = quality_flags
-        return worker_data
-    except Exception as e:
-        msg = str(e)
-        anti_bot = ("антибот" in msg.lower()) or ("challenge" in msg.lower())
-        if "антибот" in msg.lower() or "challenge" in msg.lower():
             print(
-                f"[rumble] anti-bot loop for @{username}; falling back to HTTP parser",
+                f"[rumble] FlareSolverr для @{username} (сессия, cookies переиспользуются)",
                 file=sys.stderr,
             )
-        print(f"[rumble] worker fallback for @{username}: {e}", file=sys.stderr)
+            return flaresolverr_client.fetch_profile(username)
+        except Exception as exc:
+            fs_error = str(exc)
+            print(
+                f"[rumble] FlareSolverr для @{username}: {exc}",
+                file=sys.stderr,
+            )
+            if not playwright_fallback_enabled():
+                raise ValueError(
+                    f"Rumble @{username}: не удалось обновить. FlareSolverr: {fs_error}"
+                ) from exc
 
-    about_candidates = [
-        f"https://rumble.com/c/{username}/about",
-        f"https://rumble.com/user/{username}/about",
-    ]
-    feed_candidates = [
-        f"https://rumble.com/c/{username}",
-        f"https://rumble.com/user/{username}",
-        f"https://rumble.com/{username}",
-    ]
+    if not playwright_fallback_enabled():
+        raise ValueError(
+            f"Rumble @{username}: FlareSolverr недоступен. "
+            "Запустите FlareSolverr (:8191) или RUMBLE_PLAYWRIGHT_FALLBACK=1."
+        )
 
-    about_html = ""
-    feed_html = ""
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=20.0) as client:
-        for url in about_candidates:
-            r = client.get(url)
-            if r.status_code == 404:
-                continue
-            if r.status_code >= 400:
-                continue
-            if "rumble" not in str(r.url):
-                continue
-            about_html = r.text
-            break
+    try:
+        return _run_worker(username)
+    except Exception as worker_exc:
+        print(
+            f"[rumble] worker для @{username}: {worker_exc}",
+            file=sys.stderr,
+        )
+        msg = str(worker_exc).lower()
+        anti_bot = ("антибот" in msg) or ("challenge" in msg)
 
-        for url in feed_candidates:
-            r = client.get(url)
-            if r.status_code == 404:
-                continue
-            if r.status_code >= 400:
-                continue
-            if "rumble" not in str(r.url):
-                continue
-            feed_html = r.text
-            break
+        if not fs_tried and flaresolverr_client.is_available():
+            try:
+                return flaresolverr_client.fetch_profile(username)
+            except Exception as fs_exc:
+                fs_error = str(fs_exc)
+                print(
+                    f"[rumble] FlareSolverr fallback для @{username}: {fs_exc}",
+                    file=sys.stderr,
+                )
 
-    if not about_html and not feed_html:
-        raise ValueError(f"Rumble @{username} не найден")
-
-    html_for_meta = about_html or feed_html
-    title_m = re.search(r'<meta property="og:title" content="([^"]+)"', html_for_meta)
-    display_name = title_m.group(1).strip() if title_m else username
-
-    bio_m = re.search(r'<meta property="og:description" content="([^"]*)"', html_for_meta)
-    bio = bio_m.group(1).strip() if bio_m else ""
-
-    avatar_m = re.search(r'<meta property="og:image" content="([^"]+)"', html_for_meta)
-    avatar_url = avatar_m.group(1).strip() if avatar_m else ""
-
-    follower_count = _extract_metric(about_html, r"followers?") if about_html else 0
-    channel_view_count = _extract_metric(about_html, r"views?") if about_html else 0
-    channel_video_count = _extract_metric(about_html, r"videos?") if about_html else 0
-
-    videos = _extract_json_ld_videos(feed_html) if feed_html else []
-    post_count = channel_video_count or len(videos)
-
-    return {
-        "display_name": display_name,
-        "avatar_url": avatar_url,
-        "bio": bio,
-        "follower_count": follower_count,
-        "like_count": 0,
-        "view_count": channel_view_count,
-        "post_count": post_count,
-        "_posts": videos,
-        "_source": "httpx",
-        "_quality_flags": {
-            "anti_bot_detected": anti_bot,
-            "about_parsed": bool(about_html),
-            "feed_parsed": bool(feed_html),
-            "partial_posts": not bool(videos),
-            "jsonld_posts_used": bool(videos),
-        },
-    }
+        hint = ". Импортируйте cookies в Настройках → Rumble или запустите FlareSolverr."
+        if fs_error:
+            hint = f". FlareSolverr: {fs_error}"
+        raise ValueError(
+            f"Rumble @{username}: не удалось обновить"
+            + (" (антибот)" if anti_bot else "")
+            + hint
+        ) from worker_exc

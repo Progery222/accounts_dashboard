@@ -30,7 +30,7 @@ def account_profile_url(account: Account) -> str | None:
     if platform == Platform.FACEBOOK:
         return _facebook_profile_url_from_username_field(username)
     if platform == Platform.RUMBLE:
-        return f"https://rumble.com/c/{quote(username, safe='')}"
+        return f"https://rumble.com/user/{quote(username, safe='')}"
     if platform == Platform.REDDIT:
         return f"https://www.reddit.com/r/{quote(username, safe='')}/"
     return None

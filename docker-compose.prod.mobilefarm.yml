@@ -7,6 +7,16 @@
 # Секреты: scripts/sync-mobilefarm-secrets.ps1
 
 services:
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: dashboard-flaresolverr
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
   frontend:
     build:
       context: .

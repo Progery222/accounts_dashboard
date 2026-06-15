@@ -30,6 +30,13 @@ class AccountProfileUrlTests(SimpleTestCase):
             "https://www.tiktok.com/@thecapitolverdict",
         )
 
+    def test_rumble_profile_url(self):
+        acc = Account(username="tobiasreed88", platform=Platform.RUMBLE)
+        self.assertEqual(
+            account_profile_url(acc),
+            "https://rumble.com/user/tobiasreed88",
+        )
+
 
 class ResolveClicksClientTests(SimpleTestCase):
     def test_parse_resolve_matches_by_url_not_row_order(self):

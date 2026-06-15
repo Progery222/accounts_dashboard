@@ -249,6 +249,7 @@ def _sync_posts(
     is_instagram = account.platform == Platform.INSTAGRAM
     is_threads = account.platform == Platform.THREADS
     is_facebook = account.platform == Platform.FACEBOOK
+    is_rumble = account.platform == Platform.RUMBLE
 
     def _to_int(v) -> int:
         if v is None:
@@ -286,7 +287,7 @@ def _sync_posts(
         parsed_views = _to_int(pd.get("view_count", pd.get("play_count", 0)))
         # Threads / Instagram: 0 со скрапа часто «нет в DOM / не успели», а не реальные 0 просмотров.
         # Не затираем сохранённые значения — иначе сумма по постам и дельты в UI падают в минус.
-        if is_threads or is_instagram:
+        if is_threads or is_instagram or is_rumble:
             if parsed_views > 0:
                 prev_v = int(post.view_count or 0)
                 post.view_count = max(prev_v, parsed_views)
@@ -365,7 +366,8 @@ def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> N
     if account.platform == Platform.FACEBOOK:
         account.view_count = max(prev_views, new_views)
     elif account.platform == Platform.RUMBLE:
-        account.view_count = max(prev_views, int(account.view_count or 0))
+        scraped_views = int(account.view_count or 0)
+        account.view_count = max(prev_views, new_views, scraped_views)
     elif account.platform in (Platform.INSTAGRAM, Platform.THREADS):
         account.view_count = max(prev_views, new_views)
     else:
@@ -539,6 +541,7 @@ def _refresh_all_delay_seconds(account: Account) -> float:
     Facebook: 2–5 мин между аккаунтами (120–300 с) — Playwright + антибот.
     TikTok: пауза между аккаунтами 5–10 с (env REFRESH_ALL_DELAY_TIKTOK_*).
     YouTube: пауза 5–10 с между аккаунтами — снижает риск квот/блокировок при серии запросов.
+    Rumble: пауза 20–40 с (env REFRESH_ALL_DELAY_RUMBLE_*) — Cloudflare + Playwright.
     """
     platform_defaults: dict[str, tuple[float, float]] = {
         Platform.INSTAGRAM: (0.0, 0.0),
@@ -548,7 +551,7 @@ def _refresh_all_delay_seconds(account: Account) -> float:
         Platform.FACEBOOK: (120.0, 300.0),
         Platform.YOUTUBE: (5.0, 10.0),
         Platform.TELEGRAM: (0.3, 0.8),
-        Platform.RUMBLE: (0.5, 1.0),
+        Platform.RUMBLE: (20.0, 40.0),
         Platform.REDDIT: (0.4, 0.9),
     }
     dmin, dmax = platform_defaults.get(account.platform, (3.0, 7.0))
@@ -786,7 +789,16 @@ def _prewarm_workers(accounts: list[Account], *, wait_browser_ready: bool = Fals
 
     used_platforms = {acc.platform for acc in accounts}
     worker_paths: list[Path] = []
+    skip_rumble = False
+    try:
+        from platforms.rumble.scraper import skip_playwright_prewarm
+
+        skip_rumble = skip_playwright_prewarm()
+    except Exception:
+        pass
     for platform in sorted(used_platforms):
+        if skip_rumble and platform == Platform.RUMBLE:
+            continue
         worker = _PLATFORM_WORKERS.get(platform)
         if worker and worker.exists():
             worker_paths.append(worker)
@@ -1327,6 +1339,12 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         state.last_error = ""
                         state.save(update_fields=["last_error", "updated_at"])
             finally:
+                try:
+                    from platforms.rumble.scraper import release_batch_resources
+
+                    release_batch_resources()
+                except Exception:
+                    pass
                 end_facebook_batch()
                 leave_sync_apify_batch()
     finally:
@@ -1740,6 +1758,13 @@ def _run_refresh_all_background(
             pw_accounts = filter_accounts_for_playwright_prewarm(
                 accounts_needing_playwright(accounts),
             )
+            try:
+                from platforms.rumble.scraper import release_batch_resources, skip_playwright_prewarm
+
+                if skip_playwright_prewarm():
+                    release_batch_resources()
+            except Exception:
+                pass
             if pw_accounts and bool(
                 getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False),
             ):
@@ -2419,6 +2444,12 @@ def _run_refresh_all_background(
         except Exception:
             pass
     finally:
+        try:
+            from platforms.rumble.scraper import release_batch_resources
+
+            release_batch_resources()
+        except Exception:
+            pass
         try:
             from .facebook_refresh_lane import end_facebook_batch
 

@@ -516,6 +516,20 @@ def call_worker(
     До 3 попыток при «пустом stdout» / закрытом браузере — при refresh_all по многим
     аккаунтам один сбой не должен навсегда ломать пул.
     """
+    if worker_path.resolve().parent.name == "rumble":
+        try:
+            from platforms.rumble.scraper import skip_playwright_prewarm
+
+            if skip_playwright_prewarm():
+                raise ValueError(
+                    "Rumble Playwright отключён — используется FlareSolverr. "
+                    "Для окна браузера: RUMBLE_PLAYWRIGHT_FALLBACK=1."
+                )
+        except ValueError:
+            raise
+        except Exception:
+            pass
+
     key = pool_storage_key(worker_path)
     last_exc: BaseException | None = None
     for _attempt in range(3):
@@ -641,6 +655,13 @@ def prewarm_workers(
     (Instagram/X/Threads), а TikTok/Facebook в общем профиле гасятся.
     """
     paths = [p for p in worker_paths if p.exists()]
+    try:
+        from platforms.rumble.scraper import skip_playwright_prewarm
+
+        if skip_playwright_prewarm():
+            paths = [p for p in paths if p.resolve().parent.name != "rumble"]
+    except Exception:
+        pass
     if not paths:
         return
     reconcile_orphan_worker_daemons()

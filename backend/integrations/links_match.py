@@ -78,7 +78,7 @@ def normalize_account_label(text: str | None) -> str | None:
 
     if "rumble.com" in host:
         segs = [p for p in path.split("/") if p]
-        if len(segs) >= 2 and segs[0].lower() == "c":
+        if len(segs) >= 2 and segs[0].lower() in {"c", "user"}:
             return f"rumble:{segs[1].casefold()}"
         return f"{host}{path}".casefold()
 

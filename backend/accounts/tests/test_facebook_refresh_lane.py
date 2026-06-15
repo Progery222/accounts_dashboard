@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 
 from accounts.facebook_refresh_lane import (
@@ -7,6 +9,7 @@ from accounts.facebook_refresh_lane import (
     begin_facebook_batch,
     end_facebook_batch,
     executor_thread_counts,
+    filter_accounts_for_playwright_prewarm,
     platform_claim_filter,
     try_mark_facebook_account_started,
 )
@@ -65,3 +68,10 @@ class FacebookRefreshLaneTests(SimpleTestCase):
     def test_batch_has_facebook(self):
         acc = Account(platform=Platform.FACEBOOK, username="x")
         self.assertTrue(batch_has_facebook([acc]))
+
+    def test_filter_prewarm_skips_rumble_without_playwright_fallback(self):
+        rumble = Account(username="r", platform=Platform.RUMBLE)
+        tiktok = Account(username="t", platform=Platform.TIKTOK)
+        with patch.dict("os.environ", {"RUMBLE_PLAYWRIGHT_FALLBACK": "0"}, clear=False):
+            out = filter_accounts_for_playwright_prewarm([rumble, tiktok])
+        self.assertEqual([a.platform for a in out], [Platform.TIKTOK])

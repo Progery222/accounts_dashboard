@@ -696,6 +696,8 @@ def anti_bot_wait_timeout_ms(platform: str) -> int:
     plat = (platform or "").strip().lower()
     if plat == "tiktok":
         raw = os.environ.get("TIKTOK_CAPTCHA_WAIT_MS", "300000")
+    elif plat == "rumble":
+        raw = os.environ.get("RUMBLE_ANTIBOT_WAIT_MS", os.environ.get("ANTI_BOT_WAIT_MS", "120000"))
     else:
         raw = os.environ.get("ANTI_BOT_WAIT_MS", "120000")
     try:

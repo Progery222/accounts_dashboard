@@ -107,7 +107,15 @@ def submit_refresh_workers(
 
 def filter_accounts_for_playwright_prewarm(accounts: list[Account]) -> list[Account]:
     """Общий prewarm не трогает Facebook — демон FB поднимает FB-воркер."""
-    return [a for a in accounts if str(a.platform) != FACEBOOK_PLATFORM]
+    out = [a for a in accounts if str(a.platform) != FACEBOOK_PLATFORM]
+    try:
+        from platforms.rumble.scraper import skip_playwright_prewarm
+
+        if skip_playwright_prewarm():
+            out = [a for a in out if str(a.platform) != Platform.RUMBLE]
+    except Exception:
+        pass
+    return out
 
 
 def ensure_facebook_playwright_daemon_ready() -> None:

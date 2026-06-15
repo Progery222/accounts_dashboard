@@ -33,3 +33,13 @@ class RefreshCooldownTests(SimpleTestCase):
             {"platform": Platform.TIKTOK, "username": "ok", "profile_unavailable": False},
         )()
         self.assertGreater(_refresh_all_cooldown_seconds(account), 0.0)
+
+    def test_rumble_default_delay(self):
+        account = type(
+            "Acc",
+            (),
+            {"platform": Platform.RUMBLE, "username": "ok", "profile_unavailable": False},
+        )()
+        delay = _refresh_all_delay_seconds(account)
+        self.assertGreaterEqual(delay, 20.0)
+        self.assertLessEqual(delay, 40.0)

@@ -394,12 +394,9 @@ REST_FRAMEWORK = {
 # Файловые логи: backend/var/log/backend.log (локально) или /app/var/log (Docker volume).
 # Ротация по дням, хранение DASHBOARD_LOG_RETENTION_DAYS (по умолчанию 7). DASHBOARD_FILE_LOG=0 — выкл.
 # stderr (scheduled_refresh, worker_pool) дублируется скриптом scripts/archive-dashboard-docker-logs.sh на сервере.
-_file_logging = None
 try:
-    from config.dashboard_logging import build_file_logging
+    from config.dashboard_logging import build_logging
 
-    _file_logging = build_file_logging(base_dir=BASE_DIR)
+    LOGGING = build_logging(base_dir=BASE_DIR)
 except Exception as _log_cfg_exc:
-    print(f"[django settings] dashboard file logging skipped: {_log_cfg_exc}", file=sys.stderr)
-if _file_logging is not None:
-    LOGGING = _file_logging
+    print(f"[django settings] logging config skipped: {_log_cfg_exc}", file=sys.stderr)

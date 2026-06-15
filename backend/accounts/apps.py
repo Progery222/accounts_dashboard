@@ -1508,6 +1508,13 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             pw_accounts = filter_accounts_for_playwright_prewarm(
                 accounts_needing_playwright(accounts),
             )
+            try:
+                from platforms.rumble.scraper import release_batch_resources, skip_playwright_prewarm
+
+                if skip_playwright_prewarm():
+                    release_batch_resources()
+            except Exception:
+                pass
             if pw_accounts and bool(getattr(dj_settings, "ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT", False)):
                 print(
                     "[scheduled_refresh] подъём окон Playwright (по платформам)…",
@@ -1593,6 +1600,12 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         },
                     )
         finally:
+            try:
+                from platforms.rumble.scraper import release_batch_resources
+
+                release_batch_resources()
+            except Exception:
+                pass
             end_facebook_batch()
             leave_sync_apify_batch()
             finished = timezone.now()
