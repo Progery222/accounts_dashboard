@@ -55,6 +55,47 @@
   button { font-family: inherit; }
   a { color: inherit; }
   #root { min-height: 100vh; }
+  .switch-btn {
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+    border-radius: 13px;
+    background: #bfbfbf;
+    z-index: 0;
+    margin: 0;
+    padding: 0;
+    border: none;
+    cursor: pointer;
+    position: relative;
+    transition-duration: 300ms;
+    flex-shrink: 0;
+  }
+  .switch-btn::after {
+    content: "";
+    height: 20px;
+    width: 20px;
+    border-radius: 10px;
+    background: #fff;
+    top: 3px;
+    left: 3px;
+    transition-duration: 300ms;
+    position: absolute;
+    z-index: 1;
+  }
+  .switch-btn.switch-on {
+    background: #ef4444;
+  }
+  .switch-btn.switch-on::after {
+    left: 25px;
+  }
+  .switch-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+  .switch-btn:focus-visible {
+    outline: 2px solid var(--danger, #ef4444);
+    outline-offset: 2px;
+  }
 </style>
 <link rel="stylesheet" href="checkbox-radio.css" />
 </head>
