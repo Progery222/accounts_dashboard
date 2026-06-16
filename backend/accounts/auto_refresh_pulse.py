@@ -295,6 +295,11 @@ def create_auto_refresh_point_from_report_rows(
     platform_deltas = platform_deltas_from_report_rows(report_rows)
     current_total = _current_views_total()
     d_prev, d_day = _point_totals_at(finished, current_total)
+    report_delta = sum(int(v) for v in platform_deltas.values())
+    if report_delta > 0:
+        # Итог в БД мог уже обновиться 30-мин снимком во время batch — для графика
+        # берём прирост из отчёта (сумма view_after − view_before по аккаунтам).
+        d_prev = max(d_prev, report_delta)
     local_dt = timezone.localtime(finished)
     AutoRefreshPoint.objects.create(
         local_date=local_dt.date(),

@@ -53,31 +53,61 @@ def save_tv_emu_config(config: dict[str, Any]) -> Path:
     return path
 
 
-def load_tv_emu_runtime_epoch() -> int:
+def _load_runtime_state() -> dict[str, int | bool]:
     path = _epoch_path()
     if not path.is_file():
-        return 0
+        return {"runtime_epoch": 0, "runtime_paused": False}
     try:
         raw = path.read_text(encoding="utf-8")
         if not raw.strip():
-            return 0
+            return {"runtime_epoch": 0, "runtime_paused": False}
         data = json.loads(raw)
     except (OSError, json.JSONDecodeError):
-        return 0
+        return {"runtime_epoch": 0, "runtime_paused": False}
     if not isinstance(data, dict):
-        return 0
+        return {"runtime_epoch": 0, "runtime_paused": False}
     try:
-        return max(0, int(data.get("runtime_epoch", 0)))
+        epoch = max(0, int(data.get("runtime_epoch", 0)))
     except (TypeError, ValueError):
-        return 0
+        epoch = 0
+    paused = bool(data.get("runtime_paused", False))
+    return {"runtime_epoch": epoch, "runtime_paused": paused}
 
 
-def bump_tv_emu_runtime_epoch() -> int:
+def _save_runtime_state(state: dict[str, int | bool]) -> None:
     path = _epoch_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    next_epoch = load_tv_emu_runtime_epoch() + 1
-    payload = json.dumps({"runtime_epoch": next_epoch}, ensure_ascii=False, separators=(",", ":"))
+    payload = json.dumps(
+        {
+            "runtime_epoch": max(0, int(state.get("runtime_epoch", 0))),
+            "runtime_paused": bool(state.get("runtime_paused", False)),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(payload, encoding="utf-8")
     tmp.replace(path)
-    return next_epoch
+
+
+def load_tv_emu_runtime_epoch() -> int:
+    return int(_load_runtime_state()["runtime_epoch"])
+
+
+def load_tv_emu_runtime_paused() -> bool:
+    return bool(_load_runtime_state()["runtime_paused"])
+
+
+def set_tv_emu_runtime_paused(paused: bool) -> bool:
+    state = _load_runtime_state()
+    state["runtime_paused"] = bool(paused)
+    _save_runtime_state(state)
+    return bool(state["runtime_paused"])
+
+
+def bump_tv_emu_runtime_epoch() -> int:
+    state = _load_runtime_state()
+    state["runtime_epoch"] = int(state["runtime_epoch"]) + 1
+    state["runtime_paused"] = False
+    _save_runtime_state(state)
+    return int(state["runtime_epoch"])

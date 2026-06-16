@@ -425,6 +425,24 @@ _HANDLES: dict[str, _WorkerHandle] = {}
 _GLOBAL_LOCK = threading.Lock()
 
 
+def is_worker_transport_error(exc: BaseException) -> bool:
+    """Обрыв stdin/stdout демона Playwright — пересоздать worker и повторить."""
+    if isinstance(exc, BrokenPipeError):
+        return True
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == 32:
+        return True
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "broken pipe",
+            "worker не вернул ответ",
+            "worker завершился",
+            "фоновый worker завершился",
+        )
+    )
+
+
 def _is_recoverable_playwright_error(message: str) -> bool:
     msg = (message or "").lower()
     markers = (
@@ -437,6 +455,8 @@ def _is_recoverable_playwright_error(message: str) -> bool:
         "worker не вернул ответ",
         "таймаут ожидания ответа worker",
         "таймаут запуска браузера",
+        "broken pipe",
+        "[errno 32]",
     )
     return any(m in msg for m in markers)
 
@@ -573,7 +593,7 @@ def call_worker(
                 from accounts.refresh_cancel import RefreshCancelledError
 
                 raise RefreshCancelledError("Остановлено пользователем") from exc
-            if not _is_recoverable_playwright_error(str(exc)):
+            if not _is_recoverable_playwright_error(str(exc)) and not is_worker_transport_error(exc):
                 raise
             # Не пересоздаём процесс «на всякий случай» после успешного первого вызова:
             # иначе при одной ошибке пользователь видит второе окно браузера.

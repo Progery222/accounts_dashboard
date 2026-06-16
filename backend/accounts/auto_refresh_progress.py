@@ -20,7 +20,7 @@ def refresh_run_in_progress(state, *, source: str | None = None) -> bool:
     if getattr(state, "is_running", False):
         return True
     src = (source or getattr(state, "source", None) or "").strip()
-    if src not in ("bulk_refresh", "scheduler", "refresh_all"):
+    if src not in ("bulk_refresh", "scheduler", "manual", "refresh_all"):
         return False
     rd = state.run_detail if isinstance(state.run_detail, dict) else {}
     items = rd.get("items") or []

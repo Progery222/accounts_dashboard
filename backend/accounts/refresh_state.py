@@ -8,6 +8,15 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+ACTIVE_AUTO_REFRESH_SOURCES = frozenset({"bulk_refresh", "scheduler", "manual"})
+
+_STALE_RESTART_ERRORS = frozenset(
+    {
+        "Автообновление было прервано перезапуском процесса.",
+        "Сбор всех аккаунтов был прерван перезапуском процесса.",
+    }
+)
+
 
 def _float_env(name: str, default: float) -> float:
     raw = (os.environ.get(name) or "").strip()
@@ -34,6 +43,32 @@ def _state_looks_stale(state, *, stale_hours: float, stall_hours: float) -> bool
     if updated and (now - updated) > timedelta(hours=max(0.25, stall_hours)):
         return True
     return False
+
+
+def keep_auto_refresh_run_alive(state) -> None:
+    """
+    Восстановить is_running во время активного прогона, если флаг сбросили извне
+    (перезапуск, stale-clear, гонка), но поток batch ещё обрабатывает очередь.
+    """
+    state.refresh_from_db(
+        fields=["is_running", "finished_at", "source", "cancel_requested", "last_error"]
+    )
+    if state.cancel_requested or state.finished_at:
+        return
+    src = (state.source or "").strip()
+    if src not in ACTIVE_AUTO_REFRESH_SOURCES:
+        return
+    updates: list[str] = []
+    if not state.is_running:
+        state.is_running = True
+        updates.append("is_running")
+    err = (state.last_error or "").strip()
+    if err in _STALE_RESTART_ERRORS:
+        state.last_error = ""
+        updates.append("last_error")
+    if updates:
+        updates.append("updated_at")
+        state.save(update_fields=updates)
 
 
 def clear_stuck_refresh_run(

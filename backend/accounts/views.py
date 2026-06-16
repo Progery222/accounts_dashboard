@@ -630,20 +630,9 @@ def _parallel_refresh_worker_count(accounts: list[Account]) -> int:
 
 def _keep_bulk_refresh_running(state: AutoRefreshState) -> None:
     """Восстановить is_running, если флаг сбросили побочным процессом, а поток bulk ещё работает."""
-    state.refresh_from_db(fields=["is_running", "finished_at", "source", "last_error"])
-    if (state.source or "").strip() != "bulk_refresh" or state.finished_at:
-        return
-    updates: list[str] = []
-    if not state.is_running:
-        state.is_running = True
-        updates.append("is_running")
-    err = (state.last_error or "").strip()
-    if err == "Автообновление было прервано перезапуском процесса.":
-        state.last_error = ""
-        updates.append("last_error")
-    if updates:
-        updates.append("updated_at")
-        state.save(update_fields=updates)
+    from .refresh_state import keep_auto_refresh_run_alive
+
+    keep_auto_refresh_run_alive(state)
 
 
 def _refresh_platform_limits(accs: list[Account]) -> dict[str, int]:
@@ -3739,7 +3728,9 @@ def tv_emu_config(request):
         bump_tv_emu_runtime_epoch,
         load_tv_emu_config,
         load_tv_emu_runtime_epoch,
+        load_tv_emu_runtime_paused,
         save_tv_emu_config,
+        set_tv_emu_runtime_paused,
     )
 
     if request.method == "GET":
@@ -3747,11 +3738,21 @@ def tv_emu_config(request):
         return Response({
             "config": stored,
             "runtime_epoch": load_tv_emu_runtime_epoch(),
+            "runtime_paused": load_tv_emu_runtime_paused(),
             "source": "server",
             "updated": bool(stored),
         })
 
     data = request.data if isinstance(request.data, dict) else {}
+    if "paused" in data and "config" not in data:
+        paused = set_tv_emu_runtime_paused(_coerce_bool(data.get("paused")))
+        return Response({
+            "ok": True,
+            "message": "Пауза эмуляции обновлена",
+            "runtime_paused": paused,
+            "runtime_epoch": load_tv_emu_runtime_epoch(),
+        })
+
     config = data.get("config")
     if not isinstance(config, dict):
         return Response(
@@ -3762,6 +3763,8 @@ def tv_emu_config(request):
         path = save_tv_emu_config(config)
     except ValueError as exc:
         return Response({"error": str(exc)}, status=drf_status.HTTP_400_BAD_REQUEST)
+    if "paused" in data:
+        set_tv_emu_runtime_paused(_coerce_bool(data.get("paused")))
     runtime_epoch = load_tv_emu_runtime_epoch()
     if data.get("restart") is True:
         runtime_epoch = bump_tv_emu_runtime_epoch()
@@ -3770,6 +3773,7 @@ def tv_emu_config(request):
         "message": "Настройки эмуляции сохранены на сервере",
         "config_path": str(path),
         "runtime_epoch": runtime_epoch,
+        "runtime_paused": load_tv_emu_runtime_paused(),
     })
 
 
@@ -4006,6 +4010,20 @@ def auto_refresh_series(request):
 
         now = timezone.now()
         window_start = now - datetime.timedelta(hours=24)
+        _chart_skip_sources = frozenset({"manual_seed_uneven"})
+
+        def _rolling_anchor_baseline(prev_row, window_rows: list[dict]) -> int:
+            if prev_row:
+                return int(prev_row["view_count_total"])
+            eligible = [
+                int(p["view_count_total"])
+                for p in window_rows
+                if str(p.get("source") or "") not in _chart_skip_sources
+            ]
+            if eligible:
+                return min(eligible)
+            return int(window_rows[0]["view_count_total"])
+
         prev = (
             AutoRefreshPoint.objects.filter(measured_at__lt=window_start)
             .order_by("-measured_at")
@@ -4021,7 +4039,7 @@ def auto_refresh_series(request):
         if in_window:
             first_ts = in_window[0]["measured_at"]
             if first_ts > window_start:
-                baseline = int(prev["view_count_total"]) if prev else int(in_window[0]["view_count_total"])
+                baseline = _rolling_anchor_baseline(prev, in_window)
                 points.append({
                     "id": 0,
                     "measured_at": window_start,

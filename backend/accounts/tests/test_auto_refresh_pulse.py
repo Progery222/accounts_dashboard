@@ -49,6 +49,26 @@ class AutoRefreshPulseTests(APITestCase):
         self.assertEqual(pt.platform_deltas.get("tiktok"), 9)
         self.assertEqual(pt.platform_deltas.get("facebook"), 16)
         self.assertEqual(pt.source, "scheduler")
+        self.assertEqual(pt.view_delta_from_prev_point, 25)
+
+    def test_report_delta_used_when_db_total_already_caught_up(self):
+        AutoRefreshPoint.objects.all().delete()
+        Account.objects.create(platform=Platform.TIKTOK, username="caught", view_count=10_000)
+        AutoRefreshPoint.objects.create(
+            local_date=timezone.localdate(),
+            source="interval",
+            slot_label="05:30",
+            view_count_total=10_000,
+            view_delta_from_prev_point=0,
+            view_delta_from_day_start=0,
+            platform_deltas={},
+        )
+        create_auto_refresh_point_from_report_rows(
+            [{"platform": "tiktok", "view_before": 9850, "view_after": 10_000}],
+            source="scheduler",
+        )
+        pt = AutoRefreshPoint.objects.order_by("-measured_at").first()
+        self.assertEqual(pt.view_delta_from_prev_point, 150)
 
     def test_first_point_of_day_day_start_equals_prev_delta(self):
         AutoRefreshPoint.objects.all().delete()

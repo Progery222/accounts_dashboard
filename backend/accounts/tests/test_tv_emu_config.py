@@ -5,7 +5,9 @@ from accounts.tv_emu_config import (
     bump_tv_emu_runtime_epoch,
     load_tv_emu_config,
     load_tv_emu_runtime_epoch,
+    load_tv_emu_runtime_paused,
     save_tv_emu_config,
+    set_tv_emu_runtime_paused,
 )
 
 
@@ -34,6 +36,40 @@ class TvEmuConfigApiTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["config"], payload)
         self.assertEqual(r.json()["runtime_epoch"], 0)
+        self.assertFalse(r.json()["runtime_paused"])
+
+    def test_pause_without_config(self):
+        r = self.client.post(
+            "/api/accounts/tv-emu-config/",
+            {"paused": True},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+        self.assertTrue(r.json()["runtime_paused"])
+        self.assertTrue(load_tv_emu_runtime_paused())
+
+        r = self.client.get("/api/accounts/tv-emu-config/")
+        self.assertTrue(r.json()["runtime_paused"])
+
+        r = self.client.post(
+            "/api/accounts/tv-emu-config/",
+            {"paused": False},
+            format="json",
+        )
+        self.assertFalse(r.json()["runtime_paused"])
+
+    def test_restart_clears_pause(self):
+        set_tv_emu_runtime_paused(True)
+        payload = {"version": 2, "atom": {}, "pulse": {"platform": {}}, "top": {}}
+        r = self.client.post(
+            "/api/accounts/tv-emu-config/",
+            {"config": payload, "restart": True},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["runtime_paused"])
+        self.assertFalse(load_tv_emu_runtime_paused())
 
     def test_restart_bumps_runtime_epoch(self):
         payload = {"version": 2, "atom": {}, "pulse": {"platform": {}}, "top": {}}
@@ -73,3 +109,9 @@ class TvEmuConfigFileTests(TestCase):
         self.assertEqual(bump_tv_emu_runtime_epoch(), 1)
         self.assertEqual(bump_tv_emu_runtime_epoch(), 2)
         self.assertEqual(load_tv_emu_runtime_epoch(), 2)
+
+    def test_runtime_pause_roundtrip(self):
+        self.assertFalse(load_tv_emu_runtime_paused())
+        self.assertTrue(set_tv_emu_runtime_paused(True))
+        self.assertTrue(load_tv_emu_runtime_paused())
+        self.assertFalse(set_tv_emu_runtime_paused(False))

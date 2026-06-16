@@ -850,6 +850,10 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     print(f"[scheduled_refresh] run_detail finalize failed: {e}")
 
             def _mark_progress(*, success: bool, failed: bool, last_error: str = "") -> None:
+                from .refresh_state import keep_auto_refresh_run_alive
+
+                keep_auto_refresh_run_alive(state)
+
                 def _write() -> None:
                     state.processed_accounts += 1
                     if success:
@@ -887,21 +891,17 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     if stop_requested.is_set():
                         return
                     ensure_fresh_db_connections()
+                    from .refresh_state import keep_auto_refresh_run_alive
+
+                    keep_auto_refresh_run_alive(state)
                     with state_lock:
                         def _read_cancel_flag() -> None:
-                            state.refresh_from_db(fields=["cancel_requested", "is_running"])
+                            state.refresh_from_db(fields=["cancel_requested"])
 
                         run_with_db_reconnect(_read_cancel_flag)
-                        if bool(state.cancel_requested) or not bool(state.is_running):
+                        if bool(state.cancel_requested):
                             run_flags["cancelled"] = True
-                            if state.cancel_requested:
-                                state.last_error = "Автообновление остановлено пользователем."
-                            else:
-                                prev = (state.last_error or "").strip()
-                                state.last_error = prev or (
-                                    "Прогон остановлен: is_running сброшен без cancel_requested "
-                                    "(не кнопка «Остановить» — stale-clear, перезапуск или гонка)."
-                                )[:500]
+                            state.last_error = "Автообновление остановлено пользователем."
                             print(
                                 "[scheduled_refresh] worker exit: "
                                 f"cancel={state.cancel_requested} running={state.is_running} "
@@ -925,30 +925,34 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                     if idx is None:
                         return
 
-                    account = _reload_account(idx)
-                    if (
-                        facebook_lane
-                        and str(account.platform) == "facebook"
-                        and not try_mark_facebook_account_started(account.id)
-                    ):
-                        account_queue.abandon(idx, account.platform)
-                        continue
-                    from .warm_run_detail import is_refresh_cancel_requested
+                    from .refresh_state import keep_auto_refresh_run_alive
 
-                    if is_refresh_cancel_requested():
-                        stop_requested.set()
-                        return
-                    release_db_for_long_task()
-                    warm_tracker.wait_warm_before_refresh(account.platform)
-                    if is_refresh_cancel_requested():
-                        stop_requested.set()
-                        return
-                    account = _reload_account(idx)
+                    keep_auto_refresh_run_alive(state)
                     row_started = time.perf_counter()
                     attempted_network = False
                     refresh_failure_exc = None
                     refresh_baseline = None
                     try:
+                        account = _reload_account(idx)
+                        if (
+                            facebook_lane
+                            and str(account.platform) == "facebook"
+                            and not try_mark_facebook_account_started(account.id)
+                        ):
+                            account_queue.abandon(idx, account.platform)
+                            continue
+                        from .warm_run_detail import is_refresh_cancel_requested
+
+                        if is_refresh_cancel_requested():
+                            stop_requested.set()
+                            return
+                        release_db_for_long_task()
+                        warm_tracker.wait_warm_before_refresh(account.platform)
+                        if is_refresh_cancel_requested():
+                            stop_requested.set()
+                            return
+                        account = _reload_account(idx)
+
                         if stop_requested.is_set():
                             return
 
