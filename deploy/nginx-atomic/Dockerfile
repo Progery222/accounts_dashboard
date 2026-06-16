@@ -12,8 +12,14 @@ RUN npm install @babel/standalone@7.26.9 --no-save \
             https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js)
 
 FROM nginx:alpine
+RUN apk add --no-cache openssl
 COPY deploy/nginx-atomic/default.conf /etc/nginx/conf.d/default.conf
+COPY deploy/nginx-atomic/dashboard-locations.inc /etc/nginx/conf.d/dashboard-locations.inc
+COPY deploy/nginx-atomic/docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 COPY --from=build /src/new_frontend /usr/share/nginx/html
 # vendor/ иногда попадает в образ с mode 0700 — nginx (не root) тогда не видит файлы
 # и try_files отдаёт app.html (text/html) вместо .js → «Скрипт не загрузился».
 RUN chmod -R a+rX /usr/share/nginx/html/vendor /usr/share/nginx/html/app.bundle.js
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["nginx", "-g", "daemon off;"]

@@ -1,0 +1,19 @@
+{
+  "TCP": {
+    "10000": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "${TS_CERT_DOMAIN}:10000": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:9081"
+        }
+      }
+    }
+  },
+  "AllowFunnel": {
+    "${TS_CERT_DOMAIN}:10000": true
+  }
+}

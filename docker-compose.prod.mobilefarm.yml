@@ -7,6 +7,25 @@
 # Секреты: scripts/sync-mobilefarm-secrets.ps1
 
 services:
+  # Отдельная Tailscale-нода accountsstats.*.ts.net → Funnel :10000 → nginx :9081 (Basic Auth).
+  # Auth key: TS_AUTHKEY_ACCOUNTSSTATS в .env (reusable + Funnel).
+  accountsstats-tailscale:
+    image: tailscale/tailscale:latest
+    container_name: dashboard-accountsstats-tailscale
+    hostname: accountsstats
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      TS_AUTHKEY: "${TS_AUTHKEY_ACCOUNTSSTATS:?set TS_AUTHKEY_ACCOUNTSSTATS in .env}"
+      TS_HOSTNAME: accountsstats
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "true"
+      TS_ACCEPT_DNS: "true"
+    volumes:
+      - accountsstats_ts_state:/var/lib/tailscale
+      - ./deploy/tailscale-accountsstats:/config:ro
+
   flaresolverr:
     image: ghcr.io/flaresolverr/flaresolverr:latest
     container_name: dashboard-flaresolverr
@@ -51,3 +70,6 @@ services:
       - ./backend/config/worker_accounts.env:/app/config/worker_accounts.env:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ${XAUTHORITY:-/home/atom/.Xauthority}:/root/.Xauthority:ro
+
+volumes:
+  accountsstats_ts_state:

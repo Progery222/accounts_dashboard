@@ -1,9 +1,32 @@
 # Mobile Farm GPU — подключение по RDP
 
 Сервер: **10.20.87.230**, пользователь **atom**.  
-UI дашборда: **http://10.20.87.230:9080/** (Atomic).
+UI дашборда в LAN: **http://10.20.87.230:9080/** (Atomic).
 
-## 1. Сеть
+## Публичный доступ из интернета
+
+Сервер в приватной сети `10.20.x.x` — **порт 9080 снаружи не открыт**. Публично — через **Tailscale Funnel** на отдельной ноде **accountsstats** (порт **10000**, с паролем nginx).
+
+**URL:** `https://accountsstats.tailef595f.ts.net:10000/`  
+Логин `admin`, пароль `pro10010` (из `DASHBOARD_BASIC_AUTH_PASSWORD` в `.env`).
+
+Streamcut по-прежнему на `https://streamcut.tailef595f.ts.net/` (другая нода, порт 443).
+
+LAN без пароля: `http://10.20.87.230:9080/`
+
+Проверка / повторная настройка:
+
+```bash
+cd ~/dashboard
+# В .env нужен reusable auth key с Funnel:
+#   TS_AUTHKEY_ACCOUNTSSTATS=tskey-auth-...
+./scripts/enable-accountsstats-tailscale-funnel.sh
+docker logs dashboard-accountsstats-tailscale
+```
+
+Cloudflare Quick Tunnel для дашборда **не используется** (выключен).
+
+## 1. Сеть (LAN / RDP)
 
 - ПК должен быть в той же сети/VPN, что и GPU-сервер (как для SSH `atom@10.20.87.230`).
 - Порт **3389/tcp** до хоста должен быть открыт (корпоративный firewall).

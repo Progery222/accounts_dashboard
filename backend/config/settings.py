@@ -40,6 +40,8 @@ if ".trycloudflare.com" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".trycloudflare.com")
 if ".loca.lt" not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(".loca.lt")
+if ".ts.net" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(".ts.net")
 
 # На Railway публичный домен сервиса доступен в RAILWAY_PUBLIC_DOMAIN.
 # Добавляем его автоматически, чтобы health-check и публичный URL работали без
@@ -268,6 +270,8 @@ if "https://*.trycloudflare.com" not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append("https://*.trycloudflare.com")
 if "https://*.loca.lt" not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append("https://*.loca.lt")
+if "https://*.ts.net" not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append("https://*.ts.net")
 if _railway_domain:
     railway_https = f"https://{_railway_domain}"
     if railway_https not in CSRF_TRUSTED_ORIGINS:

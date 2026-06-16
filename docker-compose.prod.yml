@@ -92,8 +92,11 @@ services:
     environment:
       PORT: "80"
       BACKEND_UPSTREAM: "backend:8000"
+      DASHBOARD_BASIC_AUTH_USER: "${DASHBOARD_BASIC_AUTH_USER:-admin}"
+      DASHBOARD_BASIC_AUTH_PASSWORD: "${DASHBOARD_BASIC_AUTH_PASSWORD:-}"
     ports:
       - "${DASHBOARD_HTTP_PORT:-9080}:80"
+      - "${DASHBOARD_PUBLIC_HTTP_PORT:-9081}:81"
     depends_on:
       - backend
     restart: unless-stopped
