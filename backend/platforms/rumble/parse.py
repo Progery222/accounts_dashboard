@@ -158,35 +158,59 @@ def _merge_thumbnail_post(existing: dict, incoming: dict) -> dict:
     return merged
 
 
+def _attr_from_tag(tag: str, name: str) -> str:
+    m = re.search(rf'\b{name}="([^"]*)"', tag, flags=re.I)
+    return m.group(1) if m else ""
+
+
+def _footer_meta_from_html(html: str) -> dict[str, dict]:
+    """Метаданные из rum-video-thumbnail-footer (views часто только там)."""
+    footers: dict[str, dict] = {}
+    for tag in re.findall(r"<rum-video-thumbnail-footer\b[^>]+>", html, flags=re.I):
+        video_id = _attr_from_tag(tag, "video-id").strip().lower()
+        if not _valid_external_id(video_id):
+            continue
+        footers[video_id] = {
+            "views": parse_count(_attr_from_tag(tag, "views")),
+            "time": _attr_from_tag(tag, "time") or None,
+            "title": _attr_from_tag(tag, "title"),
+            "url": _attr_from_tag(tag, "url"),
+        }
+    return footers
+
+
 def extract_thumbnail_posts(html: str, *, limit: int = 30) -> list[dict]:
+    footers = _footer_meta_from_html(html)
     by_id: dict[str, dict] = {}
     order: list[str] = []
     for tag in re.findall(r"<rum-video-thumbnail\b[^>]+>", html, flags=re.I):
-
-        def attr(name: str) -> str:
-            m = re.search(rf'\b{name}="([^"]*)"', tag, flags=re.I)
-            return m.group(1) if m else ""
-
-        video_id = attr("video-id")
+        video_id = _attr_from_tag(tag, "video-id").strip().lower()
         post_url = _post_url_from_tag(tag)
         external_id = video_id or (video_id_from_url(post_url) if post_url else "")
+        footer = footers.get(external_id) if external_id else None
         if not _valid_external_id(external_id):
             continue
         if not post_url:
+            raw_url = (footer or {}).get("url") or ""
+            post_url = _post_url_from_tag(f'url="{raw_url}"') if raw_url else ""
+        if not post_url:
             post_url = f"https://rumble.com/v/{external_id}"
-        view_count = parse_count(attr("views"))
+        view_count = parse_count(_attr_from_tag(tag, "views"))
+        if view_count <= 0 and footer:
+            view_count = int(footer.get("views") or 0)
         if view_count <= 0:
             view_count = _views_near_video_id(html, external_id)
+        description = _attr_from_tag(tag, "title") or (footer or {}).get("title") or ""
         post = {
             "external_id": str(external_id),
-            "description": attr("title"),
-            "thumbnail_url": attr("src"),
+            "description": description,
+            "thumbnail_url": _attr_from_tag(tag, "src"),
             "post_url": post_url,
             "view_count": view_count,
             "like_count": 0,
             "comment_count": 0,
             "share_count": 0,
-            "posted_at": attr("time") or None,
+            "posted_at": _attr_from_tag(tag, "time") or (footer or {}).get("time") or None,
         }
         if external_id in by_id:
             by_id[external_id] = _merge_thumbnail_post(by_id[external_id], post)
@@ -195,6 +219,28 @@ def extract_thumbnail_posts(html: str, *, limit: int = 30) -> list[dict]:
         order.append(external_id)
         if len(order) >= limit:
             break
+
+    if not order:
+        for external_id, footer in footers.items():
+            if external_id in by_id or len(order) >= limit:
+                continue
+            post_url = _post_url_from_tag(f'url="{(footer.get("url") or "").replace("&amp;", "&")}"')
+            if not post_url:
+                post_url = f"https://rumble.com/v/{external_id}"
+            post = {
+                "external_id": str(external_id),
+                "description": footer.get("title") or "",
+                "thumbnail_url": "",
+                "post_url": post_url,
+                "view_count": int(footer.get("views") or 0),
+                "like_count": 0,
+                "comment_count": 0,
+                "share_count": 0,
+                "posted_at": footer.get("time") or None,
+            }
+            by_id[external_id] = post
+            order.append(external_id)
+
     return [by_id[eid] for eid in order]
 
 

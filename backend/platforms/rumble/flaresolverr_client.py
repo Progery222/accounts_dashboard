@@ -11,6 +11,7 @@ import httpx
 
 from platforms.rumble.parse import (
     about_urls,
+    extract_posts,
     feed_urls,
     is_antibot_html,
     is_not_found_html,
@@ -158,11 +159,34 @@ def _session() -> Iterator[_FlareSolverrSession]:
 
 
 def fetch_profile(username: str) -> dict:
+    # Повторное использование FS-сессии между разными @username ломает feed (0 постов).
+    release_shared_session()
+
     about_html = ""
     feed_html = ""
+    best_feed_posts = 0
 
     fs = _acquire_shared_session()
     try:
+        # Сначала лента: после about FlareSolverr иногда отдаёт feed без rum-video-thumbnail.
+        for url in feed_urls(username):
+            try:
+                html = fs.fetch_html(url)
+            except Exception as exc:
+                print(f"[rumble] FlareSolverr feed {url}: {exc}", file=sys.stderr)
+                if _challenge_failure(exc):
+                    release_shared_session()
+                    raise
+                continue
+            if is_not_found_html(html):
+                continue
+            posts_n = len(extract_posts(html))
+            if posts_n > best_feed_posts or not feed_html:
+                feed_html = html
+                best_feed_posts = posts_n
+            if posts_n > 0:
+                break
+
         for url in about_urls(username):
             try:
                 html = fs.fetch_html(url)
@@ -176,21 +200,6 @@ def fetch_profile(username: str) -> dict:
                 continue
             about_html = html
             break
-
-        for url in feed_urls(username):
-            try:
-                html = fs.fetch_html(url)
-            except Exception as exc:
-                print(f"[rumble] FlareSolverr feed {url}: {exc}", file=sys.stderr)
-                if _challenge_failure(exc):
-                    release_shared_session()
-                    raise
-                continue
-            if is_not_found_html(html):
-                continue
-            feed_html = html
-            if about_html or extract_has_posts(html):
-                break
     except Exception:
         raise
 
@@ -203,14 +212,20 @@ def fetch_profile(username: str) -> dict:
         feed_html=feed_html,
     )
     payload["_source"] = "flaresolverr"
+    posts = payload.get("_posts") or []
+    post_count = int(payload.get("post_count") or 0)
+    partial_posts = bool(post_count) and len(posts) < post_count
     payload["_quality_flags"] = {
         "anti_bot_detected": True,
         "about_parsed": bool(about_html),
         "feed_parsed": bool(feed_html),
-        "partial_posts": bool(payload.get("post_count"))
-        and len(payload.get("_posts") or []) < int(payload.get("post_count") or 0),
+        "partial_posts": partial_posts,
         "flaresolverr": True,
     }
+    if not posts and post_count > 0:
+        payload["_posts_authoritative"] = False
+    elif partial_posts:
+        payload["_posts_authoritative"] = False
     return payload
 
 

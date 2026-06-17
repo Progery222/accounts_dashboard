@@ -61,6 +61,39 @@ class FlareSolverrClientTests(SimpleTestCase):
         self.assertTrue(_challenge_failure(RuntimeError("Timeout after 90.0 seconds")))
         self.assertFalse(_challenge_failure(ValueError("404 not found")))
 
+    def test_fetch_profile_picks_feed_with_most_posts(self):
+        release_shared_session()
+        about_html = '<meta property="og:title" content="user">'
+        feed_user = "<html>user feed no posts</html>"
+        feed_c = (
+            '<rum-video-thumbnail video-id="438302496" title="A" src="https://x/y.jpg"'
+            ' url="https://rumble.com/shorts/abc123"></rum-video-thumbnail>'
+        )
+        sess = MagicMock()
+        sess.fetch_html.side_effect = [
+            feed_user,
+            feed_c,
+            about_html,
+        ]
+        with patch.object(flaresolverr_client, "_acquire_shared_session", return_value=sess):
+            payload = fetch_profile("erick_spencer7")
+        self.assertEqual(len(payload["_posts"]), 1)
+        self.assertEqual(payload["_posts"][0]["external_id"], "438302496")
+
+    def test_fetch_profile_non_authoritative_when_posts_missing(self):
+        release_shared_session()
+        about_html = (
+            '<meta property="og:title" content="user">'
+            "<p>2 videos</p>"
+        )
+        feed_html = "<html>no thumbnails</html>"
+        sess = MagicMock()
+        sess.fetch_html.side_effect = [feed_html, feed_html, about_html]
+        with patch.object(flaresolverr_client, "_acquire_shared_session", return_value=sess):
+            payload = fetch_profile("erick_spencer7")
+        self.assertEqual(payload.get("_posts"), [])
+        self.assertFalse(payload.get("_posts_authoritative", True))
+
     def test_fetch_profile_aborts_on_challenge_timeout(self):
         release_shared_session()
         sess = MagicMock()

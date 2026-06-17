@@ -37,6 +37,16 @@ class RumbleParseTests(SimpleTestCase):
         self.assertEqual(payload["post_count"], 1)
         self.assertEqual(len(payload["_posts"]), 1)
 
+    def test_thumbnail_footer_only_tags(self):
+        html = """
+        <rum-video-thumbnail-footer video-id="438302496" views="15" time="2026-01-01"
+          url="https://rumble.com/shorts/abc123" title="Footer only"></rum-video-thumbnail-footer>
+        """
+        posts = extract_thumbnail_posts(html)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]["external_id"], "438302496")
+        self.assertEqual(posts[0]["view_count"], 15)
+
     def test_thumbnail_merge_footer_views(self):
         html = """
         <rum-video-thumbnail video-id="438302496" title="A" src="https://x/y.jpg"
