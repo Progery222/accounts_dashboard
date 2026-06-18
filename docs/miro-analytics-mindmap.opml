@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<opml version="2.0">
+  <head>
+    <title>Аналитика AccountsStats</title>
+    <dateCreated>Mon, 15 Jun 2026 12:00:00 GMT</dateCreated>
+  </head>
+  <body>
+    <outline text="Аналитика">
+      <outline text="Зачем нужна аналитика">
+        <outline text="Операционный контроль">
+          <outline text="Единая картина по всем аккаунтам и платформам"/>
+          <outline text="Рост и падение просмотров, подписчиков, постов за день, неделю, месяц"/>
+          <outline text="Быстрый поиск отстающих аккаунтов и платформ"/>
+        </outline>
+        <outline text="Решения по контенту">
+          <outline text="Топ постов — что набирает просмотры"/>
+          <outline text="Хештеги и корреляция с охватом"/>
+          <outline text="Лучшее время публикации — часы и дни недели по МСК"/>
+        </outline>
+        <outline text="Мониторинг инфраструктуры">
+          <outline text="Статус автообновления — идёт, завершилось, ошибка"/>
+          <outline text="Посты пропали со скрапа — удаление или сбой парсинга"/>
+          <outline text="Дельты по владельцам и профилям — срез по командам и нишам"/>
+        </outline>
+        <outline text="Трансляция и TV-режим">
+          <outline text="Живой график Pulse за 24 часа для экрана в офисе"/>
+          <outline text="Прирост за календарный день по платформам"/>
+        </outline>
+      </outline>
+      <outline text="Метрики и зачем они нужны">
+        <outline text="Главный экран">
+          <outline text="Сводные KPI">
+            <outline text="Просмотры — главный показатель охвата"/>
+            <outline text="Подписчики — рост аудитории"/>
+            <outline text="Лайки — вовлечённость где доступно"/>
+            <outline text="Посты — объём контента в базе"/>
+            <outline text="Клики — переходы по ссылкам из bio через Links"/>
+            <outline text="Аккаунты — масштаб фермы"/>
+            <outline text="Текущее значение плюс дельта за период один, семь или тридцать дней"/>
+          </outline>
+          <outline text="Разбивка по платформам">
+            <outline text="TikTok, Instagram, YouTube, X, Threads, Telegram, Facebook, Rumble, Reddit"/>
+            <outline text="Доля, число аккаунтов, просмотры, дельта просмотров"/>
+          </outline>
+          <outline text="График Pulse за сутки">
+            <outline text="Ступеньки каждые тридцать минут по МСК"/>
+            <outline text="Скачки после автообновления — реальный прирост после скрапа"/>
+            <outline text="Дельта за день над графиком — рост с полуночи МСК"/>
+            <outline text="Линии по платформам — прирост просмотров за день"/>
+          </outline>
+          <outline text="Список аккаунтов">
+            <outline text="Просмотры, подписчики, посты, дельты, статус доступности"/>
+            <outline text="Фильтры — платформа, профиль, владелец, скрытые, сортировка по дельте"/>
+          </outline>
+        </outline>
+        <outline text="Вкладка Аналитика">
+          <outline text="Топ постов">
+            <outline text="Просмотры, лайки, комментарии, репосты"/>
+            <outline text="ER — engagement rate от просмотров"/>
+            <outline text="Дельта за один, семь или тридцать дней от снимка поста"/>
+            <outline text="Сортировка по просмотрам, лайкам, дельте"/>
+            <outline text="Фильтры — платформа, аккаунт, профиль, владелец, минимум просмотров, хештег"/>
+            <outline text="Режим пропали со скрапа"/>
+          </outline>
+          <outline text="Insights">
+            <outline text="Сравнение платформ — средние просмотры, лайки, ER"/>
+            <outline text="Топ хештегов — частота и средние метрики"/>
+            <outline text="Лучшее время — часы и дни недели по МСК"/>
+          </outline>
+        </outline>
+        <outline text="Уровень аккаунта и поста">
+          <outline text="Карточка аккаунта — история снимков, посты, ручной refresh"/>
+          <outline text="Дневной снимок аккаунта — основа дельт"/>
+          <outline text="Дневной снимок поста — основа дельт в аналитике"/>
+        </outline>
+      </outline>
+      <outline text="Как собирается информация">
+        <outline text="Общий пайплайн">
+          <outline text="Триггер"/>
+          <outline text="Скрапер платформы"/>
+          <outline text="Обновление аккаунта и постов"/>
+          <outline text="Снимки"/>
+          <outline text="Точка Pulse"/>
+          <outline text="Отображение в UI"/>
+        </outline>
+        <outline text="Триггеры обновления">
+          <outline text="Ручной — кнопка у аккаунта или обновить все"/>
+          <outline text="По расписанию — APScheduler, интервал или фиксированные часы"/>
+          <outline text="Импорт CSV — исторические снимки"/>
+        </outline>
+        <outline text="Скрапинг по платформам">
+          <outline text="Playwright-воркеры — TikTok, Instagram, Facebook, Threads, X, Telegram, Rumble"/>
+          <outline text="HTTP и API — YouTube Data API, Telegram API"/>
+          <outline text="FlareSolverr — Rumble, обход Cloudflare"/>
+          <outline text="Apify — опциональный fallback"/>
+        </outline>
+        <outline text="Запись в базу">
+          <outline text="Поля аккаунта — подписчики, просмотры, лайки, посты, аватар"/>
+          <outline text="Посты — внешний id, метрики, URL, превью, дата, хештеги"/>
+          <outline text="Снимок перед перезаписью — раз в день"/>
+          <outline text="Синхронизация постов — новые, обновлённые, пропавшие"/>
+        </outline>
+        <outline text="Агрегаты и дельты">
+          <outline text="Снимки аккаунта и поста — уникально по дате"/>
+          <outline text="Точки Pulse — каждые тридцать минут сумма просмотров в БД"/>
+          <outline text="Точки после автообновления — scheduler, refresh, refresh_all"/>
+          <outline text="Прирост по платформам за прогон"/>
+        </outline>
+        <outline text="Клики по ссылкам">
+          <outline text="При refresh — запрос к Links API, счётчик кликов"/>
+        </outline>
+      </outline>
+      <outline text="Что нужно для сбора статистики">
+        <outline text="Инфраструктура">
+          <outline text="Сервер Docker — backend, postgres, frontend через nginx"/>
+          <outline text="APScheduler в backend"/>
+          <outline text="FlareSolverr для Rumble"/>
+          <outline text="Xvfb или RDP — headed-браузер для антибота на Mobile Farm"/>
+        </outline>
+        <outline text="Данные и доступы">
+          <outline text="Аккаунты в БД — username и platform"/>
+          <outline text="Сессии браузера — cookies и профиль Chromium"/>
+          <outline text="API-ключи — YouTube, Telegram, Apify, Links"/>
+          <outline text="Логины платформ в env где требуется"/>
+        </outline>
+        <outline text="Настройки в интерфейсе">
+          <outline text="Расписание автообновления — вкл, интервал или часы"/>
+          <outline text="Фильтры автообновления — платформы, профили, владельцы, скрытые"/>
+          <outline text="Период дельт в списке — один, семь или тридцать дней"/>
+        </outline>
+        <outline text="Качество данных">
+          <outline text="Регулярный refresh — без него дельты и Pulse не растут"/>
+          <outline text="Рабочие сессии — иначе скрап падает или отдаёт нули"/>
+          <outline text="История снимков — для дельт за неделю и месяц нужны старые снимки"/>
+        </outline>
+      </outline>
+      <outline text="Как часто актуальна статистика">
+        <outline text="В интерфейсе без refresh">
+          <outline text="Дашборд — при открытии и после завершения автообновления"/>
+          <outline text="Статус обновления — опрос примерно каждые тридцать секунд"/>
+          <outline text="Pulse-ступеньки — каждые тридцать минут по МСК даже без скрапа"/>
+          <outline text="Данные аккаунтов и постов — только после ручного или авто refresh"/>
+        </outline>
+        <outline text="Автообновление">
+          <outline text="По умолчанию выключено"/>
+          <outline text="Режим по времени — слоты шесть, двенадцать, восемнадцать, ноль часов МСК"/>
+          <outline text="Режим интервал — например каждые шесть часов"/>
+          <outline text="После прогона — новая точка Pulse и обновлённые счётчики"/>
+        </outline>
+        <outline text="Ручное обновление">
+          <outline text="В любой момент — актуально сразу после завершения"/>
+          <outline text="Пакетное обновление — примерно одна-три минуты на аккаунт"/>
+        </outline>
+        <outline text="Дельты и периоды">
+          <outline text="Один день — снимок вчера или начало суток для Pulse"/>
+          <outline text="Семь дней — снимок аккаунта неделю назад"/>
+          <outline text="Тридцать дней — снимок аккаунта месяц назад"/>
+          <outline text="Без снимка — дельта равна всему текущему счётчику"/>
+        </outline>
+        <outline text="Практический вывод">
+          <outline text="Pulse обновляется каждые тридцать минут плюс скачки после refresh"/>
+          <outline text="Просмотры и посты — на момент последнего успешного refresh"/>
+          <outline text="Четыре раза в сутки — свежесть до шести часов, ручной refresh — сразу"/>
+        </outline>
+      </outline>
+    </outline>
+  </body>
+</opml>

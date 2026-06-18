@@ -1,0 +1,238 @@
+accounts_profile
+
+pk id bigint
+    name varchar(255)
+    color varchar(7)
+    is_hidden boolean
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_owner
+
+pk id bigint
+    name varchar(255)
+    color varchar(7)
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_refreshscheduleconfig
+
+pk id bigint
+    enabled boolean
+    mode varchar(10)
+    interval_hours integer
+    skip_recent_hours integer
+    refresh_warm_enabled boolean
+    auto_refresh_csv_report boolean
+    auto_refresh_telegram_enabled boolean
+    auto_refresh_telegram_chat_id varchar(32)
+    auto_refresh_telegram_chat_ids jsonb
+    include_hidden_platform_accounts boolean
+    include_hidden_profile_accounts boolean
+    include_unavailable_accounts boolean
+    auto_refresh_platforms jsonb
+    auto_refresh_profile_ids jsonb
+    auto_refresh_owner_ids jsonb
+    account_delta_period_days smallint
+    max_audience_followers_per_account smallint
+    times jsonb
+
+accounts_globalvisibilityconfig
+
+pk id bigint
+    hidden_platforms jsonb
+
+accounts_autorefreshstate
+
+pk id bigint
+    is_running boolean
+    source varchar(32)
+    cancel_requested boolean
+    total_accounts integer
+    processed_accounts integer
+    success_accounts integer
+    failed_accounts integer
+    current_account varchar(255)
+    started_at timestamptz
+    finished_at timestamptz
+    last_error text
+    last_report_csv text
+    last_report_generated_at timestamptz
+    last_telegram_error text
+    last_telegram_sent_at timestamptz
+    last_auto_refresh_error_account_ids jsonb
+    run_detail jsonb
+    updated_at timestamptz
+
+accounts_refreshallstate
+
+pk id bigint
+    is_running boolean
+    cancel_requested boolean
+    total_accounts integer
+    processed_accounts integer
+    success_accounts integer
+    failed_accounts integer
+    current_account varchar(255)
+    started_at timestamptz
+    finished_at timestamptz
+    last_error text
+    last_report_csv text
+    last_report_generated_at timestamptz
+    run_detail jsonb
+    updated_at timestamptz
+
+accounts_scrapebackendconfig
+
+pk id bigint
+    facebook_backend varchar(16)
+    tiktok_backend varchar(16)
+    instagram_backend varchar(16)
+    youtube_backend varchar(16)
+    reddit_backend varchar(16)
+    rumble_backend varchar(16)
+    facebook_fallback_enabled boolean
+    tiktok_fallback_enabled boolean
+    instagram_fallback_enabled boolean
+    youtube_fallback_enabled boolean
+    reddit_fallback_enabled boolean
+    rumble_fallback_enabled boolean
+    updated_at timestamptz
+
+accounts_apifyrefreshjob
+
+pk id bigint
+fk account_id bigint → accounts_account
+    platform varchar(32)
+    username_snapshot varchar(255)
+    status varchar(16)
+    apify_run_id varchar(64)
+    apify_actor_id varchar(255)
+    apify_dataset_id varchar(64)
+    apify_stages jsonb
+    trigger varchar(32)
+    parent_batch_id uuid
+    started_at timestamptz
+    finished_at timestamptz
+    error_message text
+    run_detail_extra jsonb
+    normalized_preview jsonb
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_account
+
+pk id bigint
+    username varchar(255)
+    platform varchar(20)
+fk profile_id bigint → accounts_profile
+fk owner_id bigint → accounts_owner
+    display_name varchar(255)
+    avatar_url varchar(1024)
+    avatar_file varchar(512)
+    avatar_missing boolean
+    bio text
+    follower_count bigint
+    like_count bigint
+    view_count bigint
+    post_count integer
+    link_click_count bigint
+    profile_unavailable boolean
+    audience_last_synced_at timestamptz
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_accountsnapshot
+
+pk id bigint
+fk account_id bigint → accounts_account
+    date date
+    follower_count bigint
+    like_count bigint
+    view_count bigint
+    post_count integer
+    link_click_count bigint
+
+accounts_post
+
+pk id bigint
+fk account_id bigint → accounts_account
+    external_id varchar(255)
+    description text
+    hashtags jsonb
+    thumbnail_url varchar(2048)
+    thumbnail_file varchar(512)
+    thumbnail_missing boolean
+    post_url varchar(2048)
+    view_count bigint
+    like_count bigint
+    comment_count bigint
+    share_count bigint
+    posted_at timestamptz
+    missing_from_scrape_at timestamptz
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_postsnapshot
+
+pk id bigint
+fk post_id bigint → accounts_post
+    date date
+    view_count bigint
+    like_count bigint
+    comment_count bigint
+
+accounts_autorefreshpoint
+
+pk id bigint
+    measured_at timestamptz
+    local_date date
+    source varchar(32)
+    slot_label varchar(32)
+    view_count_total bigint
+    view_delta_from_prev_point bigint
+    view_delta_from_day_start bigint
+    platform_deltas jsonb
+
+accounts_audiencemember
+
+pk id bigint
+    platform varchar(20)
+    username varchar(255)
+    external_id varchar(160)
+    display_name varchar(255)
+    avatar_url varchar(2048)
+    bio text
+    is_private boolean
+    follower_count bigint
+    following_count bigint
+    like_count bigint
+    profile_language varchar(32)
+    timezone_name varchar(64)
+    follower_network jsonb
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_accountaudiencemembership
+
+pk id bigint
+fk account_id bigint → accounts_account
+fk member_id bigint → accounts_audiencemember
+    first_seen_at timestamptz
+    last_synced_at timestamptz
+
+accounts_audiencememberpost
+
+pk id bigint
+fk member_id bigint → accounts_audiencemember
+    external_id varchar(255)
+    description text
+    thumbnail_url varchar(2048)
+    post_url varchar(2048)
+    view_count bigint
+    like_count bigint
+    comment_count bigint
+    share_count bigint
+    posted_at timestamptz
+    created_at timestamptz
+    updated_at timestamptz
