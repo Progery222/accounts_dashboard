@@ -7453,13 +7453,25 @@ function AccountRow({
     unavailable: a.unavailable,
     reason: a.unavailableReason
   })), /*#__PURE__*/React.createElement("div", {
-    className: "mono tnum",
     style: {
-      textAlign: 'right',
-      color: a.followers ? '#fff' : 'var(--ink-mute)'
+      textAlign: 'right'
     },
     title: a.platform === 'tiktok' || a.platform === 'instagram' ? `Подписчики на профиле площадки: ${a.followers}. В снятой базе приложения: ${Number(a.audienceMembers ?? 0)}.` : 'Подписчики (число на странице профиля площадки)'
-  }, Number.isFinite(Number(a.followers)) ? fmt(a.followers) : '—'), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "mono tnum",
+    style: {
+      fontSize: 15,
+      fontWeight: 500,
+      color: Number.isFinite(Number(a.followers)) ? '#fff' : 'var(--ink-mute)'
+    }
+  }, Number.isFinite(Number(a.followers)) ? fmt(a.followers) : '—'), _hasDelta(a.dFollowers) && /*#__PURE__*/React.createElement("div", {
+    className: "mono tnum",
+    style: {
+      fontSize: 12,
+      color: _deltaColor(a.dFollowers),
+      textShadow: _deltaGlow(a.dFollowers)
+    }
+  }, a.dFollowers >= 0 ? '+' : '', fmt(a.dFollowers))), /*#__PURE__*/React.createElement("div", {
     style: {
       textAlign: 'right'
     }

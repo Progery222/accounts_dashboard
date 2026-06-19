@@ -11,7 +11,7 @@ from django.apps import AppConfig
 from django.db import transaction
 from django.db.models import Sum
 
-# Единая таймзона для Cron/Interval (иначе на UTC-хосте «03:00» nightly = 06:00 МСК).
+# Единая таймзона для Cron/Interval (Europe/Moscow).
 SCHEDULER_TZ = ZoneInfo("Europe/Moscow")
 
 _scheduler = None
@@ -130,11 +130,9 @@ def apply_schedule_config(config, sched):
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.triggers.interval import IntervalTrigger
 
-    # Снять пользовательские слоты и устаревшие фиксированные nightly (03:00 / audience 04:15).
-    _legacy_job_ids = frozenset({"daily_refresh_03", "daily_audience_0415"})
     for job in list(sched.get_jobs()):
         jid = str(job.id)
-        if jid.startswith("auto_refresh_") or jid in _legacy_job_ids:
+        if jid.startswith("auto_refresh_"):
             try:
                 sched.remove_job(jid)
             except Exception:
@@ -1731,60 +1729,3 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 ).start()
             except Exception as e:
                 print(f"[scheduled_refresh] failed to start queued run: {e}")
-
-
-def _scheduled_audience_refresh() -> None:
-    """Съём аудитории TikTok/Instagram в фоне (не блокирует планировщик)."""
-
-    def _run() -> None:
-        from django.db import close_old_connections
-        from django.utils import timezone
-
-        from .audience import refresh_audience_for_account
-        from .models import Account, GlobalVisibilityConfig, Platform, RefreshScheduleConfig
-
-        close_old_connections()
-        from .refresh_priority import account_refresh_priority_active
-
-        if account_refresh_priority_active():
-            print(
-                "[audience_scheduled] пропуск: идёт обновление аналитики аккаунтов",
-                file=sys.stderr,
-            )
-            return
-        try:
-            cfg = RefreshScheduleConfig.get()
-            hidden_platforms: set[str] = set()
-            if not bool(getattr(cfg, "include_hidden_platform_accounts", False)):
-                try:
-                    hidden_platforms = {
-                        str(v).strip().lower()
-                        for v in (GlobalVisibilityConfig.get().hidden_platforms or [])
-                        if str(v).strip()
-                    }
-                except Exception:
-                    hidden_platforms = set()
-            qs = Account.objects.filter(
-                platform__in=(Platform.TIKTOK, Platform.INSTAGRAM),
-                profile_unavailable=False,
-            ).select_related("profile")
-            if hidden_platforms:
-                qs = qs.exclude(platform__in=hidden_platforms)
-            if not bool(getattr(cfg, "include_hidden_profile_accounts", False)):
-                qs = qs.exclude(profile__is_hidden=True)
-            cutoff = timezone.now() - timedelta(hours=20)
-            for acc in qs.iterator(chunk_size=20):
-                try:
-                    if acc.audience_last_synced_at and acc.audience_last_synced_at >= cutoff:
-                        continue
-                    refresh_audience_for_account(acc)
-                except Exception as e:
-                    print(f"[audience_scheduled] account {acc.id} {acc.platform}/@{acc.username}: {e}")
-                time.sleep(10)
-        finally:
-            close_old_connections()
-
-    try:
-        threading.Thread(target=_run, daemon=True, name="scheduled-audience").start()
-    except Exception as e:
-        print(f"[audience_scheduled] failed to start thread: {e}")

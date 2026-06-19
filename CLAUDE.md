@@ -108,8 +108,8 @@ API triggers:
 
 - Scheduler starts in `AccountsConfig.ready()`.
 - Autoreload guard is critical: when running `runserver`, startup is skipped unless `RUN_MAIN == "true"`.
-- There is always a fixed nightly job at `03:00` Moscow time.
-- Additionally, user-configurable schedule is loaded from `RefreshScheduleConfig` (`interval` or specific `times`) and can add/remove `auto_refresh_*` jobs dynamically.
+- User-configurable schedule is loaded from `RefreshScheduleConfig` (`interval` or specific `times`) and can add/remove `auto_refresh_*` jobs dynamically.
+- Pulse snapshots for TV charts run every 30 minutes (`pulse_interval_snapshot`).
 
 ### Frontend
 
