@@ -1,0 +1,73 @@
+# Coolify deploy for dashboard (accounts_dashboard) — ADOPT-IN-PLACE.
+# - Pre-built LOCAL images (dashboard-backend/-frontend already on by01's docker
+#   daemon); pull_policy: never → no registry, no rebuild.
+# - Reuses EXISTING data via host bind-mounts (browser_profile ~4.7GB + postgres
+#   are NOT copied/moved). OLD stack MUST be stopped before deploy (single writer).
+# - Headed Playwright Chromium on host xvfb :99 (mobilefarm). Xvfb runs with -ac
+#   (access control off) → no Xauthority needed; only DISPLAY + X11 socket.
+# - Public via Cloudflare Tunnel: dashboard-new.atom-farm.com -> localhost:9082.
+services:
+  postgres:
+    image: postgres:16-alpine
+    pull_policy: missing
+    environment:
+      POSTGRES_USER: ${DB_USER:-dashboard}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dashboard}
+      POSTGRES_DB: ${DB_NAME:-dashboard}
+    volumes:
+      - /var/lib/docker/volumes/dashboard_postgres_data/_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-dashboard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    image: dashboard-backend:latest
+    pull_policy: never
+    env_file:
+      - .env
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DEBUG: "false"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      RUN_SCHEDULER: "true"
+      BROWSER_HEADLESS: "false"
+      BROWSER_PROFILE_DIR: /app/.browser-profile
+      DISPLAY: ":99"
+      PORT: "8000"
+      DASHBOARD_LOG_DIR: /app/var/log
+    ipc: host
+    expose:
+      - "8000"
+    volumes:
+      - /var/lib/docker/volumes/dashboard_browser_profile/_data:/app/.browser-profile
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /home/atom/dashboard/backend/media:/app/media
+      - /home/atom/dashboard/backend/config/worker_accounts.env:/app/config/worker_accounts.env:ro
+      - /home/atom/dashboard/var/log/dashboard:/app/var/log
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    image: dashboard-frontend:latest
+    pull_policy: never
+    environment:
+      PORT: "80"
+      BACKEND_UPSTREAM: "backend:8000"
+      DASHBOARD_BASIC_AUTH_USER: ${DASHBOARD_BASIC_AUTH_USER:-admin}
+      DASHBOARD_BASIC_AUTH_PASSWORD: ${DASHBOARD_BASIC_AUTH_PASSWORD:-}
+    ports:
+      - "9082:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    pull_policy: missing
+    restart: unless-stopped
