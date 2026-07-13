@@ -6,6 +6,8 @@ from .models import (
     PostSnapshot,
     Profile,
     Owner,
+    AccountGroup,
+    Country,
     ScrapeBackendConfig,
     ApifyRefreshJob,
 )
@@ -24,6 +26,28 @@ class ProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Owner)
 class OwnerAdmin(admin.ModelAdmin):
+    list_display = ["name", "color", "account_count", "created_at"]
+    search_fields = ["name"]
+    readonly_fields = ["created_at", "updated_at"]
+
+    @admin.display(description="Аккаунтов")
+    def account_count(self, obj):
+        return obj.accounts.count()
+
+
+@admin.register(AccountGroup)
+class AccountGroupAdmin(admin.ModelAdmin):
+    list_display = ["name", "color", "account_count", "created_at"]
+    search_fields = ["name"]
+    readonly_fields = ["created_at", "updated_at"]
+
+    @admin.display(description="Аккаунтов")
+    def account_count(self, obj):
+        return obj.accounts.count()
+
+
+@admin.register(Country)
+class CountryAdmin(admin.ModelAdmin):
     list_display = ["name", "color", "account_count", "created_at"]
     search_fields = ["name"]
     readonly_fields = ["created_at", "updated_at"]

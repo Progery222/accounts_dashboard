@@ -45,6 +45,8 @@ from .models import (
     Post,
     Profile,
     Owner,
+    AccountGroup,
+    Country,
     AccountSnapshot,
     PostSnapshot,
     AutoRefreshPoint,
@@ -60,6 +62,8 @@ from .serializers import (
     PostSerializer,
     ProfileSerializer,
     OwnerSerializer,
+    AccountGroupSerializer,
+    CountrySerializer,
 )
 from .snapshot_io import build_snapshot_csv, import_snapshot_csv, _is_deadlock_error
 from platforms.profile_unavailable import (
@@ -415,7 +419,7 @@ _ACCOUNT_REFRESH_SAVE_FIELDS = (
     "profile_unavailable",
     "updated_at",
 )
-_ACCOUNT_ASSIGNMENT_FIELDS = frozenset({"profile", "owner", "profile_unavailable"})
+_ACCOUNT_ASSIGNMENT_FIELDS = frozenset({"profile", "owner", "group", "country", "profile_unavailable"})
 
 
 def _account_assignment_only_validated(validated_data: dict) -> bool:
@@ -431,9 +435,62 @@ def _account_assignment_update_fields(validated_data: dict) -> list[str]:
         out.append("profile_id")
     if "owner" in validated_data:
         out.append("owner_id")
+    if "group" in validated_data:
+        out.append("group_id")
+    if "country" in validated_data:
+        out.append("country_id")
     if "profile_unavailable" in validated_data:
         out.append("profile_unavailable")
     return out
+
+
+def _assignment_fk_id(obj) -> int | None:
+    return obj.pk if obj else None
+
+
+def _existing_account_assignment_unchanged(existing: Account, validated: dict) -> bool:
+    """Совпадают ли переданные в POST поля профиля/владельца/группы/страны с аккаунтом."""
+    for key, fk_attr in (
+        ("profile", "profile_id"),
+        ("owner", "owner_id"),
+        ("group", "group_id"),
+        ("country", "country_id"),
+    ):
+        if key not in validated:
+            continue
+        if getattr(existing, fk_attr) != _assignment_fk_id(validated.get(key)):
+            return False
+    return True
+
+
+def _apply_existing_account_assignment(existing: Account, validated: dict) -> list[str]:
+    """
+    Только смена профиля/владельца/группы/страны — без scrape и без сдвига «Обновлён».
+    Возвращает список изменённых полей (для API) или [].
+    """
+    assignment: dict = {}
+    changed_labels: list[str] = []
+    for key, fk_attr in (
+        ("profile", "profile_id"),
+        ("owner", "owner_id"),
+        ("group", "group_id"),
+        ("country", "country_id"),
+    ):
+        if key not in validated:
+            continue
+        new_val = validated.get(key)
+        if getattr(existing, fk_attr) == _assignment_fk_id(new_val):
+            continue
+        assignment[key] = new_val
+        changed_labels.append(key)
+    if not assignment:
+        return []
+    preserved = existing.updated_at
+    for key, val in assignment.items():
+        setattr(existing, key, val)
+    existing.save(update_fields=_account_assignment_update_fields(assignment))
+    _restore_account_updated_at(existing.pk, preserved)
+    return changed_labels
 
 
 def _restore_account_updated_at(account_id: int, preserved) -> None:
@@ -701,31 +758,30 @@ def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -
     except RefreshCancelledError:
         return None, "Остановлено пользователем", None
     except Exception as exc:
-        if account.platform == Platform.TIKTOK:
+        from accounts.scrape_fallback_recovery import (
+            notify_playwright_batch_errors,
+            try_apify_recovery_after_playwright_failure,
+        )
+        from accounts.tiktok_scrape_fallback import BatchScrapeContext
+
+        batch_ctx = BatchScrapeContext.for_accounts([account])
+        notify_playwright_batch_errors(account, exc, batch_ctx=batch_ctx)
+        try:
             import uuid
 
             from accounts.models import ApifyRefreshJobTrigger
-            from accounts.tiktok_scrape_fallback import (
-                BatchScrapeContext,
-                retry_tiktok_via_apify_after_captcha,
-            )
-            from platforms.tiktok.captcha_batch import is_tiktok_captcha_stall_error
 
-            if is_tiktok_captcha_stall_error(exc):
-                batch_ctx = BatchScrapeContext.for_accounts([account])
-                batch_ctx.on_tiktok_playwright_error(account, exc)
-                try:
-                    recovered = retry_tiktok_via_apify_after_captcha(
-                        account,
-                        exc,
-                        batch_ctx=batch_ctx,
-                        trigger=ApifyRefreshJobTrigger.MANUAL,
-                        parent_batch_id=uuid.uuid4(),
-                    )
-                    if recovered is not None:
-                        return recovered, None, None
-                except Exception as apify_exc:
-                    exc = apify_exc
+            recovered = try_apify_recovery_after_playwright_failure(
+                account,
+                exc,
+                batch_ctx=batch_ctx,
+                trigger=ApifyRefreshJobTrigger.MANUAL,
+                parent_batch_id=uuid.uuid4(),
+            )
+            if recovered is not None:
+                return recovered, None, None
+        except Exception as apify_exc:
+            exc = apify_exc
         logger.warning(
             "refresh.account_failed",
             extra={
@@ -1211,47 +1267,44 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             _mark_progress(success=False, failed=False)
                             stop_requested.set()
                         except Exception as e:
-                            from accounts.facebook_scrape_fallback import (
-                                handle_facebook_playwright_batch_error,
-                                retry_facebook_via_apify_after_playwright_failure,
+                            from accounts.scrape_fallback_recovery import (
+                                apify_fallback_detail_suffix,
+                                notify_playwright_batch_errors,
+                                try_apify_recovery_after_playwright_failure,
                             )
 
                             refresh_failure_exc = e
-                            handle_facebook_playwright_batch_error(
+                            notify_playwright_batch_errors(
                                 account,
                                 e,
                                 batch_ctx=batch_scrape,
                                 fb_batch_guard=fb_batch_guard,
                             )
-                            batch_scrape.on_tiktok_playwright_error(account, e)
                             apify_recovered = False
-                            if account.platform == Platform.FACEBOOK:
-                                try:
-                                    apify_acc = retry_facebook_via_apify_after_playwright_failure(
-                                        account,
-                                        e,
-                                        batch_ctx=batch_scrape,
-                                        trigger=ApifyRefreshJobTrigger.BULK,
-                                        parent_batch_id=apify_batch_id,
+                            try:
+                                apify_acc = try_apify_recovery_after_playwright_failure(
+                                    account,
+                                    e,
+                                    batch_ctx=batch_scrape,
+                                    trigger=ApifyRefreshJobTrigger.BULK,
+                                    parent_batch_id=apify_batch_id,
+                                )
+                            except Exception as apify_exc:
+                                e = apify_exc
+                                refresh_failure_exc = apify_exc
+                            else:
+                                if apify_acc is not None:
+                                    refresh_failure_exc = None
+                                    _persist_auto_refresh_run_item(
+                                        account.id,
+                                        status="done",
+                                        worker=None,
+                                        detail=apify_fallback_detail_suffix(
+                                            batch_scrape, account
+                                        ),
                                     )
-                                except Exception as apify_exc:
-                                    e = apify_exc
-                                    refresh_failure_exc = apify_exc
-                                else:
-                                    if apify_acc is not None:
-                                        refresh_failure_exc = None
-                                        _persist_auto_refresh_run_item(
-                                            account.id,
-                                            status="done",
-                                            worker=None,
-                                            detail=(
-                                                batch_scrape.facebook_fallback.fallback_detail_suffix()
-                                                if batch_scrape.facebook_fallback is not None
-                                                else ""
-                                            ),
-                                        )
-                                        _mark_progress(success=True, failed=False)
-                                        apify_recovered = True
+                                    _mark_progress(success=True, failed=False)
+                                    apify_recovered = True
                             if not apify_recovered:
                                 _mark_profile_unavailable_if_applicable(account, e)
                                 detail = str(e).replace("\r\n", " ").replace("\n", " ").strip()
@@ -2174,132 +2227,73 @@ def _run_refresh_all_background(
                             )
                             stop_requested.set()
                         except Exception as e:
-                            from accounts.facebook_scrape_fallback import (
-                                handle_facebook_playwright_batch_error,
-                                retry_facebook_via_apify_after_playwright_failure,
+                            from accounts.scrape_fallback_recovery import (
+                                apify_fallback_detail_suffix,
+                                notify_playwright_batch_errors,
+                                try_apify_recovery_after_playwright_failure,
                             )
 
                             refresh_failure_exc = e
-                            handle_facebook_playwright_batch_error(
+                            notify_playwright_batch_errors(
                                 account,
                                 e,
                                 batch_ctx=batch_scrape,
                                 fb_batch_guard=fb_batch_guard,
                             )
-                            batch_scrape.on_tiktok_playwright_error(account, e)
                             apify_recovered = False
-                            if account.platform == Platform.TIKTOK:
-                                from accounts.tiktok_scrape_fallback import (
-                                    retry_tiktok_via_apify_after_captcha,
+                            try:
+                                apify_acc = try_apify_recovery_after_playwright_failure(
+                                    account,
+                                    e,
+                                    batch_ctx=batch_scrape,
+                                    trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
+                                    parent_batch_id=apify_batch_id,
                                 )
-
-                                try:
-                                    apify_acc = retry_tiktok_via_apify_after_captcha(
-                                        account,
-                                        e,
-                                        batch_ctx=batch_scrape,
-                                        trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
-                                        parent_batch_id=apify_batch_id,
+                            except Exception as apify_exc:
+                                e = apify_exc
+                                refresh_failure_exc = apify_exc
+                            else:
+                                if apify_acc is not None:
+                                    refresh_failure_exc = None
+                                    account = apify_acc
+                                    account.refresh_from_db()
+                                    row = {
+                                        "id": account.id,
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "status": "успешно",
+                                        "error": "",
+                                        "follower_count": account.follower_count,
+                                        "follower_delta": (
+                                            int(account.follower_count or 0)
+                                            - before["follower_count"]
+                                        ),
+                                        "like_count": account.like_count,
+                                        "like_delta": (
+                                            int(account.like_count or 0)
+                                            - before["like_count"]
+                                        ),
+                                        "view_count": account.view_count,
+                                        "view_delta": (
+                                            int(account.view_count or 0)
+                                            - before["view_count"]
+                                        ),
+                                        "post_count": account.post_count,
+                                        "post_delta": (
+                                            int(account.post_count or 0)
+                                            - before["post_count"]
+                                        ),
+                                    }
+                                    _refresh_all_atomic_progress(failed=False)
+                                    _persist_refresh_all_run_item(
+                                        account.id,
+                                        status="done",
+                                        worker=None,
+                                        detail=apify_fallback_detail_suffix(
+                                            batch_scrape, account
+                                        ),
                                     )
-                                except Exception as apify_exc:
-                                    e = apify_exc
-                                    refresh_failure_exc = apify_exc
-                                else:
-                                    if apify_acc is not None:
-                                        refresh_failure_exc = None
-                                        account = apify_acc
-                                        account.refresh_from_db()
-                                        row = {
-                                            "id": account.id,
-                                            "platform": account.platform,
-                                            "username": account.username,
-                                            "status": "успешно",
-                                            "error": "",
-                                            "follower_count": account.follower_count,
-                                            "follower_delta": (
-                                                int(account.follower_count or 0)
-                                                - before["follower_count"]
-                                            ),
-                                            "like_count": account.like_count,
-                                            "like_delta": (
-                                                int(account.like_count or 0)
-                                                - before["like_count"]
-                                            ),
-                                            "view_count": account.view_count,
-                                            "view_delta": (
-                                                int(account.view_count or 0)
-                                                - before["view_count"]
-                                            ),
-                                            "post_count": account.post_count,
-                                            "post_delta": (
-                                                int(account.post_count or 0)
-                                                - before["post_count"]
-                                            ),
-                                        }
-                                        _refresh_all_atomic_progress(failed=False)
-                                        _persist_refresh_all_run_item(
-                                            account.id,
-                                            status="done",
-                                            worker=None,
-                                            detail="",
-                                        )
-                                        apify_recovered = True
-                            elif account.platform == Platform.FACEBOOK:
-                                try:
-                                    apify_acc = retry_facebook_via_apify_after_playwright_failure(
-                                        account,
-                                        e,
-                                        batch_ctx=batch_scrape,
-                                        trigger=ApifyRefreshJobTrigger.REFRESH_ALL,
-                                        parent_batch_id=apify_batch_id,
-                                    )
-                                except Exception as apify_exc:
-                                    e = apify_exc
-                                    refresh_failure_exc = apify_exc
-                                else:
-                                    if apify_acc is not None:
-                                        refresh_failure_exc = None
-                                        account = apify_acc
-                                        account.refresh_from_db()
-                                        row = {
-                                            "id": account.id,
-                                            "platform": account.platform,
-                                            "username": account.username,
-                                            "status": "успешно",
-                                            "error": "",
-                                            "follower_count": account.follower_count,
-                                            "follower_delta": (
-                                                int(account.follower_count or 0)
-                                                - before["follower_count"]
-                                            ),
-                                            "like_count": account.like_count,
-                                            "like_delta": (
-                                                int(account.like_count or 0)
-                                                - before["like_count"]
-                                            ),
-                                            "view_count": account.view_count,
-                                            "view_delta": (
-                                                int(account.view_count or 0)
-                                                - before["view_count"]
-                                            ),
-                                            "post_count": account.post_count,
-                                            "post_delta": (
-                                                int(account.post_count or 0)
-                                                - before["post_count"]
-                                            ),
-                                        }
-                                        _refresh_all_atomic_progress(failed=False)
-                                        _persist_refresh_all_run_item(
-                                            account.id,
-                                            status="done",
-                                            worker=None,
-                                            detail=(
-                                                batch_scrape.facebook_fallback.fallback_detail_suffix()
-                                                if batch_scrape.facebook_fallback is not None
-                                                else ""
-                                            ),
-                                        )
-                                        apify_recovered = True
+                                    apify_recovered = True
                             if not apify_recovered:
                                 detail, _ = _format_refresh_error(account, e)
                                 row = {
@@ -2835,7 +2829,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             date__lte=cutoff,
         ).order_by("-date")
 
-        qs = Account.objects.select_related("profile").annotate(
+        qs = Account.objects.select_related("profile", "owner", "group", "country").annotate(
             _prev_follower_count=Coalesce(
                 Subquery(prev_snapshots.values("follower_count")[:1]),
                 Value(0),
@@ -2887,6 +2881,16 @@ class AccountViewSet(viewsets.ModelViewSet):
             qs = qs.filter(profile__isnull=True)
         elif profile_id:
             qs = qs.filter(profile_id=profile_id)
+        group_id = self.request.query_params.get("group_id")
+        if group_id == "none":
+            qs = qs.filter(group__isnull=True)
+        elif group_id:
+            qs = qs.filter(group_id=group_id)
+        country_id = self.request.query_params.get("country_id")
+        if country_id == "none":
+            qs = qs.filter(country__isnull=True)
+        elif country_id:
+            qs = qs.filter(country_id=country_id)
         search = self.request.query_params.get("search", "").strip()
         if search:
             qs = qs.filter(
@@ -2904,7 +2908,7 @@ class AccountViewSet(viewsets.ModelViewSet):
         serializer.instance.refresh_from_db(fields=["updated_at"])
 
     def perform_update(self, serializer):
-        """Смена профиля/владельца не двигает «Обновлён» — только успешный refresh статистики."""
+        """Смена профиля/владельца/группы/страны не двигает «Обновлён» — только успешный refresh статистики."""
         validated = serializer.validated_data
         if _account_assignment_only_validated(validated):
             serializer.save(update_fields=_account_assignment_update_fields(validated))
@@ -2919,34 +2923,24 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """
-        Импорт списка: существующий аккаунт — только смена профиля/владельца (статистика не трогаем).
-        Без изменений — если профиль и владелец те же.
+        Импорт списка: существующий аккаунт — только смена профиля/владельца/группы/страны
+        (статистика и «Обновлён» не трогаем). Без изменений — если все переданные поля те же.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         validated = serializer.validated_data
         username = validated["username"]
         platform = validated["platform"]
-        profile = validated.get("profile")
-        owner = validated.get("owner")
-        new_profile_id = profile.pk if profile else None
-        new_owner_id = owner.pk if owner else None
 
         existing = Account.objects.filter(username=username, platform=platform).first()
         if existing is not None:
             ctx = self.get_serializer_context()
-            if existing.profile_id == new_profile_id and existing.owner_id == new_owner_id:
+            if _existing_account_assignment_unchanged(existing, validated):
                 data = self.get_serializer(existing, context=ctx).data
                 data["import_action"] = "unchanged"
                 return Response(data, status=status.HTTP_200_OK)
-            changed_fields = []
-            if existing.profile_id != new_profile_id:
-                changed_fields.append("profile")
-                existing.profile = profile
-            if existing.owner_id != new_owner_id:
-                changed_fields.append("owner")
-                existing.owner = owner
-            existing.save(update_fields=changed_fields)
+            changed_fields = _apply_existing_account_assignment(existing, validated)
+            existing.refresh_from_db()
             data = self.get_serializer(existing, context=ctx).data
             data["import_action"] = "assignment_updated"
             data["changed_fields"] = changed_fields
@@ -3390,6 +3384,30 @@ class OwnerViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class AccountGroupViewSet(viewsets.ModelViewSet):
+    serializer_class = AccountGroupSerializer
+
+    def get_queryset(self):
+        return AccountGroup.objects.annotate(account_count=Count("accounts"))
+
+    def destroy(self, request, *args, **kwargs):
+        group = self.get_object()
+        group.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class CountryViewSet(viewsets.ModelViewSet):
+    serializer_class = CountrySerializer
+
+    def get_queryset(self):
+        return Country.objects.annotate(account_count=Count("accounts"))
+
+    def destroy(self, request, *args, **kwargs):
+        country = self.get_object()
+        country.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class ProfileViewSet(viewsets.ModelViewSet):
     serializer_class = ProfileSerializer
 
@@ -3655,6 +3673,8 @@ def _schedule_to_dict(config) -> dict:
         normalize_auto_refresh_platforms,
         normalize_auto_refresh_profile_ids,
         normalize_auto_refresh_owner_ids,
+        normalize_auto_refresh_group_ids,
+        normalize_auto_refresh_country_ids,
     )
 
     return {
@@ -3671,6 +3691,12 @@ def _schedule_to_dict(config) -> dict:
         ),
         "auto_refresh_owner_ids": normalize_auto_refresh_owner_ids(
             getattr(config, "auto_refresh_owner_ids", None),
+        ),
+        "auto_refresh_group_ids": normalize_auto_refresh_group_ids(
+            getattr(config, "auto_refresh_group_ids", None),
+        ),
+        "auto_refresh_country_ids": normalize_auto_refresh_country_ids(
+            getattr(config, "auto_refresh_country_ids", None),
         ),
         "auto_refresh_csv_report": True,
         "auto_refresh_telegram_enabled": bool(
@@ -3900,6 +3926,18 @@ def refresh_schedule(request):
 
             config.auto_refresh_owner_ids = normalize_auto_refresh_owner_ids(
                 data["auto_refresh_owner_ids"],
+            )
+        if "auto_refresh_group_ids" in data:
+            from .auto_refresh_scope import normalize_auto_refresh_group_ids
+
+            config.auto_refresh_group_ids = normalize_auto_refresh_group_ids(
+                data["auto_refresh_group_ids"],
+            )
+        if "auto_refresh_country_ids" in data:
+            from .auto_refresh_scope import normalize_auto_refresh_country_ids
+
+            config.auto_refresh_country_ids = normalize_auto_refresh_country_ids(
+                data["auto_refresh_country_ids"],
             )
         if "times" in data and isinstance(data["times"], list):
             valid = []

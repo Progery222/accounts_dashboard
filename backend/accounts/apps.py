@@ -508,6 +508,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "auto_refresh_platforms",
                 "auto_refresh_profile_ids",
                 "auto_refresh_owner_ids",
+                "auto_refresh_group_ids",
+                "auto_refresh_country_ids",
             ],
         )
     except Exception:
@@ -1298,145 +1300,79 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             )
                             stop_requested.set()
                         except Exception as e:
-                            from accounts.facebook_scrape_fallback import (
-                                handle_facebook_playwright_batch_error,
-                                retry_facebook_via_apify_after_playwright_failure,
+                            from accounts.scrape_fallback_recovery import (
+                                apify_fallback_detail_suffix,
+                                notify_playwright_batch_errors,
+                                try_apify_recovery_after_playwright_failure,
                             )
 
                             refresh_failure_exc = e
-                            handle_facebook_playwright_batch_error(
+                            notify_playwright_batch_errors(
                                 account,
                                 e,
                                 batch_ctx=batch_scrape,
                                 fb_batch_guard=fb_batch_guard,
                             )
-                            batch_scrape.on_tiktok_playwright_error(account, e)
                             apify_recovered = False
-                            if account.platform == "tiktok":
-                                from accounts.tiktok_scrape_fallback import (
-                                    retry_tiktok_via_apify_after_captcha,
+                            try:
+                                apify_acc = try_apify_recovery_after_playwright_failure(
+                                    account,
+                                    e,
+                                    batch_ctx=batch_scrape,
+                                    trigger=ApifyRefreshJobTrigger.SCHEDULER,
+                                    parent_batch_id=apify_batch_id,
                                 )
-
-                                try:
-                                    apify_acc = retry_tiktok_via_apify_after_captcha(
-                                        account,
-                                        e,
-                                        batch_ctx=batch_scrape,
-                                        trigger=ApifyRefreshJobTrigger.SCHEDULER,
-                                        parent_batch_id=apify_batch_id,
+                            except Exception as apify_exc:
+                                e = apify_exc
+                                refresh_failure_exc = apify_exc
+                            else:
+                                if apify_acc is not None:
+                                    refresh_failure_exc = None
+                                    account = apify_acc
+                                    ensure_fresh_db_connections()
+                                    account = _reload_account(idx)
+                                    after = (
+                                        int(account.follower_count or 0),
+                                        int(account.like_count or 0),
+                                        int(account.view_count or 0),
+                                        int(account.post_count or 0),
                                     )
-                                except Exception as apify_exc:
-                                    e = apify_exc
-                                    refresh_failure_exc = apify_exc
-                                else:
-                                    if apify_acc is not None:
-                                        refresh_failure_exc = None
-                                        account = apify_acc
-                                        ensure_fresh_db_connections()
-                                        account = _reload_account(idx)
-                                        after = (
-                                            int(account.follower_count or 0),
-                                            int(account.like_count or 0),
-                                            int(account.view_count or 0),
-                                            int(account.post_count or 0),
-                                        )
-                                        if before is None:
-                                            before = after
-                                        unchanged = before == after
-                                        report_by_index[idx] = {
-                                            "platform": account.platform,
-                                            "username": account.username,
-                                            "profile_name": _profile_name(account),
-                                            "status": (
-                                                "успешно (данные без изменений)"
-                                                if unchanged
-                                                else "успешно"
-                                            ),
-                                            "follower_before": before[0],
-                                            "follower_after": after[0],
-                                            "like_before": before[1],
-                                            "like_after": after[1],
-                                            "view_before": before[2],
-                                            "view_after": after[2],
-                                            "post_before": before[3],
-                                            "post_after": after[3],
-                                            "elapsed_sec": round(
-                                                max(0.0, time.perf_counter() - row_started), 3
-                                            ),
-                                            "detail": batch_scrape.tiktok_fallback.fallback_detail_suffix()
-                                            if batch_scrape.tiktok_fallback is not None
-                                            else "",
-                                        }
-                                        _mark_progress(success=True, failed=False)
-                                        _persist_run_item(
-                                            account.id,
-                                            status="done",
-                                            worker=None,
-                                            detail=report_by_index[idx]["detail"],
-                                        )
-                                        apify_recovered = True
-                            elif account.platform == "facebook":
-                                try:
-                                    apify_acc = retry_facebook_via_apify_after_playwright_failure(
-                                        account,
-                                        e,
-                                        batch_ctx=batch_scrape,
-                                        trigger=ApifyRefreshJobTrigger.SCHEDULER,
-                                        parent_batch_id=apify_batch_id,
+                                    if before is None:
+                                        before = after
+                                    unchanged = before == after
+                                    detail_ok = apify_fallback_detail_suffix(
+                                        batch_scrape, account
                                     )
-                                except Exception as apify_exc:
-                                    e = apify_exc
-                                    refresh_failure_exc = apify_exc
-                                else:
-                                    if apify_acc is not None:
-                                        refresh_failure_exc = None
-                                        account = apify_acc
-                                        ensure_fresh_db_connections()
-                                        account = _reload_account(idx)
-                                        after = (
-                                            int(account.follower_count or 0),
-                                            int(account.like_count or 0),
-                                            int(account.view_count or 0),
-                                            int(account.post_count or 0),
-                                        )
-                                        if before is None:
-                                            before = after
-                                        unchanged = before == after
-                                        detail_fb = (
-                                            batch_scrape.facebook_fallback.fallback_detail_suffix()
-                                            if batch_scrape.facebook_fallback is not None
-                                            else ""
-                                        )
-                                        report_by_index[idx] = {
-                                            "platform": account.platform,
-                                            "username": account.username,
-                                            "profile_name": _profile_name(account),
-                                            "status": (
-                                                "успешно (данные без изменений)"
-                                                if unchanged
-                                                else "успешно"
-                                            ),
-                                            "follower_before": before[0],
-                                            "follower_after": after[0],
-                                            "like_before": before[1],
-                                            "like_after": after[1],
-                                            "view_before": before[2],
-                                            "view_after": after[2],
-                                            "post_before": before[3],
-                                            "post_after": after[3],
-                                            "elapsed_sec": round(
-                                                max(0.0, time.perf_counter() - row_started), 3
-                                            ),
-                                            "detail": detail_fb,
-                                        }
-                                        _mark_progress(success=True, failed=False)
-                                        _persist_run_item(
-                                            account.id,
-                                            status="done",
-                                            worker=None,
-                                            detail=detail_fb,
-                                        )
-                                        apify_recovered = True
+                                    report_by_index[idx] = {
+                                        "platform": account.platform,
+                                        "username": account.username,
+                                        "profile_name": _profile_name(account),
+                                        "status": (
+                                            "успешно (данные без изменений)"
+                                            if unchanged
+                                            else "успешно"
+                                        ),
+                                        "follower_before": before[0],
+                                        "follower_after": after[0],
+                                        "like_before": before[1],
+                                        "like_after": after[1],
+                                        "view_before": before[2],
+                                        "view_after": after[2],
+                                        "post_before": before[3],
+                                        "post_after": after[3],
+                                        "elapsed_sec": round(
+                                            max(0.0, time.perf_counter() - row_started), 3
+                                        ),
+                                        "detail": detail_ok,
+                                    }
+                                    _mark_progress(success=True, failed=False)
+                                    _persist_run_item(
+                                        account.id,
+                                        status="done",
+                                        worker=None,
+                                        detail=detail_ok,
+                                    )
+                                    apify_recovered = True
                             if not apify_recovered:
                                 _mark_profile_unavailable_if_applicable(account, e)
                                 detail = humanize_refresh_run_detail(e)

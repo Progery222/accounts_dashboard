@@ -1,4 +1,4 @@
-"""Фильтры охвата автообновления: платформы и профили."""
+"""Фильтры охвата автообновления: платформы, профили, владельцы, группы и страны."""
 
 from __future__ import annotations
 
@@ -21,6 +21,44 @@ def normalize_auto_refresh_platforms(raw) -> list[str]:
 
 def normalize_auto_refresh_profile_ids(raw) -> list:
     """Список int id профилей и/или строки ``none`` (аккаунты без профиля)."""
+    if not isinstance(raw, list):
+        return []
+    out: list = []
+    for item in raw:
+        if str(item).strip().lower() == "none":
+            if "none" not in out:
+                out.append("none")
+            continue
+        try:
+            n = int(item)
+        except (TypeError, ValueError):
+            continue
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def normalize_auto_refresh_group_ids(raw) -> list:
+    """Список int id групп и/или строки ``none`` (аккаунты без группы)."""
+    if not isinstance(raw, list):
+        return []
+    out: list = []
+    for item in raw:
+        if str(item).strip().lower() == "none":
+            if "none" not in out:
+                out.append("none")
+            continue
+        try:
+            n = int(item)
+        except (TypeError, ValueError):
+            continue
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def normalize_auto_refresh_country_ids(raw) -> list:
+    """Список int id стран и/или строки ``none`` (аккаунты без страны)."""
     if not isinstance(raw, list):
         return []
     out: list = []
@@ -91,6 +129,32 @@ def apply_auto_refresh_scope(qs, cfg):
             clause |= Q(owner_id__in=int_ids)
         if "none" in owner_ids:
             clause |= Q(owner__isnull=True)
+        if clause:
+            qs = qs.filter(clause)
+
+    group_ids = normalize_auto_refresh_group_ids(
+        getattr(cfg, "auto_refresh_group_ids", None) or [],
+    )
+    if group_ids:
+        clause = Q()
+        int_ids = [x for x in group_ids if isinstance(x, int)]
+        if int_ids:
+            clause |= Q(group_id__in=int_ids)
+        if "none" in group_ids:
+            clause |= Q(group__isnull=True)
+        if clause:
+            qs = qs.filter(clause)
+
+    country_ids = normalize_auto_refresh_country_ids(
+        getattr(cfg, "auto_refresh_country_ids", None) or [],
+    )
+    if country_ids:
+        clause = Q()
+        int_ids = [x for x in country_ids if isinstance(x, int)]
+        if int_ids:
+            clause |= Q(country_id__in=int_ids)
+        if "none" in country_ids:
+            clause |= Q(country__isnull=True)
         if clause:
             qs = qs.filter(clause)
     return qs

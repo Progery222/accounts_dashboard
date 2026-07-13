@@ -34,6 +34,36 @@ class Owner(models.Model):
         return self.name
 
 
+class AccountGroup(models.Model):
+    name = models.CharField(max_length=255)
+    color = models.CharField(max_length=7, default="#6366f1")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Группа"
+        verbose_name_plural = "Группы"
+
+    def __str__(self):
+        return self.name
+
+
+class Country(models.Model):
+    name = models.CharField(max_length=255)
+    color = models.CharField(max_length=7, default="#6366f1")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Страна"
+        verbose_name_plural = "Страны"
+
+    def __str__(self):
+        return self.name
+
+
 class RefreshScheduleConfig(models.Model):
     """Singleton (pk=1). Stores user-configured auto-refresh schedule."""
     enabled = models.BooleanField(default=False)
@@ -94,6 +124,16 @@ class RefreshScheduleConfig(models.Model):
         blank=True,
         help_text="Пусто — все владельцы; иначе id владельцев и/или «none» (без владельца).",
     )
+    auto_refresh_group_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Пусто — все группы; иначе id групп и/или «none» (без группы).",
+    )
+    auto_refresh_country_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Пусто — все страны; иначе id стран и/или «none» (без страны).",
+    )
     account_delta_period_days = models.PositiveSmallIntegerField(
         default=1,
         help_text="За сколько календарных дней назад брать опорный снимок для дельт в списке аккаунтов (1, 7 или 30).",
@@ -130,6 +170,8 @@ class RefreshScheduleConfig(models.Model):
                 "auto_refresh_platforms": [],
                 "auto_refresh_profile_ids": [],
                 "auto_refresh_owner_ids": [],
+                "auto_refresh_group_ids": [],
+                "auto_refresh_country_ids": [],
                 "account_delta_period_days": 1,
                 "max_audience_followers_per_account": MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT,
                 "times": ["06:00", "12:00", "18:00", "00:00"],
@@ -427,6 +469,14 @@ class Account(models.Model):
     )
     owner = models.ForeignKey(
         Owner, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="accounts",
+    )
+    group = models.ForeignKey(
+        AccountGroup, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="accounts",
+    )
+    country = models.ForeignKey(
+        Country, on_delete=models.SET_NULL,
         null=True, blank=True, related_name="accounts",
     )
     display_name = models.CharField(max_length=255, blank=True)

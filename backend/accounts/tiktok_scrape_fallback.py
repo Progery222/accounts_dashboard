@@ -140,7 +140,7 @@ class TikTokBatchFallback:
 
 
 class BatchScrapeContext:
-    """Контекст batch-прогона: Apify/Playwright + TikTok/Facebook fallback."""
+    """Контекст batch-прогона: Apify/Playwright + fallback по платформам."""
 
     def __init__(
         self,
@@ -149,17 +149,21 @@ class BatchScrapeContext:
         tiktok_fallback: TikTokBatchFallback | None = None,
         tiktok_captcha_guard: TikTokRefreshBatchGuard | None = None,
         facebook_fallback=None,
+        platform_fallbacks: dict | None = None,
     ) -> None:
         self.tiktok_fallback = tiktok_fallback
         self.tiktok_captcha_guard = tiktok_captcha_guard
         self.facebook_fallback = facebook_fallback
+        self.platform_fallbacks = platform_fallbacks or {}
 
     @classmethod
     def for_accounts(cls, accounts: list[Account]) -> BatchScrapeContext:
         from accounts.facebook_scrape_fallback import FacebookBatchFallback
+        from accounts.platform_scrape_fallback import PlatformBatchFallback
 
         tt_fb = TikTokBatchFallback.for_accounts(accounts)
         fb_fb = FacebookBatchFallback.for_accounts(accounts)
+        plat_fb = PlatformBatchFallback.for_accounts(accounts)
         guard = None
         if tt_fb is None or not tt_fb.enabled:
             if any(getattr(a, "platform", None) == Platform.TIKTOK for a in accounts):
@@ -169,6 +173,7 @@ class BatchScrapeContext:
             tiktok_fallback=tt_fb,
             tiktok_captcha_guard=guard,
             facebook_fallback=fb_fb,
+            platform_fallbacks=plat_fb,
         )
 
     def use_apify(self, account: Account) -> bool:
@@ -180,11 +185,21 @@ class BatchScrapeContext:
             override = self.tiktok_fallback.effective_use_apify(account)
             if override is not None:
                 return override
+        plat_fb = self.platform_fallbacks.get(account.platform)
+        if plat_fb is not None:
+            override = plat_fb.effective_use_apify(account)
+            if override is not None:
+                return override
         return use_apify_for_platform(account.platform)
 
     def on_facebook_playwright_error(self, account: Account, exc: BaseException) -> None:
         if self.facebook_fallback is not None and self.facebook_fallback.enabled:
             self.facebook_fallback.on_playwright_failure(account, exc)
+
+    def on_platform_playwright_error(self, account: Account, exc: BaseException) -> None:
+        plat_fb = self.platform_fallbacks.get(account.platform)
+        if plat_fb is not None and plat_fb.enabled:
+            plat_fb.on_playwright_failure(account, exc)
 
     def on_tiktok_playwright_error(self, account: Account, exc: BaseException) -> None:
         if self.tiktok_fallback is not None and self.tiktok_fallback.enabled:

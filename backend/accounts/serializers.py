@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 import re
-from .models import Account, Platform, Post, Profile, Owner, AudienceMember, AudienceMemberPost
+from .models import Account, Platform, Post, Profile, Owner, AccountGroup, Country, AudienceMember, AudienceMemberPost
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -37,6 +37,36 @@ class OwnerSerializer(serializers.ModelSerializer):
         return obj.accounts.count()
 
 
+class AccountGroupSerializer(serializers.ModelSerializer):
+    account_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AccountGroup
+        fields = ["id", "name", "color", "account_count", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_account_count(self, obj):
+        prefetched = getattr(obj, "account_count", None)
+        if prefetched is not None:
+            return prefetched
+        return obj.accounts.count()
+
+
+class CountrySerializer(serializers.ModelSerializer):
+    account_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Country
+        fields = ["id", "name", "color", "account_count", "created_at", "updated_at"]
+        read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_account_count(self, obj):
+        prefetched = getattr(obj, "account_count", None)
+        if prefetched is not None:
+            return prefetched
+        return obj.accounts.count()
+
+
 class AccountSerializer(serializers.ModelSerializer):
     platform_label = serializers.CharField(source="get_platform_display", read_only=True)
     profile_id = serializers.PrimaryKeyRelatedField(
@@ -49,6 +79,16 @@ class AccountSerializer(serializers.ModelSerializer):
     )
     owner_name = serializers.CharField(source="owner.name", read_only=True, allow_null=True)
     owner_color = serializers.CharField(source="owner.color", read_only=True, allow_null=True)
+    group_id = serializers.PrimaryKeyRelatedField(
+        queryset=AccountGroup.objects.all(), source="group", allow_null=True, required=False,
+    )
+    group_name = serializers.CharField(source="group.name", read_only=True, allow_null=True)
+    group_color = serializers.CharField(source="group.color", read_only=True, allow_null=True)
+    country_id = serializers.PrimaryKeyRelatedField(
+        queryset=Country.objects.all(), source="country", allow_null=True, required=False,
+    )
+    country_name = serializers.CharField(source="country.name", read_only=True, allow_null=True)
+    country_color = serializers.CharField(source="country.color", read_only=True, allow_null=True)
     follower_delta = serializers.SerializerMethodField()
     like_delta = serializers.SerializerMethodField()
     view_delta = serializers.SerializerMethodField()
@@ -67,6 +107,8 @@ class AccountSerializer(serializers.ModelSerializer):
             "id", "username", "platform", "platform_label",
             "profile_id", "profile_name", "profile_color",
             "owner_id", "owner_name", "owner_color",
+            "group_id", "group_name", "group_color",
+            "country_id", "country_name", "country_color",
             "display_name", "avatar_url", "bio",
             "follower_count", "like_count", "view_count", "post_count",
             "link_click_count",

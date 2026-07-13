@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.test import TestCase
 
 from accounts.constants import NEW_ACCOUNT_UPDATED_AT
-from accounts.models import Account, AccountSnapshot, Platform, Profile
+from accounts.models import Account, AccountGroup, AccountSnapshot, Country, Platform, Profile
 from accounts.serializers import AccountSerializer
 
 
@@ -194,6 +194,139 @@ class AccountDeltaSerializerTests(TestCase):
         acc = Account.objects.get(username="move_user2", platform=Platform.TIKTOK)
         self.assertEqual(acc.profile_id, new.id)
         self.assertEqual(acc.view_count, 500)
+
+    def test_import_create_updates_group_only(self):
+        from rest_framework.test import APIRequestFactory
+
+        profile = Profile.objects.create(name="P", color="#6366f1")
+        old_group = AccountGroup.objects.create(name="G1", color="#111111")
+        new_group = AccountGroup.objects.create(name="G2", color="#222222")
+        Account.objects.create(
+            username="grp_user",
+            platform=Platform.TIKTOK,
+            profile=profile,
+            group=old_group,
+            view_count=800,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {
+                "username": "grp_user",
+                "platform": "tiktok",
+                "profile_id": profile.id,
+                "group_id": new_group.id,
+            },
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.get("import_action"), "assignment_updated")
+        self.assertEqual(response.data.get("changed_fields"), ["group"])
+        acc = Account.objects.get(username="grp_user", platform=Platform.TIKTOK)
+        self.assertEqual(acc.group_id, new_group.id)
+        self.assertEqual(acc.profile_id, profile.id)
+        self.assertEqual(acc.view_count, 800)
+
+    def test_import_create_unchanged_when_same_group_and_profile(self):
+        from rest_framework.test import APIRequestFactory
+
+        profile = Profile.objects.create(name="P", color="#6366f1")
+        group = AccountGroup.objects.create(name="G", color="#333333")
+        Account.objects.create(
+            username="same_grp",
+            platform=Platform.TIKTOK,
+            profile=profile,
+            group=group,
+            view_count=111,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {
+                "username": "same_grp",
+                "platform": "tiktok",
+                "profile_id": profile.id,
+                "group_id": group.id,
+            },
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.get("import_action"), "unchanged")
+
+    def test_import_create_updates_country_preserves_updated_at(self):
+        from rest_framework.test import APIRequestFactory
+
+        profile = Profile.objects.create(name="P", color="#6366f1")
+        old_country = Country.objects.create(name="RU", color="#111111")
+        new_country = Country.objects.create(name="US", color="#222222")
+        marker = timezone.now() - timedelta(days=4)
+        Account.objects.create(
+            username="cty_user",
+            platform=Platform.TIKTOK,
+            profile=profile,
+            country=old_country,
+            view_count=50,
+        )
+        Account.objects.filter(username="cty_user", platform=Platform.TIKTOK).update(
+            updated_at=marker,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {
+                "username": "cty_user",
+                "platform": "tiktok",
+                "profile_id": profile.id,
+                "country_id": new_country.id,
+            },
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        acc = Account.objects.get(username="cty_user", platform=Platform.TIKTOK)
+        self.assertEqual(acc.country_id, new_country.id)
+        self.assertEqual(acc.view_count, 50)
+        self.assertEqual(acc.updated_at, marker)
+
+    def test_patch_group_preserves_updated_at(self):
+        from rest_framework.test import APIRequestFactory
+
+        profile = Profile.objects.create(name="P", color="#6366f1")
+        group = AccountGroup.objects.create(name="G", color="#444444")
+        marker = timezone.now() - timedelta(days=2)
+        acc = Account.objects.create(
+            username="patch_grp",
+            platform=Platform.TIKTOK,
+            profile=profile,
+            view_count=77,
+        )
+        Account.objects.filter(pk=acc.pk).update(updated_at=marker)
+        factory = APIRequestFactory()
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"patch": "partial_update"})
+        request = factory.patch(
+            f"/api/accounts/{acc.id}/",
+            {"group_id": group.id},
+            format="json",
+        )
+        response = view(request, pk=acc.id)
+        self.assertEqual(response.status_code, 200)
+        acc.refresh_from_db()
+        self.assertEqual(acc.group_id, group.id)
+        self.assertEqual(acc.view_count, 77)
+        self.assertEqual(acc.updated_at, marker)
 
     def test_patch_profile_unavailable_manual_toggle(self):
         from rest_framework.test import APIRequestFactory
