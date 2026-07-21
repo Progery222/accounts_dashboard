@@ -501,6 +501,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "include_hidden_platform_accounts",
                 "include_hidden_profile_accounts",
                 "include_unavailable_accounts",
+                "include_archived_accounts",
                 "auto_refresh_csv_report",
                 "auto_refresh_telegram_enabled",
                 "auto_refresh_telegram_chat_id",
@@ -536,6 +537,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
         accounts_qs = accounts_qs.exclude(profile__is_hidden=True)
     if not bool(getattr(cfg, "include_unavailable_accounts", False)):
         accounts_qs = accounts_qs.exclude(profile_unavailable=True)
+    if not bool(getattr(cfg, "include_archived_accounts", False)):
+        accounts_qs = accounts_qs.exclude(is_archived=True)
     accounts_qs = apply_auto_refresh_scope(accounts_qs, cfg)
     from .refresh_queue import order_accounts_for_refresh, queryset_order_by_staleness
 
@@ -1618,6 +1621,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                             started_at=state.started_at,
                             finished_at=finished,
                             total_accounts=len(accounts),
+                            config=cfg,
                         )
                         send_auto_refresh_telegram_report(
                             config=cfg,

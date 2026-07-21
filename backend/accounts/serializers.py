@@ -113,6 +113,7 @@ class AccountSerializer(serializers.ModelSerializer):
             "follower_count", "like_count", "view_count", "post_count",
             "link_click_count",
             "profile_unavailable",
+            "is_archived",
             "audience_last_synced_at",
             "audience_members_count",
             "follower_delta", "like_delta", "view_delta", "post_delta", "link_click_delta",
@@ -130,6 +131,12 @@ class AccountSerializer(serializers.ModelSerializer):
     def validate_username(self, value):
         value = str(value).strip().lstrip("@")
         return value
+
+    def create(self, validated_data):
+        """Новые аккаунты всегда в актуальных, даже если клиент передал is_archived."""
+        validated_data.pop("is_archived", None)
+        validated_data["is_archived"] = False
+        return super().create(validated_data)
 
     def run_validators(self, value):
         """Существующий аккаунт при импорте — upsert в AccountViewSet.create, не unique-error."""
