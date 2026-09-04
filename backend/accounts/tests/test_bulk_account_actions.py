@@ -42,6 +42,22 @@ class BulkAccountActionsTests(APITestCase):
         self.assertEqual(self.a1.owner_id, self.o1.id)
         self.assertEqual(self.a1.profile_id, self.p2.id)
 
+    def test_bulk_update_ban(self):
+        r = self.client.post(
+            "/api/accounts/bulk-update/",
+            {
+                "ids": [self.a1.id, self.a2.id],
+                "is_banned": True,
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["updated"], 2)
+        self.a1.refresh_from_db()
+        self.a2.refresh_from_db()
+        self.assertTrue(self.a1.is_banned)
+        self.assertTrue(self.a2.is_banned)
+
     def test_bulk_update_clear_owner(self):
         self.a1.owner = self.o1
         self.a1.save(update_fields=["owner"])

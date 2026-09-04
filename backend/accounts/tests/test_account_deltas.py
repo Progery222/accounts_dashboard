@@ -369,7 +369,12 @@ class AccountDeltaSerializerTests(TestCase):
         factory = APIRequestFactory()
         request = factory.post(
             "/api/accounts/",
-            {"username": "new_active", "platform": "tiktok", "is_archived": True},
+            {
+                "username": "new_active",
+                "platform": "tiktok",
+                "is_archived": True,
+                "is_banned": True,
+            },
             format="json",
         )
         view = __import__(
@@ -379,6 +384,7 @@ class AccountDeltaSerializerTests(TestCase):
         self.assertEqual(response.status_code, 201)
         acc = Account.objects.get(username="new_active", platform=Platform.TIKTOK)
         self.assertFalse(acc.is_archived)
+        self.assertFalse(acc.is_banned)
 
     def test_import_readd_unarchives_existing(self):
         from rest_framework.test import APIRequestFactory
@@ -405,5 +411,33 @@ class AccountDeltaSerializerTests(TestCase):
         self.assertEqual(response.data.get("import_action"), "unarchived")
         acc.refresh_from_db()
         self.assertFalse(acc.is_archived)
+        self.assertEqual(acc.view_count, 42)
+        self.assertEqual(acc.updated_at, marker)
+
+    def test_import_readd_unbans_existing(self):
+        from rest_framework.test import APIRequestFactory
+
+        marker = timezone.now() - timedelta(days=3)
+        acc = Account.objects.create(
+            username="was_banned",
+            platform=Platform.TIKTOK,
+            is_banned=True,
+            view_count=42,
+            updated_at=marker,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {"username": "was_banned", "platform": "tiktok"},
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.get("import_action"), "unbanned")
+        acc.refresh_from_db()
+        self.assertFalse(acc.is_banned)
         self.assertEqual(acc.view_count, 42)
         self.assertEqual(acc.updated_at, marker)

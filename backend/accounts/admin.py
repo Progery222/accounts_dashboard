@@ -67,11 +67,12 @@ class AccountAdmin(admin.ModelAdmin):
         "display_name",
         "avatar_missing",
         "is_archived",
+        "is_banned",
         "follower_count",
         "post_count",
         "updated_at",
     ]
-    list_filter = ["platform", "avatar_missing", "is_archived"]
+    list_filter = ["platform", "avatar_missing", "is_archived", "is_banned"]
     search_fields = ["username", "display_name"]
     readonly_fields = ["created_at", "updated_at", "avatar_file"]
     ordering = ["-created_at"]

@@ -113,6 +113,10 @@ class RefreshScheduleConfig(models.Model):
         default=False,
         help_text="В автообновлении учитывать аккаунты в архиве.",
     )
+    include_banned_accounts = models.BooleanField(
+        default=False,
+        help_text="В автообновлении учитывать аккаунты в бане.",
+    )
     auto_refresh_platforms = models.JSONField(
         default=list,
         blank=True,
@@ -172,6 +176,7 @@ class RefreshScheduleConfig(models.Model):
                 "include_hidden_profile_accounts": False,
                 "include_unavailable_accounts": False,
                 "include_archived_accounts": False,
+                "include_banned_accounts": False,
                 "auto_refresh_platforms": [],
                 "auto_refresh_profile_ids": [],
                 "auto_refresh_owner_ids": [],
@@ -520,6 +525,12 @@ class Account(models.Model):
         db_index=True,
         verbose_name="В архиве",
         help_text="Архивные аккаунты скрыты из основного списка и не участвуют в автообновлении.",
+    )
+    is_banned = models.BooleanField(
+        default=False,
+        db_index=True,
+        verbose_name="В бане",
+        help_text="Забаненные аккаунты скрыты из основного списка и не участвуют в автообновлении.",
     )
     audience_last_synced_at = models.DateTimeField(
         null=True,

@@ -36,6 +36,28 @@ TABLES: list[tuple[str, str, list[tuple[str, str, str, str]]]] = [
         ],
     ),
     (
+        "accountgroup",
+        "Группа аккаунтов (третий уровень группировки в UI, опционально).",
+        [
+            ("id", "BIGSERIAL PK", "Ключ группы", "FK из account."),
+            ("name", "VARCHAR(255)", "Название группы", "Фильтры списка и scope автообновления."),
+            ("color", "VARCHAR(7)", "Цвет в UI", "HEX для бейджа группы."),
+            ("created_at", "TIMESTAMPTZ", "Когда создан", "Аудит."),
+            ("updated_at", "TIMESTAMPTZ", "Когда изменён", "Аудит."),
+        ],
+    ),
+    (
+        "country",
+        "Страна аккаунта (четвёртый уровень группировки, опционально).",
+        [
+            ("id", "BIGSERIAL PK", "Ключ страны", "FK из account."),
+            ("name", "VARCHAR(255)", "Название страны", "Фильтры списка и scope автообновления."),
+            ("color", "VARCHAR(7)", "Цвет в UI", "HEX для бейджа страны."),
+            ("created_at", "TIMESTAMPTZ", "Когда создан", "Аудит."),
+            ("updated_at", "TIMESTAMPTZ", "Когда изменён", "Аудит."),
+        ],
+    ),
+    (
         "account",
         "Отслеживаемый аккаунт соцсети.",
         [
@@ -44,6 +66,8 @@ TABLES: list[tuple[str, str, list[tuple[str, str, str, str]]]] = [
             ("platform", "VARCHAR(20)", "Площадка", "tiktok, instagram, youtube, telegram, x, threads, facebook, rumble, reddit."),
             ("profile_id", "BIGINT FK → profile", "Профиль", "SET NULL при удалении профиля."),
             ("owner_id", "BIGINT FK → owner", "Владелец", "SET NULL при удалении владельца; опционально."),
+            ("group_id", "BIGINT FK → accountgroup", "Группа", "SET NULL при удалении группы; опционально."),
+            ("country_id", "BIGINT FK → country", "Страна", "SET NULL при удалении страны; опционально."),
             ("display_name", "VARCHAR(255)", "Отображаемое имя", "С площадки, может отличаться от username."),
             ("avatar_url", "VARCHAR(1024)", "URL аватара на CDN", "Fallback, если локальный файл ещё не скачан."),
             ("avatar_file", "VARCHAR(512)", "Путь к локальному аватару", "Скачивается при refresh; upload_to accounts/avatars/%Y/%m/."),
@@ -55,6 +79,8 @@ TABLES: list[tuple[str, str, list[tuple[str, str, str, str]]]] = [
             ("post_count", "INT", "Число постов", "Синхронизируется со списком постов."),
             ("link_click_count", "BIGINT", "Клики по ссылке в bio", "Из Links API; обновляется при refresh."),
             ("profile_unavailable", "BOOLEAN", "Профиль недоступен", "Удалён/заблокирован на площадке; фильтр refresh."),
+            ("is_archived", "BOOLEAN", "В архиве", "Скрыт из основного списка; не в автообновлении (если не include_archived)."),
+            ("is_banned", "BOOLEAN", "В бане", "Скрыт из основного списка; не в автообновлении (если не include_banned)."),
             ("created_at", "TIMESTAMPTZ", "Когда добавлен", "Аудит; новые аккаунты без refresh выделяются в UI."),
             ("updated_at", "TIMESTAMPTZ", "Когда обновлён", "Меняется только при успешном refresh."),
             ("UNIQUE (username, platform)", "—", "Уникальность пары", "Один ник на площадке = одна строка; upsert при повторном добавлении."),
@@ -130,9 +156,13 @@ TABLES: list[tuple[str, str, list[tuple[str, str, str, str]]]] = [
             ("include_hidden_platform_accounts", "BOOLEAN", "Скрытые платформы", "Включать в автообновление."),
             ("include_hidden_profile_accounts", "BOOLEAN", "Скрытые профили", "Включать в автообновление."),
             ("include_unavailable_accounts", "BOOLEAN", "Недоступные аккаунты", "profile_unavailable=true."),
+            ("include_archived_accounts", "BOOLEAN", "Архивные аккаунты", "is_archived=true; по умолчанию вне автообновления."),
+            ("include_banned_accounts", "BOOLEAN", "Забаненные аккаунты", "is_banned=true; по умолчанию вне автообновления."),
             ("auto_refresh_platforms", "JSONB", "Фильтр платформ", "Пусто — все; иначе список id."),
             ("auto_refresh_profile_ids", "JSONB", "Фильтр профилей", "Пусто — все; иначе id или «none»."),
             ("auto_refresh_owner_ids", "JSONB", "Фильтр владельцев", "Пусто — все; иначе id или «none»."),
+            ("auto_refresh_group_ids", "JSONB", "Фильтр групп", "Пусто — все; иначе id или «none»."),
+            ("auto_refresh_country_ids", "JSONB", "Фильтр стран", "Пусто — все; иначе id или «none»."),
             ("account_delta_period_days", "SMALLINT", "Период дельт в UI", "1, 7 или 30 календарных дней."),
         ],
     ),
@@ -298,9 +328,11 @@ def build() -> Path:
     # ER overview
     doc.add_heading("Связи (кратко)", level=1)
     er = doc.add_paragraph(
-        "profile -- account -- post -- post_snapshot\n"
-        "owner  /          |-- account_snapshot\n"
-        "                  +-- apify_refresh_job"
+        "profile -------+\n"
+        "owner ---------+\n"
+        "accountgroup --+-- account -- post -- post_snapshot\n"
+        "country -------+          |-- account_snapshot\n"
+        "                          +-- apify_refresh_job"
     )
     er.paragraph_format.left_indent = Cm(0.5)
     for r in er.runs:

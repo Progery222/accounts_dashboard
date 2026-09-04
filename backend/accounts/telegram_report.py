@@ -117,6 +117,9 @@ def _accounts_qs_for_telegram_stats(config=None):
     include_archived = bool(getattr(config, "include_archived_accounts", False)) if config else False
     if not include_archived:
         qs = qs.filter(is_archived=False)
+    include_banned = bool(getattr(config, "include_banned_accounts", False)) if config else False
+    if not include_banned:
+        qs = qs.filter(is_banned=False)
     qs = _apply_visibility_filters(
         qs,
         include_hidden_platforms=bool(

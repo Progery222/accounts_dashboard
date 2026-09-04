@@ -114,6 +114,7 @@ class AccountSerializer(serializers.ModelSerializer):
             "link_click_count",
             "profile_unavailable",
             "is_archived",
+            "is_banned",
             "audience_last_synced_at",
             "audience_members_count",
             "follower_delta", "like_delta", "view_delta", "post_delta", "link_click_delta",
@@ -133,9 +134,11 @@ class AccountSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        """Новые аккаунты всегда в актуальных, даже если клиент передал is_archived."""
+        """Новые аккаунты всегда в актуальных, даже если клиент передал is_archived/is_banned."""
         validated_data.pop("is_archived", None)
+        validated_data.pop("is_banned", None)
         validated_data["is_archived"] = False
+        validated_data["is_banned"] = False
         return super().create(validated_data)
 
     def run_validators(self, value):

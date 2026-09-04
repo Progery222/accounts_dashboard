@@ -15,6 +15,22 @@ pk id bigint
     created_at timestamptz
     updated_at timestamptz
 
+accounts_accountgroup
+
+pk id bigint
+    name varchar(255)
+    color varchar(7)
+    created_at timestamptz
+    updated_at timestamptz
+
+accounts_country
+
+pk id bigint
+    name varchar(255)
+    color varchar(7)
+    created_at timestamptz
+    updated_at timestamptz
+
 accounts_refreshscheduleconfig
 
 pk id bigint
@@ -30,9 +46,13 @@ pk id bigint
     include_hidden_platform_accounts boolean
     include_hidden_profile_accounts boolean
     include_unavailable_accounts boolean
+    include_archived_accounts boolean
+    include_banned_accounts boolean
     auto_refresh_platforms jsonb
     auto_refresh_profile_ids jsonb
     auto_refresh_owner_ids jsonb
+    auto_refresh_group_ids jsonb
+    auto_refresh_country_ids jsonb
     account_delta_period_days smallint
     max_audience_followers_per_account smallint
     times jsonb
@@ -127,6 +147,8 @@ pk id bigint
     platform varchar(20)
 fk profile_id bigint → accounts_profile
 fk owner_id bigint → accounts_owner
+fk group_id bigint → accounts_accountgroup
+fk country_id bigint → accounts_country
     display_name varchar(255)
     avatar_url varchar(1024)
     avatar_file varchar(512)
@@ -138,6 +160,8 @@ fk owner_id bigint → accounts_owner
     post_count integer
     link_click_count bigint
     profile_unavailable boolean
+    is_archived boolean
+    is_banned boolean
     audience_last_synced_at timestamptz
     created_at timestamptz
     updated_at timestamptz

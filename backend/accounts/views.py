@@ -420,7 +420,7 @@ _ACCOUNT_REFRESH_SAVE_FIELDS = (
     "updated_at",
 )
 _ACCOUNT_ASSIGNMENT_FIELDS = frozenset({
-    "profile", "owner", "group", "country", "profile_unavailable", "is_archived",
+    "profile", "owner", "group", "country", "profile_unavailable", "is_archived", "is_banned",
 })
 
 
@@ -445,6 +445,8 @@ def _account_assignment_update_fields(validated_data: dict) -> list[str]:
         out.append("profile_unavailable")
     if "is_archived" in validated_data:
         out.append("is_archived")
+    if "is_banned" in validated_data:
+        out.append("is_banned")
     return out
 
 
@@ -474,6 +476,17 @@ def _unarchive_account_on_import(account: Account) -> bool:
     preserved = account.updated_at
     Account.objects.filter(pk=account.pk).update(is_archived=False)
     account.is_archived = False
+    _restore_account_updated_at(account.pk, preserved)
+    return True
+
+
+def _unban_account_on_import(account: Account) -> bool:
+    """Повторный импорт/добавление снимает бан без сдвига «Обновлён»."""
+    if not account.is_banned:
+        return False
+    preserved = account.updated_at
+    Account.objects.filter(pk=account.pk).update(is_banned=False)
+    account.is_banned = False
     _restore_account_updated_at(account.pk, preserved)
     return True
 
@@ -1696,6 +1709,7 @@ def _run_refresh_all_background(
     include_hidden_platforms: bool,
     include_hidden_profiles: bool,
     include_archived_accounts: bool,
+    include_banned_accounts: bool,
     download_csv: bool,
 ) -> None:
     import uuid
@@ -1715,6 +1729,8 @@ def _run_refresh_all_background(
         accounts_qs = queryset_order_by_staleness(Account.objects.all())
         if not include_archived_accounts:
             accounts_qs = accounts_qs.filter(is_archived=False)
+        if not include_banned_accounts:
+            accounts_qs = accounts_qs.filter(is_banned=False)
         accounts_qs = _apply_visibility_filters(
             accounts_qs,
             include_hidden_platforms=include_hidden_platforms,
@@ -2916,6 +2932,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             )
         if not force_include_hidden_for_detail:
             qs = _apply_archived_filter(qs, self.request.query_params.get("archived"))
+            qs = _apply_banned_filter(qs, self.request.query_params.get("banned"))
         return _apply_visibility_filters(
             qs,
             include_hidden_platforms=include_hidden_platforms,
@@ -2956,18 +2973,26 @@ class AccountViewSet(viewsets.ModelViewSet):
         if existing is not None:
             ctx = self.get_serializer_context()
             unarchived = _unarchive_account_on_import(existing)
+            unbanned = _unban_account_on_import(existing)
             if _existing_account_assignment_unchanged(existing, validated):
-                if not unarchived:
+                if not unarchived and not unbanned:
                     data = self.get_serializer(existing, context=ctx).data
                     data["import_action"] = "unchanged"
                     return Response(data, status=status.HTTP_200_OK)
                 existing.refresh_from_db()
                 data = self.get_serializer(existing, context=ctx).data
-                data["import_action"] = "unarchived"
+                if unarchived and unbanned:
+                    data["import_action"] = "restored"
+                elif unarchived:
+                    data["import_action"] = "unarchived"
+                else:
+                    data["import_action"] = "unbanned"
                 return Response(data, status=status.HTTP_200_OK)
             changed_fields = _apply_existing_account_assignment(existing, validated)
             if unarchived:
                 changed_fields = [*changed_fields, "is_archived"]
+            if unbanned:
+                changed_fields = [*changed_fields, "is_banned"]
             existing.refresh_from_db()
             data = self.get_serializer(existing, context=ctx).data
             data["import_action"] = "assignment_updated"
@@ -3139,6 +3164,10 @@ class AccountViewSet(viewsets.ModelViewSet):
             updates["is_archived"] = _coerce_bool(data.get("is_archived"))
             update_fields.append("is_archived")
 
+        if "is_banned" in data:
+            updates["is_banned"] = _coerce_bool(data.get("is_banned"))
+            update_fields.append("is_banned")
+
         if not update_fields:
             return Response(
                 {"detail": "Укажите хотя бы одно поле для обновления"},
@@ -3284,6 +3313,9 @@ class AccountViewSet(viewsets.ModelViewSet):
             include_archived_accounts = _coerce_bool(
                 request.query_params.get("include_archived_accounts"),
             )
+            include_banned_accounts = _coerce_bool(
+                request.query_params.get("include_banned_accounts"),
+            )
             rr.is_running = True
             rr.cancel_requested = False
             rr.total_accounts = 0
@@ -3310,6 +3342,7 @@ class AccountViewSet(viewsets.ModelViewSet):
                 "include_hidden_platforms": include_hidden_platforms,
                 "include_hidden_profiles": include_hidden_profiles,
                 "include_archived_accounts": include_archived_accounts,
+                "include_banned_accounts": include_banned_accounts,
                 "download_csv": download_csv,
             },
             daemon=True,
@@ -3490,7 +3523,10 @@ class OwnerViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Owner.objects.annotate(
-            account_count=Count("accounts", filter=Q(accounts__is_archived=False)),
+            account_count=Count(
+                "accounts",
+                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+            ),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -3504,7 +3540,10 @@ class AccountGroupViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return AccountGroup.objects.annotate(
-            account_count=Count("accounts", filter=Q(accounts__is_archived=False)),
+            account_count=Count(
+                "accounts",
+                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+            ),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -3518,7 +3557,10 @@ class CountryViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Country.objects.annotate(
-            account_count=Count("accounts", filter=Q(accounts__is_archived=False)),
+            account_count=Count(
+                "accounts",
+                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+            ),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -3532,7 +3574,10 @@ class ProfileViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = Profile.objects.annotate(
-            account_count=Count("accounts", filter=Q(accounts__is_archived=False)),
+            account_count=Count(
+                "accounts",
+                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+            ),
         )
         include_hidden_profiles = _coerce_bool(self.request.query_params.get("include_hidden_profiles"))
         action = getattr(self, "action", "") or ""
@@ -3643,6 +3688,7 @@ def summary(request):
     include_hidden_profiles = include_hidden or _coerce_bool(request.query_params.get("include_hidden_profiles"))
     qs = Account.objects.prefetch_related("snapshots").all()
     qs = _apply_archived_filter(qs, request.query_params.get("archived"))
+    qs = _apply_banned_filter(qs, request.query_params.get("banned"))
     qs = _apply_visibility_filters(
         qs,
         include_hidden_platforms=include_hidden_platforms,
@@ -3842,6 +3888,9 @@ def _schedule_to_dict(config) -> dict:
         "include_archived_accounts": bool(
             getattr(config, "include_archived_accounts", False),
         ),
+        "include_banned_accounts": bool(
+            getattr(config, "include_banned_accounts", False),
+        ),
         "account_delta_period_days": (
             d if (d := int(getattr(config, "account_delta_period_days", 1) or 1)) in (1, 7, 30) else 1
         ),
@@ -4010,6 +4059,21 @@ def _apply_archived_filter(qs, archived_param):
     return qs.filter(is_archived=False)
 
 
+def _apply_banned_filter(qs, banned_param):
+    """
+    banned query param:
+      - omitted / 0 / false / active → только не в бане (is_banned=False)
+      - 1 / true / banned → только бан
+      - all / both → без фильтра
+    """
+    raw = str(banned_param or "").strip().lower()
+    if raw in ("all", "both", "any"):
+        return qs
+    if raw in ("1", "true", "yes", "banned"):
+        return qs.filter(is_banned=True)
+    return qs.filter(is_banned=False)
+
+
 def _apply_visibility_filters(
     qs,
     *,
@@ -4068,6 +4132,8 @@ def refresh_schedule(request):
             config.include_unavailable_accounts = _coerce_bool(data["include_unavailable_accounts"])
         if "include_archived_accounts" in data:
             config.include_archived_accounts = _coerce_bool(data["include_archived_accounts"])
+        if "include_banned_accounts" in data:
+            config.include_banned_accounts = _coerce_bool(data["include_banned_accounts"])
         if "auto_refresh_platforms" in data:
             from .auto_refresh_scope import normalize_auto_refresh_platforms
 
