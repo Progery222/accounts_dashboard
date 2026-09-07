@@ -18,7 +18,7 @@ import re
 import sys
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 from platforms.instagram.posts_meta import annotate_instagram_posts_payload, instagram_max_posts
 from platforms.instagram.posts_meta import instagram_reels_scroll_iterations as _reels_scroll_iters

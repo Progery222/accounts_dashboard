@@ -9,7 +9,7 @@ import re
 import sys
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 
 async def main():

@@ -317,7 +317,7 @@ async def run_warm_tiktok_session(
     Открыть браузер, прогреть ленту, сохранить storage_state.
     Возвращает статистику: duration_sec, videos, likes, state_path.
     """
-    from playwright.async_api import async_playwright
+    from platforms.browser_engine import async_playwright
 
     from platforms.worker_pool import sync_accounts_browser_env
     from platforms.tiktok.worker import _create_tiktok_context, _load_worker_utils

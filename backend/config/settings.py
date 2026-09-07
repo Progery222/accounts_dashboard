@@ -22,16 +22,17 @@ load_dotenv(BASE_DIR / "config" / "worker_accounts.env", override=False)
 load_dotenv(BASE_DIR / "config" / "worker_subs.env", override=False)
 
 try:
-    from platforms.worker_utils import normalize_playwright_browsers_env
+    from platforms.browser_engine import normalize_browser_engines_env
 
-    _pw_browsers = normalize_playwright_browsers_env(mutate_os_environ=True)
-    if _pw_browsers:
-        print(
-            f"[django settings] PLAYWRIGHT_BROWSERS_PATH={_pw_browsers}",
-            file=sys.stderr,
-        )
+    _browser_paths = normalize_browser_engines_env(mutate_os_environ=True)
+    print(
+        f"[django settings] BROWSER_ENGINE={_browser_paths.get('BROWSER_ENGINE')} "
+        f"PATCHRIGHT_BROWSERS_PATH={_browser_paths.get('PATCHRIGHT_BROWSERS_PATH')} "
+        f"PLAYWRIGHT_BROWSERS_PATH={_browser_paths.get('PLAYWRIGHT_BROWSERS_PATH')}",
+        file=sys.stderr,
+    )
 except Exception as _pw_exc:
-    print(f"[django settings] playwright env normalize failed: {_pw_exc}", file=sys.stderr)
+    print(f"[django settings] browser engine env normalize failed: {_pw_exc}", file=sys.stderr)
 
 SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-s)66ib*p(f+^813d+^2do6@*w4b^f57g787=hv)@lu7t=g^7!k")
 DEBUG = os.getenv("DEBUG", "True") == "True"

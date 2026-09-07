@@ -33,6 +33,7 @@ class FlareSolverrClientTests(SimpleTestCase):
 
     def test_session_reuses_challenge_flag(self):
         sess = _FlareSolverrSession.__new__(_FlareSolverrSession)
+        sess.base_url = "http://127.0.0.1:8191/v1"
         sess._client = MagicMock()
         sess._session_id = "test-session"
         sess._challenge_solved = False

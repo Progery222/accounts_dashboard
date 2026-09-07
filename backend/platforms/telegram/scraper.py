@@ -3,7 +3,7 @@ import re
 import sys
 from pathlib import Path
 
-import httpx
+from platforms.http_client import HttpClient
 from platforms.worker_pool import call_worker
 
 _HEADERS = {
@@ -289,7 +289,7 @@ async def _fetch_telegram_telethon_async(username: str, api_id: int, api_hash: s
 def _fetch_telegram_httpx(username: str) -> dict:
     """Fallback: scrape t.me public page + stream (works only when web preview is on)."""
     url = f"https://t.me/{username}"
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
+    with HttpClient(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
         r = client.get(url)
         if r.status_code == 404:
             raise ValueError(f"Telegram @{username} не найден")
@@ -322,7 +322,7 @@ def _fetch_telegram_httpx(username: str) -> dict:
     }
 
 
-def _fetch_telegram_stream(username: str, client: httpx.Client) -> tuple[int, list]:
+def _fetch_telegram_stream(username: str, client: HttpClient) -> tuple[int, list]:
     url = f"https://t.me/s/{username}"
     try:
         r = client.get(url, timeout=10.0)

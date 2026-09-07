@@ -71,7 +71,7 @@ async def main() -> None:
     data = json.loads(sys.argv[1])
     url: str = data["url"]
 
-    from playwright.async_api import async_playwright
+    from platforms.browser_engine import async_playwright
 
     collected: list[dict] = []
 

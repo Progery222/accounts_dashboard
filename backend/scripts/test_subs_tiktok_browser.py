@@ -42,7 +42,7 @@ def run_direct() -> int:
     import asyncio
 
     async def main() -> None:
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         profile = Path.home() / "AppData" / "Local" / "TikStatsChromeProfile"
         state = profile / "tiktok_state.json"

@@ -1,0 +1,32 @@
+# Опциональные Cloudflare-solver’ы рядом с FlareSolverr (один хост / локалка).
+# API совместим с FlareSolverr /v1 — дашборд перебирает URL из env.
+#
+# Пример локально:
+#   docker compose -f docker-compose.challenge-solvers.yml up -d
+#   в worker_accounts.env:
+#     BYPARR_URL=http://127.0.0.1:8192/v1
+#     SOLVERR_URL=http://127.0.0.1:8193/v1
+#     FLARESOLVERR_URL=http://127.0.0.1:8191/v1
+#
+# Solverr уже включает Chrome+Camoufox fallback — часто достаточно только его на :8193.
+services:
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    ports:
+      - "8191:8191"
+    environment:
+      LOG_LEVEL: info
+    restart: unless-stopped
+
+  byparr:
+    image: ghcr.io/thephaseless/byparr:latest
+    ports:
+      - "8192:8191"
+    restart: unless-stopped
+
+  solverr:
+    # Drop-in FS API + Byparr stealth engine. Image tag может отличаться — сверьте README upstream.
+    image: ghcr.io/unseensnick/solverr:latest
+    ports:
+      - "8193:8191"
+    restart: unless-stopped

@@ -1,10 +1,18 @@
-"""Rumble profile fetch via Playwright worker_pool (как Threads/X)."""
+"""Rumble profile fetch: HTTP → challenge solvers → pilots → optional Playwright."""
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
-from platforms.rumble.parse import normalize_username
+from platforms.rumble.parse import (
+    about_urls,
+    feed_urls,
+    is_antibot_html,
+    is_not_found_html,
+    normalize_username,
+    profile_from_html,
+)
 from platforms.worker_pool import call_worker
 
 _WORKER = Path(__file__).parent / "worker.py"
@@ -58,47 +66,111 @@ def _run_worker(username: str) -> dict:
     return data
 
 
+def _fetch_via_pilot(username: str, *, engine: str) -> dict:
+    from platforms.pilots import fetch_html_camoufox, fetch_html_scrapling
+
+    fetch = fetch_html_scrapling if engine == "scrapling" else fetch_html_camoufox
+    about_html = ""
+    feed_html = ""
+    for url in feed_urls(username):
+        try:
+            html = fetch(url)
+        except Exception as exc:
+            print(f"[rumble] {engine} feed {url}: {exc}", file=sys.stderr)
+            continue
+        if is_not_found_html(html) or is_antibot_html(html):
+            continue
+        feed_html = html
+        break
+    for url in about_urls(username):
+        try:
+            html = fetch(url)
+        except Exception as exc:
+            print(f"[rumble] {engine} about {url}: {exc}", file=sys.stderr)
+            continue
+        if is_not_found_html(html) or is_antibot_html(html):
+            continue
+        about_html = html
+        break
+    if not about_html and not feed_html:
+        raise RuntimeError(f"Rumble @{username}: {engine} pilot пусто")
+    payload = profile_from_html(username=username, about_html=about_html, feed_html=feed_html)
+    payload["_source"] = engine
+    payload["_quality_flags"] = {
+        "anti_bot_detected": False,
+        "about_parsed": bool(about_html),
+        "feed_parsed": bool(feed_html),
+        "partial_posts": False,
+        engine: True,
+    }
+    return payload
+
+
 def fetch_rumble_profile(username: str) -> dict:
     username = normalize_username(username)
-    import sys
+    errors: list[str] = []
 
+    # 1) HTTP-first (curl_cffi)
+    try:
+        from platforms.rumble.http_direct import fetch_profile_http, http_direct_enabled
+
+        if http_direct_enabled():
+            try:
+                return fetch_profile_http(username)
+            except Exception as exc:
+                errors.append(f"http: {exc}")
+                print(f"[rumble] HTTP-direct @{username}: {exc}", file=sys.stderr)
+    except Exception as exc:
+        errors.append(f"http_import: {exc}")
+
+    # 2) Byparr / Solverr / FlareSolverr
     from platforms.rumble import flaresolverr_client
 
     fs_tried = False
-    fs_error: str | None = None
-
     if flaresolverr_client.is_available():
         fs_tried = True
         try:
             print(
-                f"[rumble] FlareSolverr для @{username} (сессия, cookies переиспользуются)",
+                f"[rumble] challenge-solver для @{username}",
                 file=sys.stderr,
             )
             return flaresolverr_client.fetch_profile(username)
         except Exception as exc:
-            fs_error = str(exc)
-            print(
-                f"[rumble] FlareSolverr для @{username}: {exc}",
-                file=sys.stderr,
-            )
-            if not playwright_fallback_enabled():
-                raise ValueError(
-                    f"Rumble @{username}: не удалось обновить. FlareSolverr: {fs_error}"
-                ) from exc
+            errors.append(f"solver: {exc}")
+            print(f"[rumble] challenge-solver @{username}: {exc}", file=sys.stderr)
 
+    # 3) Точечные пилоты (опционально)
+    try:
+        from platforms.pilots import camoufox_pilot_enabled, scrapling_pilot_enabled
+
+        if scrapling_pilot_enabled("rumble"):
+            try:
+                return _fetch_via_pilot(username, engine="scrapling")
+            except Exception as exc:
+                errors.append(f"scrapling: {exc}")
+                print(f"[rumble] scrapling pilot @{username}: {exc}", file=sys.stderr)
+        if camoufox_pilot_enabled("rumble"):
+            try:
+                return _fetch_via_pilot(username, engine="camoufox")
+            except Exception as exc:
+                errors.append(f"camoufox: {exc}")
+                print(f"[rumble] camoufox pilot @{username}: {exc}", file=sys.stderr)
+    except Exception as exc:
+        errors.append(f"pilots: {exc}")
+
+    # 4) Playwright только по флагу
     if not playwright_fallback_enabled():
+        detail = "; ".join(errors) if errors else "solver недоступен"
         raise ValueError(
-            f"Rumble @{username}: FlareSolverr недоступен. "
-            "Запустите FlareSolverr (:8191) или RUMBLE_PLAYWRIGHT_FALLBACK=1."
+            f"Rumble @{username}: не удалось обновить ({detail}). "
+            "Поднимите Byparr/Solverr/FlareSolverr, либо RUMBLE_PLAYWRIGHT_FALLBACK=1, "
+            "либо SCRAPLING_PILOT=1 / CAMOUFOX_PILOT=1."
         )
 
     try:
         return _run_worker(username)
     except Exception as worker_exc:
-        print(
-            f"[rumble] worker для @{username}: {worker_exc}",
-            file=sys.stderr,
-        )
+        print(f"[rumble] worker для @{username}: {worker_exc}", file=sys.stderr)
         msg = str(worker_exc).lower()
         anti_bot = ("антибот" in msg) or ("challenge" in msg)
 
@@ -106,17 +178,12 @@ def fetch_rumble_profile(username: str) -> dict:
             try:
                 return flaresolverr_client.fetch_profile(username)
             except Exception as fs_exc:
-                fs_error = str(fs_exc)
-                print(
-                    f"[rumble] FlareSolverr fallback для @{username}: {fs_exc}",
-                    file=sys.stderr,
-                )
+                errors.append(f"solver_late: {fs_exc}")
+                print(f"[rumble] solver late @{username}: {fs_exc}", file=sys.stderr)
 
-        hint = ". Импортируйте cookies в Настройках → Rumble или запустите FlareSolverr."
-        if fs_error:
-            hint = f". FlareSolverr: {fs_error}"
+        hint = "; ".join(errors[-3:]) if errors else str(worker_exc)
         raise ValueError(
             f"Rumble @{username}: не удалось обновить"
             + (" (антибот)" if anti_bot else "")
-            + hint
+            + f". {hint}"
         ) from worker_exc

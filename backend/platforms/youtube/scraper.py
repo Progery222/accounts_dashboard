@@ -3,7 +3,7 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import httpx
+from platforms.http_client import HttpClient
 
 _HEADERS = {
     "User-Agent": (
@@ -48,7 +48,7 @@ def fetch_youtube_channel(username: str) -> dict:
 
 def _fetch_youtube_api(username: str, api_key: str) -> dict:
     """Fetch channel data via YouTube Data API v3 (requires API key)."""
-    with httpx.Client(timeout=15.0) as client:
+    with HttpClient(timeout=15.0) as client:
         # 1. Resolve channel — try @handle first, fall back to legacy username
         channel = None
         for params in (
@@ -100,7 +100,7 @@ def _fetch_youtube_api(username: str, api_key: str) -> dict:
     }
 
 
-def _fetch_youtube_playlist_api(client: httpx.Client, playlist_id: str, api_key: str) -> list:
+def _fetch_youtube_playlist_api(client: HttpClient, playlist_id: str, api_key: str) -> list:
     """Get last 20 videos with full stats from a YouTube playlist."""
     r = client.get(
         f"{_YT_API_BASE}/playlistItems",
@@ -165,7 +165,7 @@ def _fetch_youtube_playlist_api(client: httpx.Client, playlist_id: str, api_key:
 def _fetch_youtube_scrape(username: str) -> dict:
     """Fallback: scrape YouTube channel page + RSS (no API key needed)."""
     url = f"https://www.youtube.com/@{username}"
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
+    with HttpClient(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
         r = client.get(url)
         if r.status_code == 404:
             raise ValueError(f"YouTube @{username} не найден")
@@ -226,7 +226,7 @@ def _fetch_youtube_rss(channel_id: str) -> list:
     """Fetch last 15 videos from the public RSS feed (no likes/comments)."""
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
     try:
-        with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=10.0) as client:
+        with HttpClient(headers=_HEADERS, follow_redirects=True, timeout=10.0) as client:
             r = client.get(url)
             r.raise_for_status()
             xml = r.text

@@ -194,7 +194,7 @@ async def _subs_finish_session(context, browser) -> None:
 
 
 async def subs_tiktok_audience_run_once(data: dict) -> None:
-    from playwright.async_api import async_playwright
+    from platforms.browser_engine import async_playwright
     from platforms.tiktok.worker import _load_worker_utils, _run_with_context
 
     _install_subs_tiktok_scrape_hooks(data.get("enrich_usernames"))
@@ -217,7 +217,7 @@ async def subs_tiktok_audience_run_once(data: dict) -> None:
 
 async def subs_tiktok_audience_run_bulk(data: dict) -> None:
     """Несколько отслеживаемых @аккаунтов в одном окне Chrome (массовый enrich subs)."""
-    from playwright.async_api import async_playwright
+    from platforms.browser_engine import async_playwright
     from platforms.tiktok.worker import _load_worker_utils, _run_with_context
 
     jobs = data.get("jobs")

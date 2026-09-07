@@ -36,6 +36,8 @@ services:
       RUN_SCHEDULER: "true"
       BROWSER_HEADLESS: "false"
       BROWSER_PROFILE_DIR: /app/.browser-profile
+      BROWSER_ENGINE: "patchright"
+      CURL_CFFI_ENABLED: "true"
       DISPLAY: ":99"
       PORT: "8000"
       DASHBOARD_LOG_DIR: /app/var/log

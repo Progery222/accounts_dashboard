@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK
 

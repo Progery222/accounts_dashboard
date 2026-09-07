@@ -1236,7 +1236,7 @@ async def _create_tiktok_context(
 
 
 async def run_once(data: dict) -> None:
-    from playwright.async_api import async_playwright
+    from platforms.browser_engine import async_playwright
     from platforms.worker_utils import finish_cli_session_keep_browser_by_default
 
     _wu = _load_worker_utils()
@@ -1263,7 +1263,7 @@ def _write_response(payload) -> None:
 
 def _run_daemon() -> None:
     async def daemon_main():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
         from platforms.worker_utils import (
             daemon_idle_keep_browser_open,
             worker_autoclose_browser_on_daemon_exit,

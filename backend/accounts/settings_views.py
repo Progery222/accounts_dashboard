@@ -680,7 +680,7 @@ def _run_tiktok_auth(job_id: str) -> None:
         autofill_enabled = False
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         from platforms.tiktok.auth_browser import try_fill_tiktok_login_credentials
         from platforms.tiktok.worker import _create_tiktok_context, _load_worker_utils
@@ -976,7 +976,7 @@ def _run_platform_cookie_import(
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         try:
             _set_job(job_id, "pending", "Открываю профиль браузера…")
@@ -1251,7 +1251,7 @@ def _run_instagram_auth(job_id: str) -> None:
         session_path = Path(__file__).parent.parent / session_path
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -1347,7 +1347,7 @@ def _run_telegram_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -1439,7 +1439,7 @@ def _run_x_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -1515,7 +1515,7 @@ def _run_threads_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -1607,7 +1607,7 @@ def _run_facebook_auth(job_id: str) -> None:
     password = _get_setting("FACEBOOK_PASSWORD")
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -1806,7 +1806,7 @@ def _run_rumble_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
@@ -1898,7 +1898,7 @@ def _run_reddit_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
 
     async def _async():
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         _set_job(job_id, "pending", "Запускаю браузер…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)

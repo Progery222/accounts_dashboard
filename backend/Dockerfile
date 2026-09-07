@@ -34,9 +34,9 @@ COPY requirements.txt .
 RUN python -m pip install --upgrade pip \
     && pip install -r requirements.txt
 
-# В образе ms-playwright Chromium уже установлен; страховка на случай минорных
-# обновлений библиотеки Playwright из requirements.txt.
-RUN python -m playwright install chromium
+# Stock Playwright Chromium (fallback BROWSER_ENGINE=playwright) + Patchright Chromium.
+RUN python -m playwright install chromium \
+    && python -m patchright install chromium
 
 COPY . .
 

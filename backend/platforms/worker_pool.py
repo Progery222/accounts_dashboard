@@ -139,17 +139,21 @@ def _compose_worker_env(backend_root: str) -> dict:
     if auth_nav:
         env["AUTH_NAV_TIMEOUT_MS"] = auth_nav
     try:
-        from platforms.worker_utils import normalize_playwright_browsers_env
+        from platforms.browser_engine import normalize_browser_engines_env
 
-        pw_path = normalize_playwright_browsers_env(env)
-        if pw_path:
-            print(
-                f"[worker_pool] PLAYWRIGHT_BROWSERS_PATH={pw_path}",
-                file=sys.stderr,
-                flush=True,
-            )
+        paths = normalize_browser_engines_env(env)
+        print(
+            f"[worker_pool] BROWSER_ENGINE={paths.get('BROWSER_ENGINE')} "
+            f"PATCHRIGHT_BROWSERS_PATH={paths.get('PATCHRIGHT_BROWSERS_PATH')} "
+            f"PLAYWRIGHT_BROWSERS_PATH={paths.get('PLAYWRIGHT_BROWSERS_PATH')}",
+            file=sys.stderr,
+            flush=True,
+        )
     except Exception:
         pass
+    for key in ("BROWSER_ENGINE", "PATCHRIGHT_BROWSERS_PATH", "PLAYWRIGHT_BROWSERS_PATH"):
+        if key in os.environ and key not in env:
+            env[key] = os.environ[key]
     return env
 
 
@@ -542,7 +546,8 @@ def call_worker(
 
             if skip_playwright_prewarm():
                 raise ValueError(
-                    "Rumble Playwright отключён — используется FlareSolverr. "
+                    "Rumble Playwright отключён — используется challenge-solver "
+                    "(Byparr/Solverr/FlareSolverr) или HTTP-direct. "
                     "Для окна браузера: RUMBLE_PLAYWRIGHT_FALLBACK=1."
                 )
         except ValueError:

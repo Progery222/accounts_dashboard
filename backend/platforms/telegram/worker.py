@@ -19,7 +19,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 NAV_TIMEOUT  = 30_000   # ms
 LOAD_TIMEOUT = 20_000   # ms

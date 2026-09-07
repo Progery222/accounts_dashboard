@@ -1,4 +1,4 @@
-"""FlareSolverr fallback for Rumble when Cloudflare blocks Playwright/httpx."""
+"""Rumble via FlareSolverr-совместимые solver’ы (Byparr / Solverr / FlareSolverr)."""
 from __future__ import annotations
 
 import os
@@ -7,8 +7,11 @@ import threading
 from contextlib import contextmanager
 from typing import Iterator
 
-import httpx
-
+from platforms.challenge_solver import (
+    ChallengeSolverSession,
+    mark_solver_failed,
+    pick_solver_url,
+)
 from platforms.rumble.parse import (
     about_urls,
     extract_posts,
@@ -18,14 +21,8 @@ from platforms.rumble.parse import (
     profile_from_html,
 )
 
-_DEFAULT_URL = "http://127.0.0.1:8191/v1"
-_PROBE_TIMEOUT = 2.5
-_REQUEST_TIMEOUT = 150.0
-_FIRST_REQUEST_TIMEOUT_MS = 90_000
-_FOLLOWUP_REQUEST_TIMEOUT_MS = 45_000
-
 _shared_lock = threading.Lock()
-_shared_session: _FlareSolverrSession | None = None
+_shared_session: ChallengeSolverSession | None = None
 
 
 def _challenge_failure(exc: BaseException) -> bool:
@@ -56,17 +53,20 @@ def release_shared_session() -> None:
             pass
 
 
-def _acquire_shared_session() -> _FlareSolverrSession:
+def _acquire_shared_session() -> ChallengeSolverSession:
     global _shared_session
     with _shared_lock:
         if _shared_session is None:
-            _shared_session = _FlareSolverrSession()
+            url = pick_solver_url()
+            if not url:
+                raise RuntimeError("Challenge solver недоступен")
+            _shared_session = ChallengeSolverSession(url)
             _shared_session.__enter__()
         return _shared_session
 
 
 def flaresolverr_url() -> str:
-    return (os.environ.get("FLARESOLVERR_URL") or _DEFAULT_URL).strip()
+    return pick_solver_url() or (os.environ.get("FLARESOLVERR_URL") or "http://127.0.0.1:8191/v1").strip()
 
 
 def flaresolverr_enabled() -> bool:
@@ -77,84 +77,25 @@ def flaresolverr_enabled() -> bool:
 def is_available() -> bool:
     if not flaresolverr_enabled():
         return False
-    try:
-        with httpx.Client(timeout=_PROBE_TIMEOUT) as client:
-            r = client.post(
-                flaresolverr_url(),
-                json={"cmd": "sessions.list"},
-            )
-            data = r.json()
-            return data.get("status") == "ok"
-    except Exception:
-        return False
+    return pick_solver_url() is not None
 
 
-def _parse_fs_response(r: httpx.Response) -> dict:
-    try:
-        data = r.json()
-    except Exception as exc:
-        raise RuntimeError(f"FlareSolverr: невалидный ответ ({r.status_code})") from exc
-    if data.get("status") != "ok":
-        raise RuntimeError(data.get("message") or "FlareSolverr error")
-    return data
+# Обратная совместимость тестов / импортов.
+_FlareSolverrSession = ChallengeSolverSession
 
 
-class _FlareSolverrSession:
-    """Одна сессия FlareSolverr — challenge решается один раз, cookies переиспользуются."""
+def _parse_fs_response(r):
+    from platforms.challenge_solver import parse_solver_response
 
-    def __init__(self) -> None:
-        self._client = httpx.Client(timeout=_REQUEST_TIMEOUT)
-        self._session_id: str | None = None
-        self._challenge_solved = False
-
-    def __enter__(self) -> _FlareSolverrSession:
-        data = self._cmd({"cmd": "sessions.create"})
-        self._session_id = data.get("session")
-        if not self._session_id:
-            raise RuntimeError("FlareSolverr: sessions.create не вернул session id")
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        if self._session_id:
-            try:
-                self._cmd({"cmd": "sessions.destroy", "session": self._session_id})
-            except Exception:
-                pass
-        self._client.close()
-
-    def _cmd(self, payload: dict) -> dict:
-        r = self._client.post(flaresolverr_url(), json=payload)
-        return _parse_fs_response(r)
-
-    def fetch_html(self, url: str, *, max_timeout_ms: int | None = None) -> str:
-        if not self._session_id:
-            raise RuntimeError("FlareSolverr session не инициализирована")
-        if max_timeout_ms is None:
-            max_timeout_ms = (
-                _FOLLOWUP_REQUEST_TIMEOUT_MS
-                if self._challenge_solved
-                else _FIRST_REQUEST_TIMEOUT_MS
-            )
-        data = self._cmd(
-            {
-                "cmd": "request.get",
-                "url": url,
-                "maxTimeout": max_timeout_ms,
-                "session": self._session_id,
-            }
-        )
-        html = (data.get("solution") or {}).get("response") or ""
-        if not html:
-            raise RuntimeError("FlareSolverr вернул пустой HTML")
-        if is_antibot_html(html):
-            raise RuntimeError("FlareSolverr: страница всё ещё за Cloudflare challenge")
-        self._challenge_solved = True
-        return html
+    return parse_solver_response(r)
 
 
 @contextmanager
-def _session() -> Iterator[_FlareSolverrSession]:
-    with _FlareSolverrSession() as sess:
+def _session() -> Iterator[ChallengeSolverSession]:
+    url = pick_solver_url()
+    if not url:
+        raise RuntimeError("Challenge solver недоступен")
+    with ChallengeSolverSession(url) as sess:
         yield sess
 
 
@@ -165,19 +106,34 @@ def fetch_profile(username: str) -> dict:
     about_html = ""
     feed_html = ""
     best_feed_posts = 0
+    solver_label = "challenge_solver"
 
     fs = _acquire_shared_session()
+    solver_label = fs.base_url
     try:
-        # Сначала лента: после about FlareSolverr иногда отдаёт feed без rum-video-thumbnail.
         for url in feed_urls(username):
             try:
-                html = fs.fetch_html(url)
+                html = fs.fetch_html(url, antibot_check=is_antibot_html)
             except Exception as exc:
-                print(f"[rumble] FlareSolverr feed {url}: {exc}", file=sys.stderr)
+                print(f"[rumble] solver feed {url}: {exc}", file=sys.stderr)
                 if _challenge_failure(exc):
+                    mark_solver_failed(fs.base_url)
                     release_shared_session()
-                    raise
-                continue
+                    # Попробовать следующий solver в цепочке один раз.
+                    nxt = pick_solver_url(force_refresh=True)
+                    if nxt and nxt != solver_label:
+                        print(f"[rumble] переключение solver → {nxt}", file=sys.stderr)
+                        fs = _acquire_shared_session()
+                        solver_label = fs.base_url
+                        try:
+                            html = fs.fetch_html(url, antibot_check=is_antibot_html)
+                        except Exception as exc2:
+                            release_shared_session()
+                            raise exc2 from exc
+                    else:
+                        raise
+                else:
+                    continue
             if is_not_found_html(html):
                 continue
             posts_n = len(extract_posts(html))
@@ -189,10 +145,11 @@ def fetch_profile(username: str) -> dict:
 
         for url in about_urls(username):
             try:
-                html = fs.fetch_html(url)
+                html = fs.fetch_html(url, antibot_check=is_antibot_html)
             except Exception as exc:
-                print(f"[rumble] FlareSolverr about {url}: {exc}", file=sys.stderr)
+                print(f"[rumble] solver about {url}: {exc}", file=sys.stderr)
                 if _challenge_failure(exc):
+                    mark_solver_failed(fs.base_url)
                     release_shared_session()
                     raise
                 continue
@@ -204,7 +161,7 @@ def fetch_profile(username: str) -> dict:
         raise
 
     if not about_html and not feed_html:
-        raise ValueError(f"Rumble @{username} не найден (FlareSolverr)")
+        raise ValueError(f"Rumble @{username} не найден (challenge solver)")
 
     payload = profile_from_html(
         username=username,
@@ -212,6 +169,7 @@ def fetch_profile(username: str) -> dict:
         feed_html=feed_html,
     )
     payload["_source"] = "flaresolverr"
+    payload["_solver_url"] = solver_label
     posts = payload.get("_posts") or []
     post_count = int(payload.get("post_count") or 0)
     partial_posts = bool(post_count) and len(posts) < post_count
@@ -221,6 +179,7 @@ def fetch_profile(username: str) -> dict:
         "feed_parsed": bool(feed_html),
         "partial_posts": partial_posts,
         "flaresolverr": True,
+        "solver_url": solver_label,
     }
     if not posts and post_count > 0:
         payload["_posts_authoritative"] = False

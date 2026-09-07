@@ -433,7 +433,7 @@ async def run_warm_facebook_session(
     *,
     state_path: Path | None = None,
 ) -> dict:
-    from playwright.async_api import async_playwright
+    from platforms.browser_engine import async_playwright
 
     from platforms.worker_pool import sync_accounts_browser_env
 

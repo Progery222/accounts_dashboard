@@ -2,8 +2,7 @@ import datetime
 import re
 from pathlib import Path
 
-import httpx
-
+from platforms.http_client import HttpClient
 from platforms.worker_pool import call_worker
 
 _HEADERS = {
@@ -37,7 +36,7 @@ def fetch_reddit_subreddit(username: str) -> dict:
     about_url = f"https://www.reddit.com/r/{subreddit}/about.json"
     hot_url = f"https://www.reddit.com/r/{subreddit}/hot.json"
 
-    with httpx.Client(headers=_HEADERS, follow_redirects=True, timeout=20.0) as client:
+    with HttpClient(headers=_HEADERS, follow_redirects=True, timeout=20.0) as client:
         about_resp = client.get(about_url)
         if about_resp.status_code == 404:
             raise ValueError(f"Reddit r/{subreddit} не найден.")

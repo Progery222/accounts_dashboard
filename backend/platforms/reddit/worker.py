@@ -4,7 +4,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 from platforms import worker_utils as _wu
 from platforms.worker_json_stdout import write_json_line

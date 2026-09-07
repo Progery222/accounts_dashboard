@@ -118,7 +118,7 @@ class Command(BaseCommand):
         server_mode: bool,
         display: str,
     ):
-        from playwright.async_api import async_playwright
+        from platforms.browser_engine import async_playwright
 
         xvfb_proc = None
         if server_mode and not os.environ.get("DISPLAY"):

@@ -30,11 +30,14 @@ class RumbleScraperPlaywrightPolicyTests(SimpleTestCase):
             "platforms.rumble.flaresolverr_client.fetch_profile",
             side_effect=ValueError("не найден"),
         ), patch(
+            "platforms.rumble.http_direct.http_direct_enabled",
+            return_value=False,
+        ), patch(
             "platforms.rumble.scraper._run_worker",
         ) as worker_mock:
             with self.assertRaises(ValueError) as ctx:
                 fetch_rumble_profile("starrlanderboy")
-            self.assertIn("FlareSolverr", str(ctx.exception))
+            self.assertIn("не удалось обновить", str(ctx.exception))
             worker_mock.assert_not_called()
 
     def test_fetch_skips_worker_when_fs_unavailable_and_fallback_disabled(self):
@@ -42,16 +45,22 @@ class RumbleScraperPlaywrightPolicyTests(SimpleTestCase):
             "platforms.rumble.flaresolverr_client.is_available",
             return_value=False,
         ), patch(
+            "platforms.rumble.http_direct.http_direct_enabled",
+            return_value=False,
+        ), patch(
             "platforms.rumble.scraper._run_worker",
         ) as worker_mock:
             with self.assertRaises(ValueError) as ctx:
                 fetch_rumble_profile("starrlanderboy")
-            self.assertIn("FlareSolverr недоступен", str(ctx.exception))
+            self.assertIn("не удалось обновить", str(ctx.exception))
             worker_mock.assert_not_called()
 
     def test_fetch_uses_worker_when_fallback_enabled_and_fs_down(self):
         with patch.dict("os.environ", {"RUMBLE_PLAYWRIGHT_FALLBACK": "1"}, clear=False), patch(
             "platforms.rumble.flaresolverr_client.is_available",
+            return_value=False,
+        ), patch(
+            "platforms.rumble.http_direct.http_direct_enabled",
             return_value=False,
         ), patch(
             "platforms.rumble.scraper._run_worker",

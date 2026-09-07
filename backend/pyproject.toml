@@ -20,6 +20,8 @@ gunicorn = ">=22.0"
 dj-database-url = ">=2.2"
 whitenoise = ">=6.7"
 tiktok-captcha-solver = "^0.8.6"
+patchright = "^1.62.3"
+curl-cffi = "^0.16.3"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

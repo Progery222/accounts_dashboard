@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 from platforms.rumble.parse import about_urls, feed_urls, normalize_username, parse_count
 

@@ -59,7 +59,7 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from playwright.async_api import async_playwright
+from platforms.browser_engine import async_playwright
 
 from platforms.facebook.profile_meta import (
     is_usable_facebook_avatar_url,
