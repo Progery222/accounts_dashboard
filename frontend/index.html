@@ -390,6 +390,20 @@ svg { flex-shrink: 0; }
 .kpis { display: grid; grid-template-columns: repeat(5, minmax(0,1fr)); gap: 12px; margin-bottom: 14px; }
 .kpi { padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
 .kpi .val { font-family: 'IBM Plex Mono', monospace; font-size: 24px; font-weight: 500; letter-spacing: -.03em; line-height: 1; }
+/* Одометр живого счётчика: разряд прокручивается, а не подменяется.
+   Каждая цифра — окошко высотой в строку, внутри лента 0…9 дважды. Перенос
+   через девятку едет вперёд на второй круг, после чего лента возвращается
+   на тот же разряд уже без анимации — иначе она отматывалась бы назад.
+   Цифры моноширинные, поэтому ширина окошка не скачет.
+   Сдвиг ленты ставим прямым transform, а не через var(--i): незарегистрированные
+   CSS-переменные не интерполируются, поэтому с ними переход не запускается
+   вовсе — цифра прыгала бы, и transitionend не приходил. */
+.odo { display: inline-flex; align-items: flex-start; }
+.odo-c { display: block; height: 1em; overflow: hidden; }
+.odo-s { display: block; transform: translateY(0);
+         transition: transform .6s cubic-bezier(.22, .61, .36, 1); }
+.odo-s > i { display: block; height: 1em; font-style: normal; }
+@media (prefers-reduced-motion: reduce) { .odo-s { transition: none; } }
 .kpi .hd { display: flex; align-items: center; gap: 8px; }
 .kpi .hd .lbl { color: var(--tone); }
 .kpi .ico { width: 22px; height: 22px; border-radius: 7px; flex-shrink: 0;
@@ -3630,9 +3644,81 @@ function vcPaint() {
   if (n === null) return;
   const els = document.querySelectorAll('[data-vc="views"]');
   for (let i = 0; i < els.length; i++) {
-    const s = els[i].dataset.vcFmt === 'comp' ? comp(n) : fmt(n);
-    if (els[i].textContent !== s) els[i].textContent = s;
+    vcSet(els[i], els[i].dataset.vcFmt === 'comp' ? comp(n) : fmt(n));
   }
+}
+
+/* --- одометр -------------------------------------------------------
+   Рисунок числа: где цифра, где разделитель. Если он поменялся (число
+   выросло на разряд), одометр пересобираем целиком. */
+function vcShape(s) { return s.replace(/\d/g, '#'); }
+function isDigit(ch) { return ch >= '0' && ch <= '9'; }
+
+function vcSet(el, s) {
+  const odo = el.firstElementChild;
+  if (!odo || !odo.classList || !odo.classList.contains('odo') || odo.dataset.shape !== vcShape(s)) {
+    vcBuild(el, s);
+    return;
+  }
+  const cells = odo.children;
+  for (let i = 0; i < s.length; i++) {
+    if (isDigit(s[i])) vcRoll(cells[i], +s[i]);
+  }
+}
+/* Первая сборка (и после каждой перерисовки слоя) — без анимации:
+   иначе число «прилетало» бы с нуля при любом клике по фильтру. */
+function vcBuild(el, s) {
+  const odo = document.createElement('span');
+  odo.className = 'odo';
+  odo.dataset.shape = vcShape(s);
+  for (let i = 0; i < s.length; i++) {
+    const cell = document.createElement('span');
+    cell.className = 'odo-c';
+    if (isDigit(s[i])) {
+      const strip = document.createElement('span');
+      strip.className = 'odo-s';
+      strip.style.transition = 'none';
+      for (let k = 0; k < 20; k++) {       // два круга 0…9 — на перенос разряда
+        const d = document.createElement('i');
+        d.textContent = String(k % 10);
+        strip.appendChild(d);
+      }
+      strip.style.transform = 'translateY(-' + s[i] + 'em)';
+      cell.dataset.i = s[i];             // позиция ленты, 0…19
+      cell.appendChild(strip);
+    } else {
+      cell.textContent = s[i];             // разделитель разрядов, он неподвижен
+    }
+    odo.appendChild(cell);
+  }
+  el.textContent = '';
+  el.appendChild(odo);
+  void odo.offsetWidth;                    // позиции применились — включаем переходы
+  const strips = odo.getElementsByClassName('odo-s');
+  for (let i = 0; i < strips.length; i++) strips[i].style.transition = '';
+}
+function vcRoll(cell, next) {
+  const strip = cell.firstElementChild;
+  if (!strip) return;
+  let idx = +cell.dataset.i;               // где стоит лента: 0…19
+  const cur = idx % 10;                    // какая цифра при этом видна
+  if (cur === next) return;
+  // Со второго круга снимаем перед новой прокруткой, а не по transitionend:
+  // в фоновой вкладке переходы не идут и событие не приходит, а для экрана на
+  // стене это как раз обычный режим — лента доползла бы до конца и сломалась.
+  // Скачка не видно: цифра на позиции idx и на позиции idx−10 одна и та же.
+  if (idx >= 10) {
+    idx = cur;
+    strip.style.transition = 'none';
+    strip.style.transform = 'translateY(-' + idx + 'em)';
+    void strip.offsetWidth;
+    strip.style.transition = '';
+  }
+  // Счётчик только растёт, поэтому крутим всегда вперёд: при переносе через
+  // девятку уезжаем на второй круг ленты.
+  const target = next > cur ? next : next + 10;
+  cell.dataset.i = target;
+  strip.style.transform = 'translateY(-' + target + 'em)';
 }
 function vcStart() {
   clearInterval(vcTimer);
