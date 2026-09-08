@@ -1,25 +1,15 @@
-FROM node:20-alpine AS build
-WORKDIR /src
-COPY new_frontend ./new_frontend
-COPY deploy/nginx-atomic/precompile.mjs ./deploy/nginx-atomic/precompile.mjs
-RUN npm install @babel/standalone@7.26.9 --no-save \
-    && node deploy/nginx-atomic/precompile.mjs /src/new_frontend/app.html \
-    && (test -s /src/new_frontend/vendor/react.production.min.js \
-        || wget -q -O /src/new_frontend/vendor/react.production.min.js \
-            https://unpkg.com/react@18.3.1/umd/react.production.min.js) \
-    && (test -s /src/new_frontend/vendor/react-dom.production.min.js \
-        || wget -q -O /src/new_frontend/vendor/react-dom.production.min.js \
-            https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js)
-
+# AccountsStats frontend — single-file UI (frontend/index.html), no build step.
 FROM nginx:alpine
 RUN apk add --no-cache openssl
 COPY deploy/nginx-atomic/default.conf /etc/nginx/conf.d/default.conf
 COPY deploy/nginx-atomic/dashboard-locations.inc /etc/nginx/conf.d/dashboard-locations.inc
 COPY deploy/nginx-atomic/docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
-COPY --from=build /src/new_frontend /usr/share/nginx/html
-# vendor/ иногда попадает в образ с mode 0700 — nginx (не root) тогда не видит файлы
-# и try_files отдаёт app.html (text/html) вместо .js → «Скрипт не загрузился».
-RUN chmod -R a+rX /usr/share/nginx/html/vendor /usr/share/nginx/html/app.bundle.js
+COPY frontend/index.html /usr/share/nginx/html/index.html
+# Keep a tiny favicon-less tree; SPA fallback is index.html.
+RUN chmod a+r /usr/share/nginx/html/index.html \
+    && printf '%s\n' '<!doctype html><meta http-equiv="refresh" content="0;url=/">' \
+         > /usr/share/nginx/html/app.html \
+    && chmod a+r /usr/share/nginx/html/app.html
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["nginx", "-g", "daemon off;"]

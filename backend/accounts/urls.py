@@ -4,7 +4,7 @@ from .subs_api import subs_tiktok_audience_bulk
 from .scrape_backend_views import scrape_backend
 from .views import (
     AccountViewSet, ProfileViewSet, OwnerViewSet, AccountGroupViewSet, CountryViewSet,
-    platforms, summary, refresh_schedule, tv_emu_config,
+    platforms, summary, refresh_schedule,
     auto_refresh_status, auto_refresh_series, auto_refresh_run_now, auto_refresh_stop,
     auto_refresh_reset_state,
     auto_refresh_report_download,
@@ -35,7 +35,6 @@ urlpatterns = [
     path("platforms/", platforms),
     path("summary/", summary),
     path("visibility/", global_visibility),
-    path("tv-emu-config/", tv_emu_config),
     path("schedule/", refresh_schedule),
     path("scrape-backend/", scrape_backend),
     path("auto-refresh-status/", auto_refresh_status),

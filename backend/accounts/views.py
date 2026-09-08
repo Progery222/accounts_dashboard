@@ -3936,65 +3936,6 @@ def _parse_account_ids_list(raw) -> list[int] | None:
 
 
 @api_view(["GET", "POST"])
-def tv_emu_config(request):
-    """
-    Настройки TV-эмуляции (Atomic): общий JSON для всех браузеров/устройств.
-    GET — { "config": object | null }; POST — { "config": object }.
-    """
-    from .tv_emu_config import (
-        bump_tv_emu_runtime_epoch,
-        load_tv_emu_config,
-        load_tv_emu_runtime_epoch,
-        load_tv_emu_runtime_paused,
-        save_tv_emu_config,
-        set_tv_emu_runtime_paused,
-    )
-
-    if request.method == "GET":
-        stored = load_tv_emu_config()
-        return Response({
-            "config": stored,
-            "runtime_epoch": load_tv_emu_runtime_epoch(),
-            "runtime_paused": load_tv_emu_runtime_paused(),
-            "source": "server",
-            "updated": bool(stored),
-        })
-
-    data = request.data if isinstance(request.data, dict) else {}
-    if "paused" in data and "config" not in data:
-        paused = set_tv_emu_runtime_paused(_coerce_bool(data.get("paused")))
-        return Response({
-            "ok": True,
-            "message": "Пауза эмуляции обновлена",
-            "runtime_paused": paused,
-            "runtime_epoch": load_tv_emu_runtime_epoch(),
-        })
-
-    config = data.get("config")
-    if not isinstance(config, dict):
-        return Response(
-            {"error": "Ожидается JSON-объект в поле config"},
-            status=drf_status.HTTP_400_BAD_REQUEST,
-        )
-    try:
-        path = save_tv_emu_config(config)
-    except ValueError as exc:
-        return Response({"error": str(exc)}, status=drf_status.HTTP_400_BAD_REQUEST)
-    if "paused" in data:
-        set_tv_emu_runtime_paused(_coerce_bool(data.get("paused")))
-    runtime_epoch = load_tv_emu_runtime_epoch()
-    if data.get("restart") is True:
-        runtime_epoch = bump_tv_emu_runtime_epoch()
-    return Response({
-        "ok": True,
-        "message": "Настройки эмуляции сохранены на сервере",
-        "config_path": str(path),
-        "runtime_epoch": runtime_epoch,
-        "runtime_paused": load_tv_emu_runtime_paused(),
-    })
-
-
-@api_view(["GET", "POST"])
 def global_visibility(request):
     """
     Global visibility settings shared by all users:

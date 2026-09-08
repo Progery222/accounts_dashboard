@@ -21,19 +21,28 @@
         proxy_set_header Host $host;
     }
 
+    location /media/ {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+    }
+
     location /healthz/ {
         proxy_pass http://backend:8000;
         proxy_set_header Host $host;
     }
 
-    location = /app.html {
+    location = /index.html {
         add_header Cache-Control "no-cache, no-store, must-revalidate";
         try_files $uri =404;
     }
 
+    # Legacy Atomic bookmarks → new SPA
+    location = /app.html {
+        return 302 /;
+    }
+
     location = /app.bundle.js {
-        add_header Cache-Control "no-cache, no-store, must-revalidate";
-        try_files $uri =404;
+        return 404;
     }
 
     location / {
@@ -42,5 +51,5 @@
 
     location @spa {
         add_header Cache-Control "no-cache, no-store, must-revalidate" always;
-        try_files /app.html =404;
+        try_files /index.html =404;
     }
