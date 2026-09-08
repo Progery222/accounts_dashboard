@@ -1539,13 +1539,13 @@ function screenAccounts() {
     '</div>' +
 
     '<div class="kpis">' +
-      kpiCard('Подписчики', fmt(t.f), t.fd, fs, false, t.f, 1, 'users') +
-      // Просмотры показываем полным числом, а не «19 млн»: в сжатом виде
-      // прибавка за тик не видна, и живой счётчик теряет смысл.
-      kpiCard('Просмотры', fmt(vcTotal() !== null ? vcTotal() : t.v), t.vd, null, true, t.v, 2, 'eye', 'views') +
-      kpiCard('Лайки', comp(t.l), t.ld, null, true, t.l, 3, 'heart') +
-      kpiCard('Посты', fmt(t.p), t.pd, null, false, t.p, 4, 'rows') +
-      kpiCard('Клики по ссылке', fmt(t.c), t.cd, null, false, t.c, 5, 'link') +
+      // Все пять — полным числом, а не «19 млн»: в сжатом виде прибавка за
+      // тик не видна, и живой счётчик теряет смысл.
+      kpiCard('Подписчики', fmt(vcOr(t.f, 'followers')), t.fd, fs, false, t.f, 1, 'users', 'followers') +
+      kpiCard('Просмотры', fmt(vcOr(t.v, 'views')), t.vd, null, true, t.v, 2, 'eye', 'views') +
+      kpiCard('Лайки', fmt(vcOr(t.l, 'likes')), t.ld, null, true, t.l, 3, 'heart', 'likes') +
+      kpiCard('Посты', fmt(vcOr(t.p, 'posts')), t.pd, null, false, t.p, 4, 'rows', 'posts') +
+      kpiCard('Клики по ссылке', fmt(vcOr(t.c, 'clicks')), t.cd, null, false, t.c, 5, 'link', 'clicks') +
     '</div>' +
 
     '<div class="filters">' +
@@ -2398,13 +2398,12 @@ function screenTV() {
 
   /* --- сцена «Сеть»: только крупные цифры ---------------------------
      Экран на стене читают с нескольких метров, поэтому здесь без графиков. */
-  const vcNow = vcTotal();
   const netMetrics = [
     // Знак ставим по знаку дельты: приклеенный «+» давал «+−1» на падении.
-    // Просмотры — полным числом, иначе прибавка за тик не видна.
-    ['Просмотры', fmt(vcNow !== null ? vcNow : t.v), signed(t.vd, true), 'var(--tvm1)', 'views'],
-    ['Лайки', comp(t.l), signed(t.ld, true), 'var(--tvm2)'],
-    ['Посты', fmt(t.p), signed(t.pd), 'var(--tvm3)'],
+    // Числа полные, иначе прибавка за тик не видна.
+    ['Просмотры', fmt(vcOr(t.v, 'views')), signed(t.vd, true), 'var(--tvm1)', 'views'],
+    ['Лайки', fmt(vcOr(t.l, 'likes')), signed(t.ld, true), 'var(--tvm2)', 'likes'],
+    ['Посты', fmt(vcOr(t.p, 'posts')), signed(t.pd), 'var(--tvm3)', 'posts'],
     ['Аккаунтов', fmt(live.length), PLATFORMS.filter(function (p) {
       return live.some(function (a) { return a.platform === p.v; });
     }).length + ' площадок', 'var(--tvaccent)'],
@@ -2414,7 +2413,8 @@ function screenTV() {
       'style="display:flex;flex-direction:column;justify-content:center;gap:clamp(18px,5vh,64px)">' +
       '<div>' +
         '<div class="tv-lbl">Подписчики · вся сеть</div>' +
-        '<div class="tv-num tv-hero-xl" style="margin-top:clamp(4px,1.6vh,16px)">' + fmt(t.f) + '</div>' +
+        '<div class="tv-num tv-hero-xl" data-vc="followers" data-vc-fmt="full" ' +
+          'style="margin-top:clamp(4px,1.6vh,16px)">' + fmt(vcOr(t.f, 'followers')) + '</div>' +
         '<div style="display:flex;align-items:baseline;gap:14px;margin-top:clamp(6px,2vh,18px);flex-wrap:wrap">' +
           '<span class="tv-num" style="font-size:clamp(18px,4vh,40px);color:' +
             (t.fd >= 0 ? 'var(--tvpos)' : 'var(--tvm2)') + '">' + signed(t.fd) + '</span>' +
@@ -3613,37 +3613,58 @@ async function loadViewsAnchors() {
   try {
     const a = await api('/api/accounts/views-anchors/');
     const start = Date.parse(a.window_start);
-    const prev = a.views_prev;
-    if (!isFinite(start) || prev === null || prev === undefined) { state.vc = null; return; }
+    if (!isFinite(start)) { state.vc = null; return; }
+    const m = {};
+    const src = a.metrics || {};
+    Object.keys(src).forEach(function (key) {
+      const p = src[key];
+      if (!p || p.prev === null || p.prev === undefined) return;
+      const growth = Math.max(0, p.growth || 0);
+      m[key] = {
+        prev: p.prev,
+        growth: growth,
+        source: p.source,
+        // Своё зерно на каждый показатель, иначе все пять дёргались бы
+        // одновременно и одинаково — видно, что это одна кривая.
+        cum: vcSteps(growth, vcSeed(a.window_start + ':' + key)),
+      };
+    });
+    if (!Object.keys(m).length) { state.vc = null; return; }
     state.vc = {
       start: start,
       end: Date.parse(a.window_end),
-      prev: prev,
-      growth: Math.max(0, a.growth || 0),
       // Расхождение часов клиента и сервера: без поправки счётчик покажет
       // число из другого места суток.
       skew: a.server_now ? Date.parse(a.server_now) - Date.now() : 0,
-      cum: vcSteps(Math.max(0, a.growth || 0), vcSeed(a.window_start)),
+      m: m,
     };
     vcStart();
   } catch (e) { state.vc = null; }
 }
+/* Число для первой отрисовки: живое, если якоря есть, иначе как в базе. */
+function vcOr(fallback, key) {
+  const n = vcTotal(key);
+  return n === null ? fallback : n;
+}
 /* Текущее показываемое число, либо null — тогда рисуем как раньше, из базы. */
-function vcTotal() {
+function vcTotal(key) {
   const v = state.vc;
   if (!v) return null;
+  const p = v.m[key || 'views'];
+  if (!p) return null;
   const k = Math.floor((Date.now() + v.skew - v.start) / VC_TICK_MS);
   if (k < 0) return null;
-  if (k >= VC_TICKS) return v.prev + v.growth;   // окно кончилось, ждём новых якорей
-  return v.prev + v.cum[k];
+  if (k >= VC_TICKS) return p.prev + p.growth;   // окно кончилось, ждём новых якорей
+  return p.prev + p.cum[k];
 }
 /* Обновляем только сами цифры, не пересобирая слой: перерисовка раз в 10
    секунд сбрасывала бы выделение, фокус и позицию списка. */
 function vcPaint() {
-  const n = vcTotal();
-  if (n === null) return;
-  const els = document.querySelectorAll('[data-vc="views"]');
+  if (!state.vc) return;
+  const els = document.querySelectorAll('[data-vc]');
   for (let i = 0; i < els.length; i++) {
+    const n = vcTotal(els[i].dataset.vc);
+    if (n === null) continue;
     vcSet(els[i], els[i].dataset.vcFmt === 'comp' ? comp(n) : fmt(n));
   }
 }

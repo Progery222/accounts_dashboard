@@ -4177,13 +4177,49 @@ def auto_refresh_telegram_test(request):
 VIEWS_ANCHOR_HOUR = 10
 
 
+#: Показатели живого счётчика: ключ для фронта -> поле в AccountSnapshot.
+VC_METRICS = {
+    "views": "view_count",
+    "followers": "follower_count",
+    "likes": "like_count",
+    "posts": "post_count",
+    "clicks": "link_click_count",
+}
+
+
+def _totals_as_of(day):
+    """Сетевые итоги на конец дня ``day`` — по последнему снимку каждого аккаунта.
+
+    Просто просуммировать ``AccountSnapshot`` за дату нельзя: строки там только
+    по обновлённым в этот день аккаунтам, поэтому сумма за день — это сумма по
+    случайному подмножеству (в базе встречается «дельта» −884 638). Берём по
+    каждому аккаунту последний снимок не позже даты и складываем: это и есть
+    последнее известное состояние сети на тот момент.
+
+    Проверено сверкой: для просмотров результат совпадает с
+    ``AutoRefreshPoint.view_count_total``, где настоящий сетевой итог уже есть.
+    """
+    rows = (
+        AccountSnapshot.objects.filter(date__lte=day)
+        .order_by("account_id", "-date")
+        .distinct("account_id")
+        .values("account_id", *VC_METRICS.values())
+    )
+    out = {k: 0 for k in VC_METRICS}
+    seen = 0
+    for r in rows:
+        seen += 1
+        for key, field in VC_METRICS.items():
+            out[key] += int(r[field] or 0)
+    return (out, seen) if seen else (None, 0)
+
+
 def _views_total_at(moment):
     """Суммарные просмотры сети на момент ``moment`` — последняя точка не позже него.
 
-    Берём ``AutoRefreshPoint``: только там ``view_count_total`` — настоящая сумма
-    по всей сети. ``AccountSnapshot`` для этого не годится: в нём строки только
-    по обновлённым за день аккаунтам, поэтому сумма за день — это сумма по
-    случайному подмножеству, и разности соседних дней бессмысленны.
+    Для просмотров источник точнее, чем снимки: ``AutoRefreshPoint`` пишется со
+    временем, поэтому «на 10:00» здесь буквально на 10:00, а не «на конец дня».
+    У остальных показателей такого ряда нет — они идут через ``_totals_as_of``.
 
     Возвращает ``(total, measured_at)`` или ``(None, None)``, если точек до
     этого момента ещё нет.
@@ -4201,17 +4237,23 @@ def _views_total_at(moment):
 
 @api_view(["GET"])
 def views_anchors(request):
-    """Две опорные точки для «живого» счётчика просмотров на фронте.
+    """Опорные точки для «живых» счётчиков на фронте — по каждому показателю.
 
     Сутки счётчика идут с 10:00 до 10:00 по Москве. Внутри текущих суток фронт
-    ведёт число от ``views_prev`` (вчера в 10:00) к ``views_now`` (сегодня в
-    10:00) — то есть показывает измеренный прирост прошлых суток, растянутый по
-    времени. Поэтому видимое число отстаёт от базы примерно на сутки и никогда
-    её не обгоняет.
+    ведёт число от ``prev`` (прошлые сутки) к ``now`` (эти сутки) — то есть
+    показывает измеренный прирост, растянутый по времени. Поэтому видимое число
+    отстаёт от базы примерно на сутки и никогда её не обгоняет.
 
     ``growth`` может быть нулём — значит, за прошлые сутки прогонов не было и
-    просмотры не менялись. Тогда счётчик честно стоит на месте: дорисовывать
+    показатель не менялся. Тогда счётчик честно стоит на месте: дорисовывать
     движение, которого не было, значит показывать выдуманные цифры.
+
+    Точность источников разная, и это видно в ``source`` каждого показателя:
+
+    - ``views`` идут из ``AutoRefreshPoint``, где есть время замера, поэтому
+      «на 10:00» здесь буквально на 10:00;
+    - остальные — из ``AccountSnapshot``, где у снимка только дата. Там опора
+      это «конец дня», а не 10:00. Ряда со временем по ним в базе просто нет.
     """
     now = timezone.localtime()
     window_start = now.replace(hour=VIEWS_ANCHOR_HOUR, minute=0, second=0, microsecond=0)
@@ -4221,17 +4263,35 @@ def views_anchors(request):
     window_end = window_start + datetime.timedelta(days=1)
     prev_start = window_start - datetime.timedelta(days=1)
 
+    def pair(now_val, prev_val, source):
+        if now_val is None:
+            now_val = prev_val
+        if prev_val is None or now_val is None:
+            growth = 0
+        else:
+            # Отрицательный прирост (аккаунты удалили) не отматываем назад.
+            growth = max(0, now_val - prev_val)
+        return {"prev": prev_val, "now": now_val, "growth": growth, "source": source}
+
+    metrics = {}
+
     views_now, at_now = _views_total_at(window_start)
     views_prev, at_prev = _views_total_at(prev_start)
+    metrics["views"] = pair(views_now, views_prev, "auto_refresh_point")
 
-    # Нет данных на начало прошлых суток — прироста не знаем, движения не будет.
-    if views_now is None:
-        views_now = views_prev
-    if views_prev is None or views_now is None:
-        growth = 0
-    else:
-        # Отрицательный прирост (аккаунты удалили) не отматываем назад.
-        growth = max(0, views_now - views_prev)
+    # Остальные показатели — по снимкам, с точностью до дня.
+    day_now = window_start.date()
+    day_prev = prev_start.date()
+    totals_now, n_now = _totals_as_of(day_now)
+    totals_prev, n_prev = _totals_as_of(day_prev)
+    for key in VC_METRICS:
+        if key == "views":
+            continue
+        metrics[key] = pair(
+            totals_now[key] if totals_now else None,
+            totals_prev[key] if totals_prev else None,
+            "account_snapshot",
+        )
 
     return Response(
         {
@@ -4242,9 +4302,14 @@ def views_anchors(request):
             "server_now": now.isoformat(),
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
-            "views_prev": views_prev,
-            "views_now": views_now,
-            "growth": growth,
+            "metrics": metrics,
+            "snapshot_days": {"now": str(day_now), "prev": str(day_prev),
+                              "accounts_now": n_now, "accounts_prev": n_prev},
+            # Старые ключи оставлены, чтобы уже выложенный фронт не сломался,
+            # пока бэкенд и фронт выкатываются по отдельности.
+            "views_prev": metrics["views"]["prev"],
+            "views_now": metrics["views"]["now"],
+            "growth": metrics["views"]["growth"],
             "measured_prev_at": at_prev.isoformat() if at_prev else None,
             "measured_now_at": at_now.isoformat() if at_now else None,
         }
