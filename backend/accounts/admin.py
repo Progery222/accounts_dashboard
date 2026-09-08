@@ -1,6 +1,7 @@
 from django.contrib import admin
 from .models import (
     Account,
+    Domain,
     Post,
     AccountSnapshot,
     PostSnapshot,
@@ -13,9 +14,23 @@ from .models import (
 )
 
 
+@admin.register(Domain)
+class DomainAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "is_active", "account_count", "created_at"]
+    list_filter = ["is_active"]
+    search_fields = ["name", "slug"]
+    prepopulated_fields = {"slug": ("name",)}
+    readonly_fields = ["created_at", "updated_at"]
+
+    @admin.display(description="Аккаунтов")
+    def account_count(self, obj):
+        return obj.accounts.count()
+
+
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ["name", "color", "account_count", "created_at"]
+    list_display = ["name", "domain", "color", "account_count", "created_at"]
+    list_filter = ["domain"]
     search_fields = ["name"]
     readonly_fields = ["created_at", "updated_at"]
 
@@ -26,7 +41,8 @@ class ProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Owner)
 class OwnerAdmin(admin.ModelAdmin):
-    list_display = ["name", "color", "account_count", "created_at"]
+    list_display = ["name", "domain", "color", "account_count", "created_at"]
+    list_filter = ["domain"]
     search_fields = ["name"]
     readonly_fields = ["created_at", "updated_at"]
 
@@ -37,7 +53,8 @@ class OwnerAdmin(admin.ModelAdmin):
 
 @admin.register(AccountGroup)
 class AccountGroupAdmin(admin.ModelAdmin):
-    list_display = ["name", "color", "account_count", "created_at"]
+    list_display = ["name", "domain", "color", "account_count", "created_at"]
+    list_filter = ["domain"]
     search_fields = ["name"]
     readonly_fields = ["created_at", "updated_at"]
 
@@ -48,7 +65,8 @@ class AccountGroupAdmin(admin.ModelAdmin):
 
 @admin.register(Country)
 class CountryAdmin(admin.ModelAdmin):
-    list_display = ["name", "color", "account_count", "created_at"]
+    list_display = ["name", "domain", "color", "account_count", "created_at"]
+    list_filter = ["domain"]
     search_fields = ["name"]
     readonly_fields = ["created_at", "updated_at"]
 
@@ -61,6 +79,7 @@ class CountryAdmin(admin.ModelAdmin):
 class AccountAdmin(admin.ModelAdmin):
     list_display = [
         "username",
+        "domain",
         "platform",
         "profile",
         "owner",
@@ -72,10 +91,16 @@ class AccountAdmin(admin.ModelAdmin):
         "post_count",
         "updated_at",
     ]
-    list_filter = ["platform", "avatar_missing", "is_archived", "is_banned"]
+    # Домен первым: раскладывать аккаунты по доменам удобнее всего отсюда —
+    # отфильтровать «Домен: —» и назначить пачкой.
+    list_filter = ["domain", "platform", "avatar_missing", "is_archived", "is_banned"]
     search_fields = ["username", "display_name"]
     readonly_fields = ["created_at", "updated_at", "avatar_file"]
     ordering = ["-created_at"]
+    # Домен правится прямо в списке: отфильтровали «Домен: —», проставили
+    # на странице, сохранили. Раскладывать 1200 аккаунтов по одному больно,
+    # а своя страница действия ради этого не нужна.
+    list_editable = ["domain"]
 
 
 @admin.register(Post)

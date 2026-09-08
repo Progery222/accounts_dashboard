@@ -38,8 +38,10 @@ from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
 from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT, NEW_ACCOUNT_UPDATED_AT
 from .audience import AUDIENCE_SYNC_SUPPORTED_PLATFORMS
+from . import domains
 from .models import (
     Account,
+    Domain,
     AccountAudienceMembership,
     Platform,
     Post,
@@ -2933,6 +2935,10 @@ class AccountViewSet(viewsets.ModelViewSet):
         if not force_include_hidden_for_detail:
             qs = _apply_archived_filter(qs, self.request.query_params.get("archived"))
             qs = _apply_banned_filter(qs, self.request.query_params.get("banned"))
+            # Домен — самый верхний фильтр. На detail не накладываем: аккаунт
+            # должен открываться и правиться по ID, иначе delete/retrieve дают
+            # 404 ровно как и с остальными скрывающими фильтрами выше.
+            qs = domains.narrow(qs, domains.resolve(self.request))
         return _apply_visibility_filters(
             qs,
             include_hidden_platforms=include_hidden_platforms,
@@ -3522,11 +3528,14 @@ class OwnerViewSet(viewsets.ModelViewSet):
     serializer_class = OwnerSerializer
 
     def get_queryset(self):
-        return Owner.objects.annotate(
-            account_count=Count(
-                "accounts",
-                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+        return domains.narrow(
+            Owner.objects.annotate(
+                account_count=Count(
+                    "accounts",
+                    filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+                ),
             ),
+            domains.resolve(self.request),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -3539,11 +3548,14 @@ class AccountGroupViewSet(viewsets.ModelViewSet):
     serializer_class = AccountGroupSerializer
 
     def get_queryset(self):
-        return AccountGroup.objects.annotate(
-            account_count=Count(
-                "accounts",
-                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+        return domains.narrow(
+            AccountGroup.objects.annotate(
+                account_count=Count(
+                    "accounts",
+                    filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+                ),
             ),
+            domains.resolve(self.request),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -3556,11 +3568,14 @@ class CountryViewSet(viewsets.ModelViewSet):
     serializer_class = CountrySerializer
 
     def get_queryset(self):
-        return Country.objects.annotate(
-            account_count=Count(
-                "accounts",
-                filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+        return domains.narrow(
+            Country.objects.annotate(
+                account_count=Count(
+                    "accounts",
+                    filter=Q(accounts__is_archived=False, accounts__is_banned=False),
+                ),
             ),
+            domains.resolve(self.request),
         )
 
     def destroy(self, request, *args, **kwargs):
@@ -3588,7 +3603,7 @@ class ProfileViewSet(viewsets.ModelViewSet):
             return qs
         if not include_hidden_profiles:
             qs = qs.filter(is_hidden=False)
-        return qs
+        return domains.narrow(qs, domains.resolve(self.request))
 
     def destroy(self, request, *args, **kwargs):
         profile = self.get_object()
@@ -4175,6 +4190,31 @@ def auto_refresh_telegram_test(request):
 
 #: Час по местному времени (Europe/Moscow), на котором режутся сутки счётчика.
 VIEWS_ANCHOR_HOUR = 10
+
+
+@api_view(["GET"])
+def domain_list(request):
+    """Домены и то, какой из них выбран текущим адресом.
+
+    Фронт по этому ответу понимает, где он находится, и подписывает экран.
+    ``current`` может быть пустым — значит, адрес без домена и показываем всё.
+    """
+    scope = domains.resolve(request)
+    rows = [
+        {"slug": d.slug, "name": d.name, "color": d.color,
+         "accounts": d.accounts.count()}
+        for d in Domain.objects.filter(is_active=True)
+    ]
+    return Response({
+        "domains": rows,
+        "aggregate_slug": domains.AGGREGATE_DOMAIN_SLUG,
+        "current": scope.domain.slug if scope.domain else None,
+        "aggregate": scope.aggregate,
+        # Кусок адреса был, а домена такого нет — фронту стоит сказать об этом
+        # вслух, а не молча показывать чужой набор.
+        "unknown": scope.unknown,
+        "unassigned_accounts": Account.objects.filter(domain__isnull=True).count(),
+    })
 
 
 #: Показатели живого счётчика: ключ для фронта -> поле в AccountSnapshot.

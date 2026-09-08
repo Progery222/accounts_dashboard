@@ -3,8 +3,78 @@ from django.utils import timezone
 
 from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT
 
+#: Путь и поддомен, показывающие эфир сразу по всем доменам. Это не арендатор:
+#: своих аккаунтов у него нет, поэтому в таблице Domain строки для него не
+#: заводим — слово зарезервировано и разбирается при определении домена.
+AGGREGATE_DOMAIN_SLUG = "efir"
+
+
+class Domain(models.Model):
+    """Арендатор: свой набор аккаунтов и справочников под своим адресом.
+
+    Выбирается по адресу входа — путём (``/reiz``) или поддоменом
+    (``reiz.example.com``). Самый верхний фильтр: всё остальное — профили,
+    владельцы, группы, страны — принадлежит домену и сужается вместе с ним.
+
+    Слово ``efir`` зарезервировано под сводный эфир по всем доменам и не может
+    быть slug'ом обычного домена.
+    """
+
+    slug = models.SlugField(
+        max_length=63, unique=True,
+        help_text="Кусок адреса: /reiz или reiz.example.com. Латиница, цифры и дефис.",
+    )
+    name = models.CharField(max_length=255, help_text="Как показывать в интерфейсе.")
+    color = models.CharField(max_length=7, default="#6366f1")
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Выключенный домен не отдаёт данные и не попадает в сводный эфир.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Домен"
+        verbose_name_plural = "Домены"
+
+    def __str__(self):
+        return f"{self.name} (/{self.slug})"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if (self.slug or "").lower() == AGGREGATE_DOMAIN_SLUG:
+            raise ValidationError({
+                "slug": f"«{AGGREGATE_DOMAIN_SLUG}» занято под сводный эфир по всем доменам.",
+            })
+
+    def save(self, *args, **kwargs):
+        # Проверяем и здесь: домены заводят не только через админку.
+        self.clean()
+        return super().save(*args, **kwargs)
+
+
+def domain_fk(related_name):
+    """Ссылка на домен для сущностей, которые им фильтруются.
+
+    ``null=True`` — не «поле забыли заполнить», а рабочее состояние: пустой
+    домен значит «не распределено», и такие записи видны во всех доменах.
+    Иначе миграция на боевой базе разом спрятала бы все существующие аккаунты.
+    Раскладывать их по доменам можно постепенно.
+
+    ``PROTECT``, а не ``CASCADE``: удаление домена не должно уносить с собой
+    аккаунты. Сначала перенесите или удалите содержимое.
+    """
+    return models.ForeignKey(
+        Domain, on_delete=models.PROTECT, null=True, blank=True,
+        related_name=related_name,
+        verbose_name="Домен",
+        help_text="Пусто — запись не распределена и видна во всех доменах.",
+    )
+
 
 class Profile(models.Model):
+    domain = domain_fk("profiles")
     name = models.CharField(max_length=255)
     color = models.CharField(max_length=7, default="#6366f1")  # hex
     is_hidden = models.BooleanField(
@@ -22,6 +92,7 @@ class Profile(models.Model):
 
 
 class Owner(models.Model):
+    domain = domain_fk("owners")
     name = models.CharField(max_length=255)
     color = models.CharField(max_length=7, default="#6366f1")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -35,6 +106,7 @@ class Owner(models.Model):
 
 
 class AccountGroup(models.Model):
+    domain = domain_fk("groups")
     name = models.CharField(max_length=255)
     color = models.CharField(max_length=7, default="#6366f1")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -50,6 +122,7 @@ class AccountGroup(models.Model):
 
 
 class Country(models.Model):
+    domain = domain_fk("countries")
     name = models.CharField(max_length=255)
     color = models.CharField(max_length=7, default="#6366f1")
     created_at = models.DateTimeField(auto_now_add=True)
@@ -471,6 +544,7 @@ class Platform(models.TextChoices):
 
 
 class Account(models.Model):
+    domain = domain_fk("accounts")
     username = models.CharField(max_length=255)
     platform = models.CharField(max_length=20, choices=Platform.choices)
     profile = models.ForeignKey(

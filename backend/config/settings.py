@@ -253,6 +253,12 @@ CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https://[a-z0-9-]+\.trycloudflare\.com$",
     r"^https://[a-z0-9-]+\.loca\.lt$",
 ]
+# Фронт шлёт домен-арендатора заголовком. Он нестандартный, поэтому без явного
+# разрешения браузер зарубит preflight, и с dev-статики (:5174) не пройдёт
+# ни один запрос.
+from corsheaders.defaults import default_headers as _cors_default_headers  # noqa: E402
+
+CORS_ALLOW_HEADERS = list(_cors_default_headers) + ["x-domain"]
 
 # CSRF_EXTRA_ORIGINS — публичные origin'ы (VPS, кастомный домен, второй
 # Railway-сервис со SPA).

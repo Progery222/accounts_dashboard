@@ -1085,6 +1085,7 @@ const state = {
   tvScene: 0, tvPlay: true, tvTimer: null,
   runError: false,
   vc: null,            // якоря живого счётчика просмотров, см. loadViewsAnchors
+  domains: null,       // {current, unknown, list} — см. loadDomains
 };
 function isNarrow() { return window.matchMedia('(max-width: 760px)').matches; }
 function effView() { return isNarrow() ? 'cards' : state.view; }
@@ -1371,6 +1372,25 @@ function totals(list) {
 /* ============================================================
    6. ШАПКА, ЛЕНТА, РЕЛЬС
    ============================================================ */
+/* Метка домена в шапке: без неё три одинаковых экрана на разных адресах
+   не отличить, и легко решить, что часть аккаунтов пропала. */
+function domainPill() {
+  if (!DOMAIN) return '';
+  const d = state.domains && state.domains.current;
+  if (DOMAIN === DOMAIN_AGGREGATE) {
+    return '<span class="pill" title="Сводный эфир: показаны все домены сразу" ' +
+      'style="background:var(--m2s);color:var(--m2)">все домены</span>';
+  }
+  if (state.domains && state.domains.unknown) {
+    return '<span class="pill" title="Домена «' + esc(state.domains.unknown) +
+      '» нет в базе — показаны все данные" style="background:var(--warn-soft,var(--m3s));color:var(--warn)">' +
+      'домен не найден</span>';
+  }
+  const name = (d && d.name) || DOMAIN;
+  const color = (d && d.color) || 'var(--accent)';
+  return '<span class="pill" title="Домен: показаны только его аккаунты и справочники" ' +
+    'style="background:var(--accent-soft);color:' + esc(color) + '">' + esc(name) + '</span>';
+}
 function appbar() {
   return '<div class="appbar">' +
     '<div class="brand"><div class="brand-mark">' +
@@ -1378,6 +1398,7 @@ function appbar() {
     '</div><div class="brand-name">AccountsStats</div>' +
     (DEMO ? '<span class="pill" title="Автономный прототип: данные вымышленные, к API не подключён" ' +
             'style="background:var(--accent-soft);color:var(--accent)">демо</span>' : '') +
+    domainPill() +
     '</div>' +
     '<div class="grow" style="display:flex;justify-content:center">' +
       '<button class="field cmd" data-act="palette" style="cursor:pointer">' +
@@ -3423,8 +3444,42 @@ const API_BASE = (function () {
 })();
 const ACC_QS = 'include_hidden=1&archived=all&banned=all';
 
+/* ============================================================
+   ДОМЕН — самый верхний фильтр
+
+   Домен берём из адреса: сначала первый кусок пути (/reiz), потом поддомен
+   (reiz.example.com). Оба варианта живут одновременно намеренно: приложение
+   стоит за Cloudflare Tunnel, где список публичных хостов заводится в панели
+   Cloudflare, а не на сервере. Пока поддомены там не добавлены, работают
+   пути; после — само заработает и по поддоменам, без правок кода.
+
+   Дальше домен уезжает в заголовке X-Domain на каждый запрос: так не нужно
+   переписывать полсотни адресов, и бэкенд сужает выдачу сам.
+
+   Слово efir зарезервировано: это не арендатор, а сводный эфир по всем
+   доменам сразу.
+   ============================================================ */
+const DOMAIN_AGGREGATE = 'efir';
+const RESERVED_PATH = { api: 1, admin: 1, media: 1, static: 1, healthz: 1, index: 1 };
+const DOMAIN = (function () {
+  const seg = (location.pathname || '').split('/').filter(Boolean)[0];
+  if (seg && !RESERVED_PATH[seg.toLowerCase()] && !/\./.test(seg)) return seg.toLowerCase();
+  const host = (location.hostname || '').split('.');
+  if (host.length > 2) return host[0].toLowerCase();
+  return '';
+})();
+/* Префикс для ссылок внутри интерфейса, чтобы переходы не теряли домен. */
+const DOMAIN_PREFIX = DOMAIN ? '/' + DOMAIN : '';
+function domainHeaders(extra) {
+  const h = extra || {};
+  if (DOMAIN) h['X-Domain'] = DOMAIN;
+  return h;
+}
+
 async function api(path) {
-  const r = await fetch(API_BASE + path, { headers: { Accept: 'application/json' } });
+  const r = await fetch(API_BASE + path, {
+    headers: domainHeaders({ Accept: 'application/json' }),
+  });
   if (!r.ok) throw new Error('HTTP ' + r.status + ' на ' + path);
   return r.json();
 }
@@ -3607,6 +3662,18 @@ function vcSteps(growth, seed) {
   }
   cum[VC_TICKS] = growth;
   return cum;
+}
+/* Кто мы и какие домены вообще есть. Ответ нужен только для подписи в шапке —
+   сужает выдачу всё равно бэкенд, по заголовку. */
+async function loadDomains() {
+  if (DEMO || !LIVE) return;
+  try {
+    const d = await api('/api/accounts/domains/');
+    const cur = (d.domains || []).filter(function (x) { return x.slug === d.current; })[0] || null;
+    state.domains = { current: cur, unknown: d.unknown || null, list: d.domains || [],
+                      unassigned: d.unassigned_accounts || 0 };
+    paintChrome();
+  } catch (e) { state.domains = null; }
 }
 async function loadViewsAnchors() {
   if (DEMO || !LIVE) return;
@@ -3809,7 +3876,7 @@ async function loadAnalytics() {
 async function apiSend(path, body, method) {
   const r = await fetch(API_BASE + path, {
     method: method || 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    headers: domainHeaders({ 'Content-Type': 'application/json', Accept: 'application/json' }),
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   let data = null;
@@ -3996,6 +4063,7 @@ async function bootLive() {
     pollTimer = setInterval(pollRun, 4000);
     loadSessionsLive();
     loadViewsAnchors();
+    loadDomains();
   } catch (e) {
     LIVE = false;
     state.apiError = String(e.message || e);
@@ -4054,6 +4122,11 @@ function runTick() {
   bar.style.width = Math.round(state.run.done / state.run.total * 100) + '%';
   cur.textContent = 'Сейчас: ' + state.run.cur + ' · осталось ~' + Math.max(1, Math.round((state.run.total - state.run.done) / 16)) + ' мин';
 }
+/* Адрес /efir — это сводный эфир по всем доменам: сразу открываем экран
+   на стене, а не список аккаунтов. Сохранённый маршрут тут не спрашиваем:
+   на такой адрес заходят ровно за эфиром. */
+if (DOMAIN === DOMAIN_AGGREGATE) state.route = 'tv';
+
 /* Первая отрисовка — скелетон, пока идут запросы к API */
 render();
 bootLive();
