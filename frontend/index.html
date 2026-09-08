@@ -1081,6 +1081,9 @@ const state = {
   runError: false,
   vc: null,            // якоря живого счётчика просмотров, см. loadViewsAnchors
   domains: null,       // {current, unknown, list} — см. loadDomains
+  // Форма «Добавить аккаунты». Текст держим в состоянии, иначе выбор в любом
+  // списке пересобирает слой модалки и стирает набранное.
+  add: { text: '', platform: '', domainId: 0, profileId: 0, ownerId: 0, groupId: 0, countryId: 0 },
 };
 function isNarrow() { return window.matchMedia('(max-width: 760px)').matches; }
 function effView() { return isNarrow() ? 'cards' : state.view; }
@@ -1728,6 +1731,43 @@ function menuDef(key) {
     items.push({ v: 'delete', l: 'Удалить выбранные', danger: true });
     return { title: 'Действия · выбрано ' + n, cur: '', items: items };
   }
+  // Списки формы добавления. «—» значит «не задавать»: аккаунт создастся
+  // без этого поля, а не с первым попавшимся значением.
+  if (kind === 'add-domain') return {
+    title: 'Домен', cur: String(state.add.domainId || 0),
+    items: [{ v: '0', l: 'Без домена' }].concat(((state.domains && state.domains.list) || [])
+      .map(function (d) { return { v: String(d.id), l: d.name, dot: d.color }; })),
+  };
+  if (kind === 'add-platform') return {
+    title: 'Площадка', cur: state.add.platform || '',
+    items: [{ v: '', l: 'По ссылке' }].concat(PLATFORMS.map(function (p) {
+      return { v: p.v, l: p.l, mark: p.v };
+    })),
+  };
+  if (kind === 'add-profile') return {
+    title: 'Профиль', cur: String(state.add.profileId || 0),
+    items: [{ v: '0', l: 'Без профиля' }].concat(PROFILES.map(function (p) {
+      return { v: String(p.id), l: p.name, dot: p.color };
+    })),
+  };
+  if (kind === 'add-owner') return {
+    title: 'Владелец', cur: String(state.add.ownerId || 0),
+    items: [{ v: '0', l: 'Без владельца' }].concat(OWNERS.map(function (o) {
+      return { v: String(o.id), l: o.name };
+    })),
+  };
+  if (kind === 'add-group') return {
+    title: 'Группа', cur: String(state.add.groupId || 0),
+    items: [{ v: '0', l: 'Без группы' }].concat(GROUPS.map(function (g) {
+      return { v: String(g.id), l: g.name };
+    })),
+  };
+  if (kind === 'add-country') return {
+    title: 'Страна', cur: String(state.add.countryId || 0),
+    items: [{ v: '0', l: 'Без страны' }].concat(COUNTRIES.map(function (c) {
+      return { v: String(c.id), l: c.name };
+    })),
+  };
   switch (key) {
     case 'theme': return {
       title: 'Тема', cur: state.theme,
@@ -1821,6 +1861,19 @@ function applyMenu(key, v) {
   const kind = menuKind(key);
   if (kind === 'row' || kind === 'rowdom') { applyRowMenu(key, v); return; }
   if (kind === 'acts' || kind === 'actsdom') { applyActsMenu(key, v); return; }
+  // Выбор в форме добавления не должен терять набранный текст: снимаем его
+  // с живого поля до того, как слой модалки пересоберётся.
+  if (kind.indexOf('add-') === 0) {
+    const el = document.getElementById('addlist');
+    if (el) state.add.text = el.value;
+    if (kind === 'add-platform') state.add.platform = v;
+    else if (kind === 'add-domain')  state.add.domainId  = +v || 0;
+    else if (kind === 'add-profile') state.add.profileId = +v || 0;
+    else if (kind === 'add-owner')   state.add.ownerId   = +v || 0;
+    else if (kind === 'add-group')   state.add.groupId   = +v || 0;
+    else if (kind === 'add-country') state.add.countryId = +v || 0;
+    return;
+  }
   switch (key) {
     case 'theme':       setTheme(v); break;
     case 'sort':        state.sort = { key: v, dir: v === 'name' ? 'asc' : 'desc' }; break;
@@ -2694,16 +2747,42 @@ function scheduleTab() {
     ['include_archived_accounts', 'Архивные'],
     ['include_banned_accounts', 'Забаненные'],
   ];
+  // Бэкенд умеет два режима: по интервалу и по конкретным часам. Раньше во
+  // фронте был только интервал, и «Время» задать было нечем.
+  const mode = schedField('mode', 'interval') === 'times' ? 'times' : 'interval';
+  const times = (schedField('times', []) || []).slice().sort();
   return '' +
     '<div class="frow"><span class="lb">Автообновление</span>' +
       '<span class="sw ' + (schedField('enabled', false) ? 'on' : '') + '" data-act="sched-bool" data-v="enabled"></span>' +
       '<span style="font-size:12px;color:var(--ink-3)">' +
-        (schedField('enabled', false) ? 'следующий прогон по интервалу' : 'выключено') + '</span></div>' +
-    '<div class="frow"><span class="lb">Интервал</span>' +
-      '<div class="seg">' + [1, 3, 6, 12, 24].map(function (h) {
-        return '<button class="' + (+schedField('interval_hours', 6) === h ? 'on' : '') + '" ' +
-          'data-act="sched-int" data-v="' + h + '">' + h + ' ч</button>';
-      }).join('') + '</div></div>' +
+        (!schedField('enabled', false) ? 'выключено'
+          : mode === 'times'
+            ? (times.length ? 'по времени: ' + times.join(', ') : 'по времени, но время не задано')
+            : 'каждые ' + schedField('interval_hours', 6) + ' ч') + '</span></div>' +
+    '<div class="frow"><span class="lb">Когда запускать</span>' +
+      '<div class="seg">' +
+        '<button class="' + (mode === 'interval' ? 'on' : '') + '" data-act="sched-mode" data-v="interval">По интервалу</button>' +
+        '<button class="' + (mode === 'times' ? 'on' : '') + '" data-act="sched-mode" data-v="times">По времени</button>' +
+      '</div></div>' +
+    (mode === 'interval'
+      ? '<div class="frow"><span class="lb">Интервал</span>' +
+          '<div class="seg">' + [1, 3, 6, 12, 24].map(function (h) {
+            return '<button class="' + (+schedField('interval_hours', 6) === h ? 'on' : '') + '" ' +
+              'data-act="sched-int" data-v="' + h + '">' + h + ' ч</button>';
+          }).join('') + '</div></div>'
+      : '<div><div class="lbl" style="margin-bottom:10px">Часы запуска' +
+          (times.length ? '' : ' — не выбрано ни одного, прогонов не будет') + '</div>' +
+          '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+            Array.from({ length: 24 }, function (_, h) {
+              const hh = String(h).padStart(2, '0') + ':00';
+              const on = times.indexOf(hh) >= 0;
+              return '<button class="btn sm' + (on ? ' pri' : '') + '" style="min-width:56px" ' +
+                'data-act="sched-time" data-v="' + hh + '" aria-pressed="' + on + '">' + hh + '</button>';
+            }).join('') +
+          '</div>' +
+          '<div style="font-size:12px;color:var(--ink-3);margin-top:10px">' +
+            'Прогон начнётся в выбранные часы по московскому времени.</div>' +
+        '</div>') +
     '<div class="frow"><span class="lb">Не обновлять, если свежее</span>' +
       '<div class="seg">' + [0, 1, 2, 6, 12].map(function (h) {
         return '<button class="' + (+schedField('skip_recent_hours', 2) === h ? 'on' : '') + '" ' +
@@ -2743,6 +2822,8 @@ function collectSchedule() {
   const s = state.sched || {};
   return {
     enabled: !!s.enabled,
+    mode: s.mode === 'times' ? 'times' : 'interval',
+    times: s.times || [],
     interval_hours: +s.interval_hours || 6,
     skip_recent_hours: +s.skip_recent_hours || 0,
     auto_refresh_platforms: s.auto_refresh_platforms || [],
@@ -2813,20 +2894,46 @@ function modalRefreshAll() {
   return modalShell('Обновление', tabs + (tab === 'run' ? runBody : scheduleTab()), ft);
 }
 
+/* Домен по умолчанию — тот, с которого зашли: добавляя со страницы /reiz,
+   логично класть в reiz. Выбор при этом остаётся. */
+function addDefaultDomainId() {
+  const d = state.domains && state.domains.current;
+  return d ? d.id : 0;
+}
+/* Что уедет на сервер вместе с каждым именем. Пустое не шлём, чтобы не
+   перетирать значения по умолчанию на стороне бэкенда. */
+function addExtra() {
+  const a = state.add, out = {};
+  if (a.domainId)  out.domain_id  = a.domainId;
+  if (a.profileId) out.profile_id = a.profileId;
+  if (a.ownerId)   out.owner_id   = a.ownerId;
+  if (a.groupId)   out.group_id   = a.groupId;
+  if (a.countryId) out.country_id = a.countryId;
+  return out;
+}
 function modalAdd() {
+  const a = state.add;
+  // Раньше здесь были три вкладки и четыре подписи, не подключённые ни к чему:
+  // «Списком/По одному/Импорт CSV» были кнопками без действия, а «Платформа»,
+  // «Профиль» и «Владелец» — вообще <span> с жёстко вписанным первым элементом
+  // списка. Отправлялся только текст. Теперь это настоящая форма.
   const body =
-    '<div class="tabs" style="margin-bottom:0"><button class="on">Списком</button><button>По одному</button><button>Импорт CSV</button></div>' +
     '<div><div class="lbl" style="margin-bottom:8px">Ссылки или @имена, по одному в строке</div>' +
       '<textarea id="addlist" rows="7" placeholder="@mobilefarm.ru&#10;https://www.tiktok.com/@kuhnya_doma&#10;@atomic.media" ' +
-      'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none"></textarea></div>' +
-    '<div class="frow"><span class="lb">Платформа</span>' +
-      '<span class="sel">' + pmark(PLATFORMS[0].v) + '<span class="trunc">' + PLATFORMS[0].l + '</span>' + ic('cdown', 11) + '</span>' +
-      '<span style="font-size:12px;color:var(--ink-3)">определяется по ссылке автоматически</span></div>' +
+      'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none">' +
+      esc(a.text) + '</textarea></div>' +
+    '<div class="frow"><span class="lb">Куда добавить</span>' + dd('add-domain') +
+      '<span style="font-size:12px;color:var(--ink-3)">' +
+        (a.domainId ? 'аккаунты появятся в этом домене' : 'без домена — видно только на главной') +
+      '</span></div>' +
+    '<div class="frow"><span class="lb">Площадка</span>' + dd('add-platform') +
+      '<span style="font-size:12px;color:var(--ink-3)">по ссылке определяется сама</span></div>' +
     '<div class="frow"><span class="lb">Профиль и владелец</span>' +
-      '<span class="sel"><span class="dot" style="background:' + PROFILES[0].color + '"></span>' +
-        '<span class="trunc">' + esc(PROFILES[0].name) + '</span>' + ic('cdown', 11) + '</span>' +
-      '<span class="sel"><span class="trunc">' + esc(OWNERS[0].name) + '</span>' + ic('cdown', 11) + '</span></div>' +
-    '<div style="font-size:12px;color:var(--ink-3)">Уже существующий аккаунт не задваивается: у него обновятся профиль и владелец, а архив или бан снимутся.</div>';
+      dd('add-profile') + dd('add-owner') + '</div>' +
+    '<div class="frow"><span class="lb">Группа и страна</span>' +
+      dd('add-group') + dd('add-country') + '</div>' +
+    '<div style="font-size:12px;color:var(--ink-3)">Уже существующий аккаунт не задваивается: у него обновятся ' +
+      'заполненные здесь поля, а архив или бан снимутся.</div>';
   const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
     '<button class="btn pri" data-act="add-save">Добавить</button>';
   return modalShell('Добавить аккаунты', body, ft);
@@ -3158,6 +3265,18 @@ document.addEventListener('click', function (e) {
     case 'sched-int':
       if (state.sched) state.sched.interval_hours = +v;
       break;
+    case 'sched-mode':
+      if (state.sched) state.sched.mode = v === 'times' ? 'times' : 'interval';
+      break;
+    case 'sched-time': {
+      if (!state.sched) break;
+      const ts = (state.sched.times || []).slice();
+      const i = ts.indexOf(v);
+      if (i >= 0) ts.splice(i, 1); else ts.push(v);
+      ts.sort();
+      state.sched.times = ts;
+      break;
+    }
     case 'sched-skip':
       if (state.sched) state.sched.skip_recent_hours = +v;
       break;
@@ -3170,7 +3289,13 @@ document.addEventListener('click', function (e) {
       break;
     }
     case 'sched-save':  A.saveSchedule(collectSchedule()); state.modal = null; break;
-    case 'add-save':    A.addAccounts((document.getElementById('addlist') || {}).value); state.modal = null; break;
+    case 'add-save': {
+      const el = document.getElementById('addlist');
+      if (el) state.add.text = el.value;
+      A.addAccounts(state.add.text, addExtra(), state.add.platform);
+      state.modal = null;
+      break;
+    }
     case 'dense':      state.dense = !state.dense; break;
     case 'cols-reset': state.cols = DEFAULT_COLS.slice(); break;
     case 'col': {
@@ -3237,7 +3362,15 @@ document.addEventListener('click', function (e) {
       }
       toast('Массовое изменение: ' + v); return;
     }
-    case 'modal':     state.modal = v; break;
+    case 'modal':
+      state.modal = v;
+      // Открывая форму добавления, подставляем домен текущей страницы:
+      // с /reiz логично добавлять в reiz. Поменять всё равно можно.
+      if (v === 'add') {
+        state.add = { text: '', platform: '', domainId: addDefaultDomainId(),
+                      profileId: 0, ownerId: 0, groupId: 0, countryId: 0 };
+      }
+      break;
     // Кнопка в шапке открывает центр обновления. Запуск прогона —
     // отдельное действие внутри окна, чтобы не стартовать сбор по одному клику.
     case 'start-all':
@@ -3304,7 +3437,7 @@ document.addEventListener('click', function (e) {
 /* Действия, которым хватает верхнего слоя (модалки, меню, панель выделения) */
 const OVERLAY_ACTS = new Set([
   'menu', 'modal', 'close', 'scrim', 'run-tab', 'start-all', 'palette',
-  'sched-bool', 'sched-int', 'sched-skip', 'sched-plat',
+  'sched-bool', 'sched-int', 'sched-skip', 'sched-plat', 'sched-mode', 'sched-time',
 ]);
 /* Действия, меняющие список и рельс, но не шапку */
 const MAIN_ACTS = new Set([
@@ -3322,6 +3455,7 @@ document.addEventListener('input', function (e) {
     qTimer = setTimeout(function () { render(); }, 160);
     return;
   }
+  if (e.target.id === 'addlist') { state.add.text = e.target.value; return; }
   if (e.target.id === 'pal')  { state.paletteQ = e.target.value; state.paletteI = 0; render(); }
   if (e.target.id === 'audq') { state.audQ = e.target.value; state.audPage = 1; render(); }
 });
@@ -3960,8 +4094,10 @@ const A = {
     return run(function () { return apiSend('/api/accounts/schedule/', cfg); },
       'Расписание сохранено', { reload: false });
   },
-  addAccounts: function (lines, extra) {
-    const items = parseAccountLines(lines);
+  addAccounts: function (lines, extra, fallbackPlatform) {
+    // Площадка из формы — запасной вариант для строк без ссылки. Раньше её
+    // сюда не передавали, и всё без ссылки уходило в TikTok, что бы ни выбрали.
+    const items = parseAccountLines(lines, fallbackPlatform);
     if (!items.length) { toast('Не разобрал ни одной строки'); return null; }
     return run(async function () {
       let ok = 0; const errs = [];
