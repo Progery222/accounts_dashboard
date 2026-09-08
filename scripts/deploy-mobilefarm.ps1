@@ -4,7 +4,7 @@
   Деплой Accounts Stats на GPU-сервер Mobile Farm (10.20.87.230).
 
 .DESCRIPTION
-  Синхронизация backend + new_frontend + deploy, docker compose prod (без VPS overlay).
+  Синхронизация backend + frontend + deploy, docker compose prod (без VPS overlay).
   Требуется SSH-ключ: один раз `ssh-copy-id atom@10.20.87.230`.
 
 .EXAMPLE
@@ -13,7 +13,7 @@
 .EXAMPLE
   .\scripts\deploy-mobilefarm.ps1 -IdentityFile "$env:USERPROFILE\.ssh\id_ed25519"
 
-  Синхронизирует: backend/, new_frontend/, deploy/, scripts/*.sh и *.py (операционные).
+  Синхронизирует: backend/, frontend/, deploy/, scripts/*.sh и *.py (операционные).
   НЕ синхронизирует: .env, worker_accounts.env, Chrome-профиль, backend/media, БД.
   После деплоя для сессий и ключей: .\scripts\sync-mobilefarm-secrets.ps1
 #>
@@ -86,7 +86,7 @@ try {
     New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
     $backendStage = Join-Path $staging "backend"
-    $newFrontendStage = Join-Path $staging "new_frontend"
+    $frontendStage = Join-Path $staging "frontend"
     $deployStage = Join-Path $staging "deploy"
 
     Write-Step "Copy backend/"
@@ -100,7 +100,7 @@ try {
     Invoke-DeployCommand $robocopyCmd -AllowRobocopyCodes
 
     foreach ($pair in @(
-            @{ Name = "new_frontend"; Src = "new_frontend"; Dst = $newFrontendStage }
+            @{ Name = "frontend"; Src = "frontend"; Dst = $frontendStage }
             @{ Name = "deploy"; Src = "deploy"; Dst = $deployStage }
         )) {
         $srcPath = Join-Path $repoRoot $pair.Src
@@ -140,7 +140,7 @@ try {
     Invoke-DeployCommand "$sshBase `"mkdir -p ${RemoteRoot}`""
 
     Write-Step "Upload"
-    Invoke-DeployCommand "$scpBase -r `"$staging/backend`" `"$staging/new_frontend`" `"$staging/deploy`" `"$staging/scripts`" `"$staging/docker-compose.prod.yml`" `"$staging/docker-compose.prod.mobilefarm.yml`" `"$staging/.env.example`" `"$staging/write_mobilefarm_env.py`" ${remote}:${RemoteRoot}/"
+    Invoke-DeployCommand "$scpBase -r `"$staging/backend`" `"$staging/frontend`" `"$staging/deploy`" `"$staging/scripts`" `"$staging/docker-compose.prod.yml`" `"$staging/docker-compose.prod.mobilefarm.yml`" `"$staging/.env.example`" `"$staging/write_mobilefarm_env.py`" ${remote}:${RemoteRoot}/"
 
     Write-Step "Remove leaked backend/.env on server"
     Invoke-DeployCommand "$sshBase `"rm -f ${RemoteRoot}/backend/.env`""
