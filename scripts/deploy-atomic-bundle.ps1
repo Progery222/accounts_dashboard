@@ -27,4 +27,4 @@ Write-Host "Copying into container $Container ..."
 ssh -i $Identity -o BatchMode=yes $Remote "docker cp $RemoteBundle ${Container}:${ContainerBundle} && docker cp $RemoteHtml ${Container}:${ContainerHtml}"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "OK: http://10.20.87.230:9080/emu-settings (Ctrl+Shift+R)"
+Write-Host "OK: http://10.20.87.230:9080/ (Ctrl+Shift+R)"

@@ -1637,6 +1637,19 @@ function skeleton() {
 }
 
 function emptyState() {
+  // В домене может не быть ни одного аккаунта — тогда советовать «сбросьте
+  // фильтры» бессмысленно: фильтры ни при чём, домен просто пуст.
+  const d = state.domains && state.domains.current;
+  if (DOMAIN && DOMAIN !== DOMAIN_AGGREGATE && d && !anyFilterOn() && !state.q) {
+    return '<div class="card empty">' +
+      '<div style="color:var(--ink-3)">' + ic('users', 28) + '</div>' +
+      '<div style="font-size:15px;font-weight:600">В домене «' + esc(d.name) + '» пока нет аккаунтов</div>' +
+      '<div style="font-size:13px;color:var(--ink-3);max-width:420px">' +
+        'Аккаунты попадают сюда, когда им проставлен этот домен. Сделать это можно ' +
+        'в админке: раздел «Аккаунты», фильтр «Домен» — и проставить прямо в списке.' +
+      '</div>' +
+      '<a class="btn" href="/" style="margin-top:6px">Открыть всю сеть</a></div>';
+  }
   return '<div class="card empty">' +
     '<div style="color:var(--ink-3)">' + ic('search', 28) + '</div>' +
     '<div style="font-size:15px;font-weight:600">Ничего не нашлось</div>' +
@@ -3003,7 +3016,30 @@ function toastEl() {
 /* ============================================================
    13. РЕНДЕР
    ============================================================ */
+/* Адрес вида /чтоугодно разбирается как домен. Если такого домена нет —
+   показываем это прямо, а не всю сеть под плашкой «не найден»: иначе старые
+   ссылки (/emu, /emu-settings) молча открывали бы полный дашборд. */
+function screenUnknownDomain() {
+  const slug = (state.domains && state.domains.unknown) || DOMAIN;
+  const list = (state.domains && state.domains.list) || [];
+  return '<div class="main" style="--page-max:720px">' +
+    '<div class="card empty" style="margin-top:40px">' +
+      '<div style="color:var(--ink-3)">' + ic('alert', 28) + '</div>' +
+      '<div style="font-size:16px;font-weight:600">Раздела «' + esc(slug) + '» нет</div>' +
+      '<div style="font-size:13px;color:var(--ink-3);max-width:440px">' +
+        'Такого домена в базе нет. Возможно, ссылка устарела.' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:center;margin-top:10px">' +
+        '<a class="btn pri" href="/">Вся сеть</a>' +
+        list.map(function (d) {
+          return '<a class="btn" href="/' + esc(d.slug) + '">' + esc(d.name) + '</a>';
+        }).join('') +
+        '<a class="btn" href="/' + DOMAIN_AGGREGATE + '">Эфир</a>' +
+      '</div>' +
+    '</div></div>';
+}
 function screen() {
+  if (state.domains && state.domains.unknown) return screenUnknownDomain();
   switch (state.route) {
     case 'detail':    return screenDetail();
     case 'analytics': return screenAnalytics();
@@ -3447,14 +3483,13 @@ const ACC_QS = 'include_hidden=1&archived=all&banned=all';
 /* ============================================================
    ДОМЕН — самый верхний фильтр
 
-   Домен берём из адреса: сначала первый кусок пути (/reiz), потом поддомен
-   (reiz.example.com). Оба варианта живут одновременно намеренно: приложение
-   стоит за Cloudflare Tunnel, где список публичных хостов заводится в панели
-   Cloudflare, а не на сервере. Пока поддомены там не добавлены, работают
-   пути; после — само заработает и по поддоменам, без правок кода.
+   Домен — это кусок пути. Пустой путь показывает всю сеть, /reiz — только
+   аккаунты reiz. Дальше домен уезжает в заголовке X-Domain на каждый запрос:
+   так не нужно переписывать полсотни адресов, и бэкенд сужает выдачу сам.
 
-   Дальше домен уезжает в заголовке X-Domain на каждый запрос: так не нужно
-   переписывать полсотни адресов, и бэкенд сужает выдачу сам.
+   Поддомены сознательно не разбираем: у dashboard-new.atom-farm.com первая
+   часть хоста — это само приложение, и приняв её за домен, мы получили бы
+   «домен не найден» на главной.
 
    Слово efir зарезервировано: это не арендатор, а сводный эфир по всем
    доменам сразу.
@@ -3464,8 +3499,6 @@ const RESERVED_PATH = { api: 1, admin: 1, media: 1, static: 1, healthz: 1, index
 const DOMAIN = (function () {
   const seg = (location.pathname || '').split('/').filter(Boolean)[0];
   if (seg && !RESERVED_PATH[seg.toLowerCase()] && !/\./.test(seg)) return seg.toLowerCase();
-  const host = (location.hostname || '').split('.');
-  if (host.length > 2) return host[0].toLowerCase();
   return '';
 })();
 /* Префикс для ссылок внутри интерфейса, чтобы переходы не теряли домен. */
@@ -3672,7 +3705,10 @@ async function loadDomains() {
     const cur = (d.domains || []).filter(function (x) { return x.slug === d.current; })[0] || null;
     state.domains = { current: cur, unknown: d.unknown || null, list: d.domains || [],
                       unassigned: d.unassigned_accounts || 0 };
+    // Не только шапку: от ответа зависит и сам экран — на неизвестном адресе
+    // вместо списка аккаунтов показывается «такого раздела нет».
     paintChrome();
+    paintBody();
   } catch (e) { state.domains = null; }
 }
 async function loadViewsAnchors() {

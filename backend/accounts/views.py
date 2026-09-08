@@ -4227,8 +4227,8 @@ VC_METRICS = {
 }
 
 
-def _totals_as_of(day):
-    """Сетевые итоги на конец дня ``day`` — по последнему снимку каждого аккаунта.
+def _totals_as_of(day, scope=None):
+    """Итоги на конец дня ``day`` — по последнему снимку каждого аккаунта.
 
     Просто просуммировать ``AccountSnapshot`` за дату нельзя: строки там только
     по обновлённым в этот день аккаунтам, поэтому сумма за день — это сумма по
@@ -4238,10 +4238,19 @@ def _totals_as_of(day):
 
     Проверено сверкой: для просмотров результат совпадает с
     ``AutoRefreshPoint.view_count_total``, где настоящий сетевой итог уже есть.
+
+    ``scope`` сужает счёт до домена: иначе на /reiz с нулём аккаунтов счётчик
+    показывал бы итоги всей сети — числа, которым на этом экране взяться
+    неоткуда.
     """
+    qs = AccountSnapshot.objects.filter(date__lte=day)
+    if scope is not None:
+        if scope.unknown:
+            return (None, 0)      # устаревшая ссылка — считать нечего
+        if scope.scoped:
+            qs = qs.filter(account__domain=scope.domain)
     rows = (
-        AccountSnapshot.objects.filter(date__lte=day)
-        .order_by("account_id", "-date")
+        qs.order_by("account_id", "-date")
         .distinct("account_id")
         .values("account_id", *VC_METRICS.values())
     )
@@ -4313,25 +4322,30 @@ def views_anchors(request):
             growth = max(0, now_val - prev_val)
         return {"prev": prev_val, "now": now_val, "growth": growth, "source": source}
 
+    scope = domains.resolve(request)
     metrics = {}
+    at_now = at_prev = None
 
-    views_now, at_now = _views_total_at(window_start)
-    views_prev, at_prev = _views_total_at(prev_start)
-    metrics["views"] = pair(views_now, views_prev, "auto_refresh_point")
-
-    # Остальные показатели — по снимкам, с точностью до дня.
+    # Все показатели — по снимкам, с точностью до дня.
     day_now = window_start.date()
     day_prev = prev_start.date()
-    totals_now, n_now = _totals_as_of(day_now)
-    totals_prev, n_prev = _totals_as_of(day_prev)
+    totals_now, n_now = _totals_as_of(day_now, scope)
+    totals_prev, n_prev = _totals_as_of(day_prev, scope)
     for key in VC_METRICS:
-        if key == "views":
-            continue
         metrics[key] = pair(
             totals_now[key] if totals_now else None,
             totals_prev[key] if totals_prev else None,
             "account_snapshot",
         )
+
+    # Без домена просмотрам есть источник точнее: в AutoRefreshPoint у замера
+    # есть время, поэтому опора буквально на 10:00, а не «на конец дня».
+    # По доменам он не разбит, поэтому внутри домена остаются снимки.
+    if not scope.scoped and not scope.unknown:
+        views_now, at_now = _views_total_at(window_start)
+        views_prev, at_prev = _views_total_at(prev_start)
+        if views_prev is not None:
+            metrics["views"] = pair(views_now, views_prev, "auto_refresh_point")
 
     return Response(
         {

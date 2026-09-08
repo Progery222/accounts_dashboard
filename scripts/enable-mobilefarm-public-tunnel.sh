@@ -64,7 +64,6 @@ chmod 600 "$URL_FILE" 2>/dev/null || true
 echo ""
 echo "OK: dashboard is public at:"
 echo "  ${PUBLIC_URL}"
-echo "  ${PUBLIC_URL}/emu-settings"
 echo ""
 echo "Saved to: ${URL_FILE}"
 echo "Django already allows *.trycloudflare.com (ALLOWED_HOSTS / CSRF)."

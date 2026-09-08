@@ -1,26 +1,19 @@
 """Определение текущего домена по адресу запроса и сужение выборок по нему.
 
-Домен можно задать двумя способами, и оба работают одновременно:
+Домен задаётся **куском пути**: ``/reiz`` — только аккаунты reiz, пустой путь
+— все аккаунты. Фронт передаёт разобранное значение заголовком ``X-Domain``,
+чтобы не переписывать полсотни адресов запросов.
 
-- **путём** — ``/reiz/api/accounts/`` или заголовком ``X-Domain: reiz``;
-- **поддоменом** — ``reiz.example.com``.
-
-Так сделано намеренно. Приложение стоит за Cloudflare Tunnel, где список
-публичных хостов живёт в панели Cloudflare, а не на сервере: пока поддомены
-там не заведены, всё работает по путям, а после — само заработает и по
-поддоменам, без правок кода.
+Поддомены сознательно не разбираем. Кроме того, что так попросили, на
+``dashboard-new.atom-farm.com`` первая часть хоста — это само приложение, а не
+арендатор: приняв её за домен, мы получили бы «домен не найден» на главной.
 
 Отдельно стоит ``efir``: это не арендатор, а сводный эфир по всем доменам.
 """
 
-from django.db.models import Q
-
 from .models import AGGREGATE_DOMAIN_SLUG, Domain
 
 __all__ = ["AGGREGATE_DOMAIN_SLUG", "DomainScope", "resolve", "narrow", "slug_from_request"]
-
-#: Хосты, у которых первая часть — не поддомен-арендатор, а само приложение.
-_BARE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "testserver"}
 
 
 class DomainScope:
@@ -53,7 +46,7 @@ class DomainScope:
 
 
 def slug_from_request(request):
-    """Достаём slug из адреса: заголовок, путь, затем поддомен."""
+    """Достаём slug: сначала заголовок от фронта, потом первый кусок пути."""
     header = (request.headers.get("X-Domain") or "").strip().lower()
     if header:
         return header
@@ -64,13 +57,6 @@ def slug_from_request(request):
         first = path.split("/", 1)[0].lower()
         if first and first not in {"api", "admin", "media", "static", "healthz"}:
             return first
-
-    host = (request.get_host() or "").split(":")[0].lower()
-    if host and host not in _BARE_HOSTS:
-        parts = host.split(".")
-        # Поддомен есть только когда частей больше двух: reiz.example.com.
-        if len(parts) > 2:
-            return parts[0]
     return ""
 
 
@@ -90,12 +76,19 @@ def resolve(request):
 
 
 def narrow(queryset, scope, field="domain"):
-    """Сужаем выборку до домена.
+    """Сужаем выборку до домена — строго.
 
-    Записи без домена («не распределено») видны везде — иначе миграция на
-    боевой базе разом спрятала бы всё, что уже есть, и дашборд стал бы пустым.
-    По мере раскладывания по доменам каждый из них сужается сам собой.
+    ``/reiz`` показывает только записи reiz. Нераспределённые (домен пустой)
+    в домен не попадают: они видны на корне, где показывается всё.
+
+    Неизвестный кусок адреса не отдаёт ничего. Отдавать в этом случае всю сеть
+    опаснее: устаревшая ссылка вроде ``/emu`` молча показала бы полный дашборд,
+    как будто так и задумано.
     """
-    if scope is None or not scope.scoped:
+    if scope is None:
         return queryset
-    return queryset.filter(Q(**{field: scope.domain}) | Q(**{f"{field}__isnull": True}))
+    if scope.unknown:
+        return queryset.none()
+    if not scope.scoped:
+        return queryset
+    return queryset.filter(**{field: scope.domain})
