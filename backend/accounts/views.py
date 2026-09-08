@@ -4173,6 +4173,84 @@ def auto_refresh_telegram_test(request):
         )
 
 
+#: Час по местному времени (Europe/Moscow), на котором режутся сутки счётчика.
+VIEWS_ANCHOR_HOUR = 10
+
+
+def _views_total_at(moment):
+    """Суммарные просмотры сети на момент ``moment`` — последняя точка не позже него.
+
+    Берём ``AutoRefreshPoint``: только там ``view_count_total`` — настоящая сумма
+    по всей сети. ``AccountSnapshot`` для этого не годится: в нём строки только
+    по обновлённым за день аккаунтам, поэтому сумма за день — это сумма по
+    случайному подмножеству, и разности соседних дней бессмысленны.
+
+    Возвращает ``(total, measured_at)`` или ``(None, None)``, если точек до
+    этого момента ещё нет.
+    """
+    point = (
+        AutoRefreshPoint.objects.filter(measured_at__lte=moment)
+        .order_by("-measured_at")
+        .values("view_count_total", "measured_at")
+        .first()
+    )
+    if not point:
+        return (None, None)
+    return (point["view_count_total"], point["measured_at"])
+
+
+@api_view(["GET"])
+def views_anchors(request):
+    """Две опорные точки для «живого» счётчика просмотров на фронте.
+
+    Сутки счётчика идут с 10:00 до 10:00 по Москве. Внутри текущих суток фронт
+    ведёт число от ``views_prev`` (вчера в 10:00) к ``views_now`` (сегодня в
+    10:00) — то есть показывает измеренный прирост прошлых суток, растянутый по
+    времени. Поэтому видимое число отстаёт от базы примерно на сутки и никогда
+    её не обгоняет.
+
+    ``growth`` может быть нулём — значит, за прошлые сутки прогонов не было и
+    просмотры не менялись. Тогда счётчик честно стоит на месте: дорисовывать
+    движение, которого не было, значит показывать выдуманные цифры.
+    """
+    now = timezone.localtime()
+    window_start = now.replace(hour=VIEWS_ANCHOR_HOUR, minute=0, second=0, microsecond=0)
+    if now < window_start:
+        # До 10:00 идут ещё вчерашние сутки счётчика.
+        window_start -= datetime.timedelta(days=1)
+    window_end = window_start + datetime.timedelta(days=1)
+    prev_start = window_start - datetime.timedelta(days=1)
+
+    views_now, at_now = _views_total_at(window_start)
+    views_prev, at_prev = _views_total_at(prev_start)
+
+    # Нет данных на начало прошлых суток — прироста не знаем, движения не будет.
+    if views_now is None:
+        views_now = views_prev
+    if views_prev is None or views_now is None:
+        growth = 0
+    else:
+        # Отрицательный прирост (аккаунты удалили) не отматываем назад.
+        growth = max(0, views_now - views_prev)
+
+    return Response(
+        {
+            "tz": str(timezone.get_current_timezone()),
+            "anchor_hour": VIEWS_ANCHOR_HOUR,
+            # Чтобы фронт поправил свои часы: при сбитых локальных часах он
+            # иначе покажет число из другого места суток.
+            "server_now": now.isoformat(),
+            "window_start": window_start.isoformat(),
+            "window_end": window_end.isoformat(),
+            "views_prev": views_prev,
+            "views_now": views_now,
+            "growth": growth,
+            "measured_prev_at": at_prev.isoformat() if at_prev else None,
+            "measured_now_at": at_now.isoformat() if at_now else None,
+        }
+    )
+
+
 @api_view(["GET"])
 def auto_refresh_series(request):
     """

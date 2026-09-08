@@ -1070,6 +1070,7 @@ const state = {
   audQ: '', audPage: 1,
   tvScene: 0, tvPlay: true, tvTimer: null,
   runError: false,
+  vc: null,            // якоря живого счётчика просмотров, см. loadViewsAnchors
 };
 function isNarrow() { return window.matchMedia('(max-width: 760px)').matches; }
 function effView() { return isNarrow() ? 'cards' : state.view; }
@@ -1470,7 +1471,7 @@ function rail() {
 /* ============================================================
    7. ЭКРАН «АККАУНТЫ»
    ============================================================ */
-function kpiCard(label, value, d, series, compact, total, tone, icon) {
+function kpiCard(label, value, d, series, compact, total, tone, icon, live) {
   const n = tone || 1;
   const style = '--tone:var(--m' + n + ');--tone-soft:var(--m' + n + 's)';
   if (state.booting) {
@@ -1492,7 +1493,7 @@ function kpiCard(label, value, d, series, compact, total, tone, icon) {
   return '<div class="card kpi" style="' + style + '">' +
     '<div class="hd"><span class="ico">' + ic(icon || 'users', 13) + '</span>' +
       '<span class="lbl">' + label + '</span></div>' +
-    '<div class="val">' + value + '</div>' +
+    '<div class="val"' + (live ? ' data-vc="' + live + '" data-vc-fmt="full"' : '') + '>' + value + '</div>' +
     '<div class="ft"><span style="display:flex;align-items:baseline;gap:6px;min-width:0">' +
       deltaEl(d, compact) + pct + '</span>' +
       (series ? spark(series, d >= 0, 'var(--tone)') : '') + '</div></div>';
@@ -1525,7 +1526,9 @@ function screenAccounts() {
 
     '<div class="kpis">' +
       kpiCard('Подписчики', fmt(t.f), t.fd, fs, false, t.f, 1, 'users') +
-      kpiCard('Просмотры', comp(t.v), t.vd, null, true, t.v, 2, 'eye') +
+      // Просмотры показываем полным числом, а не «19 млн»: в сжатом виде
+      // прибавка за тик не видна, и живой счётчик теряет смысл.
+      kpiCard('Просмотры', fmt(vcTotal() !== null ? vcTotal() : t.v), t.vd, null, true, t.v, 2, 'eye', 'views') +
       kpiCard('Лайки', comp(t.l), t.ld, null, true, t.l, 3, 'heart') +
       kpiCard('Посты', fmt(t.p), t.pd, null, false, t.p, 4, 'rows') +
       kpiCard('Клики по ссылке', fmt(t.c), t.cd, null, false, t.c, 5, 'link') +
@@ -2381,9 +2384,11 @@ function screenTV() {
 
   /* --- сцена «Сеть»: только крупные цифры ---------------------------
      Экран на стене читают с нескольких метров, поэтому здесь без графиков. */
+  const vcNow = vcTotal();
   const netMetrics = [
     // Знак ставим по знаку дельты: приклеенный «+» давал «+−1» на падении.
-    ['Просмотры', comp(t.v), signed(t.vd, true), 'var(--tvm1)'],
+    // Просмотры — полным числом, иначе прибавка за тик не видна.
+    ['Просмотры', fmt(vcNow !== null ? vcNow : t.v), signed(t.vd, true), 'var(--tvm1)', 'views'],
     ['Лайки', comp(t.l), signed(t.ld, true), 'var(--tvm2)'],
     ['Посты', fmt(t.p), signed(t.pd), 'var(--tvm3)'],
     ['Аккаунтов', fmt(live.length), PLATFORMS.filter(function (p) {
@@ -2406,7 +2411,8 @@ function screenTV() {
         netMetrics.map(function (m) {
           return '<div style="min-width:0;flex:1 1 0">' +
             '<div class="tv-lbl">' + m[0] + '</div>' +
-            '<div class="tv-num tv-mid-xl" style="margin-top:clamp(4px,1.2vh,12px);color:' + m[3] + '">' + m[1] + '</div>' +
+            '<div class="tv-num tv-mid-xl"' + (m[4] ? ' data-vc="' + m[4] + '" data-vc-fmt="full"' : '') +
+              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[3] + '">' + m[1] + '</div>' +
             '<div class="tv-num trunc" style="font-size:clamp(12px,1.9vh,20px);color:var(--tvdim);margin-top:clamp(3px,0.9vh,8px)">' + m[2] + '</div>' +
           '</div>';
         }).join('') +
@@ -2625,6 +2631,7 @@ function tvPaint() {
   });
   const name = document.getElementById('tv-name');
   if (name) name.textContent = tvName() + ' · колесо мыши или ← →';
+  vcPaint();
   tvProgress();
 }
 function tvProgress() {
@@ -3001,6 +3008,7 @@ function paintBody() {
   const at = document.activeElement && document.activeElement.selectionStart;
   el.innerHTML = rail() + screen();
   restoreFocus(focus, at);
+  vcPaint();          // цифры счётчика собраны из state, но тик мог уйти вперёд
   saveUi();
 }
 function paintOverlay() {
@@ -3385,12 +3393,19 @@ let LIVE = false;
    Включается флагом window.__DEMO__ (его ставит сборка автономного
    прототипа) или параметром ?demo=1. */
 const DEMO = !!window.__DEMO__ || /[?&]demo=1/.test(location.search);
-const API_PORT = '8020';            // порт Django; переопределяется ключом as_api_base
+const API_PORT = '8020';            // порт Django локально; переопределяется ключом as_api_base
 const API_BASE = (function () {
   try { const o = localStorage.getItem('as_api_base'); if (o) return o.replace(/\/+$/, ''); } catch (e) {}
   if (location.protocol === 'file:') return 'http://127.0.0.1:' + API_PORT;
   if (location.port === API_PORT) return '';
-  return location.protocol + '//' + location.hostname + ':' + API_PORT;
+  // Dev-статика (:5174/:5173) → Django на API_PORT. Прод (nginx :80/:9082/:443) — same-origin /api.
+  const p = String(location.port || '');
+  const localUi = p === '5174' || p === '5173';
+  const loopback = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+  if (localUi || (loopback && p && p !== '80' && p !== '443' && p !== '9082' && p !== '9080')) {
+    return location.protocol + '//' + location.hostname + ':' + API_PORT;
+  }
+  return '';
 })();
 const ACC_QS = 'include_hidden=1&archived=all&banned=all';
 
@@ -3523,6 +3538,112 @@ async function pollRun() {
     state.run.failed = s.failed_accounts || 0;
     if (was !== state.run.on) render(); else paintRun();
   } catch (e) {}
+}
+
+/* ============================================================
+   ЖИВОЙ СЧЁТЧИК ПРОСМОТРОВ
+
+   Сутки счётчика идут с 10:00 до 10:00 по Москве. Внутри текущих суток
+   показанное число едет от «вчера в 10:00» к «сегодня в 10:00»: то есть мы
+   растягиваем по времени прирост, который уже измерен и лежит в базе. Отсюда
+   два свойства — число всегда отстаёт примерно на сутки и никогда не обгоняет
+   базу.
+
+   Прибавка на каждый десятисекундный тик не одинаковая: 8640 тиков получают
+   случайные веса, и прирост делится по ним. Поэтому идёт +1, +7, +13, а на
+   малом приросте часть тиков нулевая. Случайность детерминированная — сеется
+   от даты окна, поэтому во всех вкладках и у всех зрителей число совпадает и
+   не сбрасывается при перезагрузке.
+
+   Прирост может быть нулём: значит, за прошлые сутки прогонов не было.
+   Тогда счётчик стоит. Дорисовывать движение, которого не было, — значит
+   показывать выдуманные цифры.
+   ============================================================ */
+const VC_TICK_MS = 10000;
+const VC_TICKS = 24 * 60 * 60 * 1000 / VC_TICK_MS;   // 8640 тиков в сутках
+let vcTimer = null;
+
+function vcSeed(s) {                       // строка окна -> 32-битное зерно
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function vcRand(seed) {                    // mulberry32
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+/* Накопленная прибавка по тикам. Веса положительные, поэтому ряд не убывает —
+   счётчик не может пойти назад. В последнем тике сумма ровно равна приросту. */
+function vcSteps(growth, seed) {
+  const cum = new Int32Array(VC_TICKS + 1);
+  if (growth <= 0) return cum;
+  const rnd = vcRand(seed);
+  const w = new Float64Array(VC_TICKS);
+  let sum = 0;
+  for (let i = 0; i < VC_TICKS; i++) { w[i] = 0.15 + rnd() * 1.7; sum += w[i]; }
+  let acc = 0;
+  for (let i = 0; i < VC_TICKS; i++) {
+    acc += w[i];
+    cum[i + 1] = Math.round(growth * acc / sum);
+  }
+  cum[VC_TICKS] = growth;
+  return cum;
+}
+async function loadViewsAnchors() {
+  if (DEMO || !LIVE) return;
+  try {
+    const a = await api('/api/accounts/views-anchors/');
+    const start = Date.parse(a.window_start);
+    const prev = a.views_prev;
+    if (!isFinite(start) || prev === null || prev === undefined) { state.vc = null; return; }
+    state.vc = {
+      start: start,
+      end: Date.parse(a.window_end),
+      prev: prev,
+      growth: Math.max(0, a.growth || 0),
+      // Расхождение часов клиента и сервера: без поправки счётчик покажет
+      // число из другого места суток.
+      skew: a.server_now ? Date.parse(a.server_now) - Date.now() : 0,
+      cum: vcSteps(Math.max(0, a.growth || 0), vcSeed(a.window_start)),
+    };
+    vcStart();
+  } catch (e) { state.vc = null; }
+}
+/* Текущее показываемое число, либо null — тогда рисуем как раньше, из базы. */
+function vcTotal() {
+  const v = state.vc;
+  if (!v) return null;
+  const k = Math.floor((Date.now() + v.skew - v.start) / VC_TICK_MS);
+  if (k < 0) return null;
+  if (k >= VC_TICKS) return v.prev + v.growth;   // окно кончилось, ждём новых якорей
+  return v.prev + v.cum[k];
+}
+/* Обновляем только сами цифры, не пересобирая слой: перерисовка раз в 10
+   секунд сбрасывала бы выделение, фокус и позицию списка. */
+function vcPaint() {
+  const n = vcTotal();
+  if (n === null) return;
+  const els = document.querySelectorAll('[data-vc="views"]');
+  for (let i = 0; i < els.length; i++) {
+    const s = els[i].dataset.vcFmt === 'comp' ? comp(n) : fmt(n);
+    if (els[i].textContent !== s) els[i].textContent = s;
+  }
+}
+function vcStart() {
+  clearInterval(vcTimer);
+  if (!state.vc) return;
+  vcPaint();
+  vcTimer = setInterval(function () {
+    const v = state.vc;
+    // Окно доехало до 10:00 — берём новые якоря на следующие сутки.
+    if (v && Date.now() + v.skew >= v.end) { loadViewsAnchors(); return; }
+    vcPaint();
+  }, VC_TICK_MS);
 }
 
 async function loadSessionsLive() {
@@ -3767,6 +3888,7 @@ async function bootLive() {
     clearInterval(pollTimer);
     pollTimer = setInterval(pollRun, 4000);
     loadSessionsLive();
+    loadViewsAnchors();
   } catch (e) {
     LIVE = false;
     state.apiError = String(e.message || e);
