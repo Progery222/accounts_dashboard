@@ -3719,6 +3719,14 @@ function vcSet(el, s) {
     return;
   }
   const cells = odo.children;
+  // Если меняется сразу много разрядов — это не тик счётчика, а скачок
+  // (первая подмена числа из базы на живое). Крутить всё разом некрасиво:
+  // проще переставить без анимации.
+  let changed = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (isDigit(s[i]) && (+cells[i].dataset.i) % 10 !== +s[i]) changed++;
+  }
+  if (changed > 3) { vcBuild(el, s); return; }
   for (let i = 0; i < s.length; i++) {
     if (isDigit(s[i])) vcRoll(cells[i], +s[i]);
   }
@@ -3777,6 +3785,18 @@ function vcRoll(cell, next) {
   const target = next > cur ? next : next + 10;
   cell.dataset.i = target;
   strip.style.transform = 'translateY(-' + target + 'em)';
+  // Досылаем цифру на место, даже если переход не отработал. В фоновой или
+  // притормаживаемой вкладке анимации не идут вовсе — а для экрана на стене
+  // это обычный режим, и разряд остался бы застывшим на полпути.
+  clearTimeout(cell._settle);
+  cell._settle = setTimeout(function () {
+    if (+cell.dataset.i !== target) return;      // уже уехал дальше
+    strip.style.transition = 'none';
+    strip.style.transform = 'translateY(-' + (target % 10) + 'em)';
+    void strip.offsetWidth;
+    strip.style.transition = '';
+    cell.dataset.i = target % 10;
+  }, 900);
 }
 function vcStart() {
   clearInterval(vcTimer);
