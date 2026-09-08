@@ -422,7 +422,10 @@ _ACCOUNT_REFRESH_SAVE_FIELDS = (
     "updated_at",
 )
 _ACCOUNT_ASSIGNMENT_FIELDS = frozenset({
-    "profile", "owner", "group", "country", "profile_unavailable", "is_archived", "is_banned",
+    # Смена домена — такое же назначение, как профиль: «Обновлён» она двигать
+    # не должна, это не сбор статистики.
+    "domain", "profile", "owner", "group", "country", "profile_unavailable",
+    "is_archived", "is_banned",
 })
 
 
@@ -435,6 +438,8 @@ def _account_assignment_only_validated(validated_data: dict) -> bool:
 def _account_assignment_update_fields(validated_data: dict) -> list[str]:
     """Имена колонок для update_fields (FK — *_id, не source-имена serializer)."""
     out: list[str] = []
+    if "domain" in validated_data:
+        out.append("domain_id")
     if "profile" in validated_data:
         out.append("profile_id")
     if "owner" in validated_data:
@@ -3120,7 +3125,7 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-update")
     def bulk_update(self, request):
-        """Массово обновить поля выбранных аккаунтов (профиль/владелец/группа/страна/архив)."""
+        """Массово обновить поля выбранных аккаунтов (домен/профиль/владелец/группа/страна/архив)."""
         id_ints = _parse_account_ids_list(request.data.get("ids"))
         if id_ints is None:
             return Response(
@@ -3138,6 +3143,9 @@ class AccountViewSet(viewsets.ModelViewSet):
         update_fields: list[str] = []
 
         fk_map = (
+            # Домен здесь же: это такое же назначение, как профиль или владелец,
+            # и раскладывать аккаунты по доменам надо теми же массовыми действиями.
+            ("domain_id", "domain_id", Domain),
             ("profile_id", "profile_id", Profile),
             ("owner_id", "owner_id", Owner),
             ("group_id", "group_id", AccountGroup),
@@ -4201,7 +4209,7 @@ def domain_list(request):
     """
     scope = domains.resolve(request)
     rows = [
-        {"slug": d.slug, "name": d.name, "color": d.color,
+        {"id": d.id, "slug": d.slug, "name": d.name, "color": d.color,
          "accounts": d.accounts.count()}
         for d in Domain.objects.filter(is_active=True)
     ]

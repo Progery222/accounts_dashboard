@@ -399,10 +399,13 @@ svg { flex-shrink: 0; }
    CSS-переменные не интерполируются, поэтому с ними переход не запускается
    вовсе — цифра прыгала бы, и transitionend не приходил. */
 .odo { display: inline-flex; align-items: flex-start; }
-.odo-c { display: block; height: 1em; overflow: hidden; }
+/* line-height жёстко 1: шаг ленты — ровно 1em, а у эфира на .tv-hero-xl
+   стоит .95, и без этого глиф внутри каждой ячейки съезжал на .05em,
+   так что в разряде проступала соседняя цифра. */
+.odo-c { display: block; height: 1em; overflow: hidden; line-height: 1; }
 .odo-s { display: block; transform: translateY(0);
          transition: transform .6s cubic-bezier(.22, .61, .36, 1); }
-.odo-s > i { display: block; height: 1em; font-style: normal; }
+.odo-s > i { display: block; height: 1em; line-height: 1; font-style: normal; }
 @media (prefers-reduced-motion: reduce) { .odo-s { transition: none; } }
 .kpi .hd { display: flex; align-items: center; gap: 8px; }
 .kpi .hd .lbl { color: var(--tone); }
@@ -678,9 +681,9 @@ svg { flex-shrink: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .tv::after { animation: none } }
 .tv-bar { position: absolute; top: 0; left: 0; right: 0; height: 64px; display: flex; align-items: center; gap: 16px; padding: 0 40px; z-index: 3; }
-.tv-foot { position: absolute; bottom: 0; left: 0; right: 0; height: 66px; display: flex; align-items: center; gap: 14px; padding: 0 40px; z-index: 3; }
-.tv-scene { position: absolute; inset: 64px 40px 66px; opacity: 0; transform: scale(.988); transition: opacity 1.1s ease, transform 1.1s ease; pointer-events: none; z-index: 2; overflow: hidden; }
-.tv-scene.on { opacity: 1; transform: none; pointer-events: auto; }
+/* Экран один: снизу больше ничего не стоит, поэтому цифрам отдана вся высота
+   до нижнего края, а не до бывшей ленты. */
+.tv-scene { position: absolute; inset: 64px 40px 40px; z-index: 2; overflow: hidden; }
 .tv-num { font-family: 'IBM Plex Mono', monospace; font-variant-numeric: tabular-nums; letter-spacing: -.035em; line-height: 1; }
 .tv-lbl { font-size: clamp(9px, 1.3vh, 12px); font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--tvdim); }
 .tv-hero { font-size: var(--tv-hero); font-weight: 500; }
@@ -691,14 +694,6 @@ svg { flex-shrink: 0; }
 .tv-metrics { display: flex; gap: clamp(20px, 3.4vw, 46px); margin-top: var(--tv-gap); flex-wrap: wrap; }
 .tv-btn { width: 34px; height: 34px; border-radius: 10px; border: 1px solid var(--tvborder); color: var(--tvdim); display: flex; align-items: center; justify-content: center; }
 .tv-btn:hover { background: var(--tvtrack); color: var(--tvink); }
-.tv-dot { width: 26px; height: 4px; border-radius: 2px; background: var(--tvborder); }
-.tv-dot.on { background: var(--tvaccent); }
-/* Полоса внизу показывает, сколько осталось до смены сцены */
-.tv-prog { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--tvline); z-index: 4; }
-.tv-prog i { display: block; height: 2px; width: 0; background: var(--tvaccent); }
-.tv-prog.run i { animation: tvProg 7s linear forwards; }
-@keyframes tvProg { from { width: 0 } to { width: 100% } }
-@media (prefers-reduced-motion: reduce) { .tv-prog.run i { animation: none; width: 100% } }
 /* Строка сравнения площадок: имя — столбец — значения. Столбец тонкий,
    торец скруглён, между строками 2px фона, значения подписаны напрямую. */
 .tv-prow {
@@ -745,8 +740,8 @@ svg { flex-shrink: 0; }
   .mrow > :nth-child(n+4) { display: none; }
   .modal-bd, .modal-hd, .modal-ft { padding-left: 14px; padding-right: 14px; }
   .scrim { padding: 20px 10px; }
-  .tv-bar, .tv-foot { padding: 0 18px; }
-  .tv-scene { inset: 60px 18px 62px; }
+  .tv-bar { padding: 0 18px; }
+  .tv-scene { inset: 60px 18px 18px; }
 }
 </style>
 </head>
@@ -1082,7 +1077,7 @@ const state = {
   postSort: 'vd', postView: 'list',
   sched: null, schedError: null,
   audQ: '', audPage: 1,
-  tvScene: 0, tvPlay: true, tvTimer: null,
+  tvTimer: null,          // остался только для clearInterval при выходе из эфира
   runError: false,
   vc: null,            // якоря живого счётчика просмотров, см. loadViewsAnchors
   domains: null,       // {current, unknown, list} — см. loadDomains
@@ -1555,6 +1550,13 @@ function screenAccounts() {
   return '<div class="main' + (fixed ? ' fixed' : '') + '" style="--page-max:1720px">' +
     '<div class="page-hd"><h1>Аккаунты</h1><span class="count">' + fmt(list.length) + '</span>' +
       '<div class="grow"></div>' +
+      // «Действия» рядом с обновлением: массовые операции над выделенным,
+      // включая перенос в домен, без ухода в нижнюю панель.
+      '<button class="btn' + (state.menu === 'acts:' ? ' on' : '') + '" data-act="menu" data-v="acts:" ' +
+        'aria-haspopup="listbox" aria-expanded="' + (state.menu === 'acts:') + '">' +
+        ic('dots', 13) + 'Действия' +
+        (state.selected.size ? '<span class="count">' + state.selected.size + '</span>' : '') +
+      '</button>' +
       '<button class="btn" data-act="start-all">' + ic('refresh', 13) + 'Обновление</button>' +
       '<button class="btn pri" data-act="modal" data-v="add">' + ic('plus', 13) + 'Добавить</button>' +
     '</div>' +
@@ -1673,7 +1675,59 @@ const SORT_OPTIONS = [
   ['f', 'Подписчики'], ['v', 'Просмотры'], ['l', 'Лайки'], ['p', 'Посты'],
   ['u', 'Обновлён'], ['name', 'Имя'],
 ];
+/* Меню строки и «Действия» в шапке — это списки команд, а не выбор одного
+   значения. Отличаются от остальных меню тем, что у пунктов есть своё
+   действие; галочку в них не рисуем. Ключи составные: 'row:12', 'rowdom:12'. */
+function menuKind(key) { return String(key).split(':')[0]; }
+function menuArg(key)  { return String(key).split(':')[1] || ''; }
+const ACTION_MENUS = { row: 1, rowdom: 1, acts: 1, actsdom: 1 };
+
+/* Домены для подменю «Перенести в домен». Пока список не приехал — пусто,
+   и пункт не показываем: лучше не рисовать заведомо пустое меню. */
+function domainItems(curId) {
+  const list = (state.domains && state.domains.list) || [];
+  const items = list.map(function (d) {
+    return { v: 'dom|' + d.id, l: d.name, dot: d.color, on: curId === d.id };
+  });
+  if (items.length) items.push({ v: 'dom|0', l: 'Убрать домен', on: !curId });
+  return items;
+}
+
 function menuDef(key) {
+  const kind = menuKind(key);
+  if (kind === 'row' || kind === 'rowdom') {
+    const a = ACCOUNTS.filter(function (x) { return x.id === +menuArg(key); })[0];
+    if (!a) return { cur: '', items: [] };
+    if (kind === 'rowdom') {
+      return { title: 'Перенести в домен', cur: '', items: domainItems(a.domainId) };
+    }
+    const items = [
+      { v: 'open', l: 'Открыть карточку' },
+      { v: 'refresh', l: 'Обновить сейчас' },
+    ];
+    if (a.url) items.push({ v: 'site', l: 'Открыть на площадке' });
+    if (domainItems(a.domainId).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
+    items.push({ v: 'archive', l: a.archived ? 'Вернуть из архива' : 'Архивировать' });
+    items.push({ v: 'ban', l: a.banned ? 'Снять бан' : 'Забанить' });
+    items.push({ v: 'delete', l: 'Удалить', danger: true });
+    return { title: '@' + a.username, cur: '', items: items };
+  }
+  if (kind === 'acts' || kind === 'actsdom') {
+    const n = state.selected.size;
+    if (kind === 'actsdom') return { title: 'Перенести в домен', cur: '', items: domainItems(null) };
+    if (!n) {
+      return { title: 'Действия', cur: '', items: [{ v: 'nosel', l: 'Сначала выберите аккаунты', muted: true }] };
+    }
+    const items = [{ v: 'refresh', l: 'Обновить выбранные (' + n + ')' }];
+    if (domainItems(null).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
+    items.push({ v: 'archive', l: 'В архив' });
+    items.push({ v: 'unarchive', l: 'Вернуть из архива' });
+    items.push({ v: 'ban', l: 'Забанить' });
+    items.push({ v: 'unban', l: 'Снять бан' });
+    items.push({ v: 'clear', l: 'Снять выделение' });
+    items.push({ v: 'delete', l: 'Удалить выбранные', danger: true });
+    return { title: 'Действия · выбрано ' + n, cur: '', items: items };
+  }
   switch (key) {
     case 'theme': return {
       title: 'Тема', cur: state.theme,
@@ -1705,7 +1759,68 @@ function menuDef(key) {
   }
   return { cur: '', items: [] };
 }
+/* Команды меню строки и «Действий». Необратимое спрашиваем тем же
+   подтверждением, что и массовые действия, — иначе удалить можно случайно. */
+function applyRowMenu(key, v) {
+  const kind = menuKind(key);
+  const id = +menuArg(key);
+  const a = ACCOUNTS.filter(function (x) { return x.id === id; })[0];
+  if (!a) { state.menu = null; return; }
+  if (kind === 'rowdom' || v.indexOf('dom|') === 0) {
+    const domId = +v.split('|')[1] || null;
+    state.menu = null;
+    A.setDomain([id], domId);
+    return;
+  }
+  state.menu = null;
+  switch (v) {
+    case 'open':    state.route = 'detail'; state.detailId = id; state.detailTab = 'overview'; break;
+    case 'refresh': A.refreshOne(id); return;
+    case 'site':    window.open(a.url, '_blank', 'noopener'); return;
+    case 'domain':  state.menu = 'rowdom:' + id; return;
+    case 'archive': A.bulkUpdate([id], { is_archived: !a.archived },
+                      a.archived ? 'Вернули из архива' : 'В архиве'); return;
+    case 'ban':     A.bulkUpdate([id], { is_banned: !a.banned },
+                      a.banned ? 'Бан снят' : 'Забанен'); return;
+    case 'delete':
+      askConfirm({
+        title: 'Удалить аккаунт?', text: 'Аккаунт @' + esc(a.username) + ' и его история будут удалены без возможности вернуть.',
+        ok: 'Удалить', danger: true, run: function () { A.bulkDelete([id]); },
+      });
+      return;
+  }
+}
+function applyActsMenu(key, v) {
+  const ids = Array.from(state.selected);
+  if (menuKind(key) === 'actsdom' || v.indexOf('dom|') === 0) {
+    const domId = +v.split('|')[1] || null;
+    state.menu = null;
+    A.setDomain(ids, domId);
+    return;
+  }
+  if (v === 'nosel') { state.menu = null; return; }
+  state.menu = null;
+  switch (v) {
+    case 'refresh':   A.bulkRefresh(ids); return;
+    case 'domain':    state.menu = 'actsdom:'; return;
+    case 'archive':   A.bulkUpdate(ids, { is_archived: true }, 'В архиве'); return;
+    case 'unarchive': A.bulkUpdate(ids, { is_archived: false }, 'Вернули из архива'); return;
+    case 'ban':       A.bulkUpdate(ids, { is_banned: true }, 'Забанены'); return;
+    case 'unban':     A.bulkUpdate(ids, { is_banned: false }, 'Бан снят'); return;
+    case 'clear':     state.selected.clear(); return;
+    case 'delete':
+      askConfirm({
+        title: 'Удалить ' + ids.length + ' ' + plural(ids.length, ['аккаунт', 'аккаунта', 'аккаунтов']) + '?',
+        text: 'Аккаунты и их история будут удалены без возможности вернуть.',
+        ok: 'Удалить', danger: true, run: function () { A.bulkDelete(ids); },
+      });
+      return;
+  }
+}
 function applyMenu(key, v) {
+  const kind = menuKind(key);
+  if (kind === 'row' || kind === 'rowdom') { applyRowMenu(key, v); return; }
+  if (kind === 'acts' || kind === 'actsdom') { applyActsMenu(key, v); return; }
   switch (key) {
     case 'theme':       setTheme(v); break;
     case 'sort':        state.sort = { key: v, dir: v === 'name' ? 'asc' : 'desc' }; break;
@@ -1729,6 +1844,15 @@ function dd(key, active, extra) {
     (cur.mark ? pmark(cur.mark) : '') +
     '<span class="trunc">' + esc(cur.l) + '</span>' + ic('cdown', 11) + '</button>';
 }
+/* Три точки в строке. Ключ меню несёт id аккаунта, поэтому позиционирование
+   находит именно ту кнопку, по которой кликнули. */
+function rowMenuBtn(a) {
+  const key = 'row:' + a.id;
+  return '<button class="btn ico ghost' + (state.menu === key ? ' on' : '') + '" ' +
+    'style="width:26px;height:26px" data-act="menu" data-v="' + key + '" ' +
+    'aria-haspopup="listbox" aria-expanded="' + (state.menu === key) + '" ' +
+    'aria-label="Действия с @' + esc(a.username) + '">' + ic('dots', 15) + '</button>';
+}
 function menuLayer() {
   if (!state.menu) return '';
   const d = menuDef(state.menu);
@@ -1738,20 +1862,28 @@ function menuLayer() {
   return '<div class="menu" role="listbox" style="visibility:hidden;left:0;top:0">' +
     (d.title ? '<div class="menu-hd">' + d.title + '</div>' : '') +
     d.items.map(function (i) {
-      const on = i.v === d.cur;
+      // У команд отметка «выбрано» ни при чём: галочку ставим только там,
+      // где меню выбирает одно значение из списка.
+      const cmd = !!ACTION_MENUS[menuKind(state.menu)];
+      const on = cmd ? !!i.on : i.v === d.cur;
       return '<button role="option" aria-selected="' + on + '" class="' + (on ? 'on' : '') + '" ' +
+        (i.danger ? 'style="color:var(--neg)" ' : (i.muted ? 'style="color:var(--ink-3)" ' : '')) +
         'data-act="mi" data-v="' + state.menu + '|' + i.v + '">' +
         (i.dot ? '<span class="dot" style="background:' + i.dot + '"></span>' : '') +
         (i.mark ? pmark(i.mark) : '') +
         '<span class="trunc">' + esc(i.l) + '</span>' +
-        '<span class="mi-check">' + ic('check', 13) + '</span></button>';
+        (cmd && !i.on ? '' : '<span class="mi-check">' + ic('check', 13) + '</span>') + '</button>';
     }).join('') + '</div>';
 }
 function positionMenu() {
   if (!state.menu) return;
   const m = document.querySelector('.menu');
   if (!m) return;
-  const t = document.querySelector('[data-act="menu"][data-v="' + state.menu + '"]');
+  // У подменю своей кнопки нет — оно висит на той же, из которой открылось.
+  const anchor = state.menu.indexOf('rowdom:') === 0 ? 'row:' + menuArg(state.menu)
+               : state.menu.indexOf('actsdom:') === 0 ? 'acts:'
+               : state.menu;
+  const t = document.querySelector('[data-act="menu"][data-v="' + anchor + '"]');
   if (!t) { state.menu = null; m.remove(); return; }
   const r = t.getBoundingClientRect();
   const w = Math.max(r.width, 200);
@@ -1847,7 +1979,7 @@ function table(slice, list, pages) {
           '</div><div class="d trunc">' + esc(a.display) + '</div>' +
         '</div></div>' +
         cs.map(function (c) { return cell(c.k, a); }).join('') +
-        '<div style="display:flex;justify-content:flex-end"><button class="btn ico ghost" style="width:26px;height:26px" data-act="toast" data-v="Меню строки" aria-label="Действия">' + ic('dots', 15) + '</button></div>' +
+        '<div style="display:flex;justify-content:flex-end">' + rowMenuBtn(a) + '</div>' +
       '</div>';
     }).join('') +
     '</div>' + tfoot(list, pages) + '</div>';
@@ -2429,184 +2561,31 @@ function tvHue(platform) { return platHue(platform); }
 function screenTV() {
   const live = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
   const t = totals(live);
+  const now = new Date();
+  const clock = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
-  /* --- сцена «Сеть»: только крупные цифры ---------------------------
-     Экран на стене читают с нескольких метров, поэтому здесь без графиков. */
-  const netMetrics = [
-    // Знак ставим по знаку дельты: приклеенный «+» давал «+−1» на падении.
-    // Числа полные, иначе прибавка за тик не видна.
-    ['Просмотры', fmt(vcOr(t.v, 'views')), signed(t.vd, true), 'var(--tvm1)', 'views'],
+  /* Чей это эфир. Без подписи одинаковые экраны на стене не различить, а
+     сводный от доменного отличается только числами. */
+  const d = state.domains && state.domains.current;
+  const scopeName = DOMAIN === DOMAIN_AGGREGATE ? 'все домены' : (d ? d.name : 'вся сеть');
+
+  /* Под главной цифрой — остальное, помельче. «Аккаунтов» без дельты:
+     это не растущий показатель, а размер сети. */
+  const sub = [
+    ['Подписчики', fmt(vcOr(t.f, 'followers')), signed(t.fd), 'var(--tvaccent)', 'followers'],
     ['Лайки', fmt(vcOr(t.l, 'likes')), signed(t.ld, true), 'var(--tvm2)', 'likes'],
     ['Посты', fmt(vcOr(t.p, 'posts')), signed(t.pd), 'var(--tvm3)', 'posts'],
     ['Аккаунтов', fmt(live.length), PLATFORMS.filter(function (p) {
       return live.some(function (a) { return a.platform === p.v; });
-    }).length + ' площадок', 'var(--tvaccent)'],
+    }).length + ' площадок', 'var(--tvm1)'],
   ];
-  const netScene =
-    '<div class="tv-scene" data-scene="net" ' +
-      'style="display:flex;flex-direction:column;justify-content:center;gap:clamp(18px,5vh,64px)">' +
-      '<div>' +
-        '<div class="tv-lbl">Подписчики · вся сеть</div>' +
-        '<div class="tv-num tv-hero-xl" data-vc="followers" data-vc-fmt="full" ' +
-          'style="margin-top:clamp(4px,1.6vh,16px)">' + fmt(vcOr(t.f, 'followers')) + '</div>' +
-        '<div style="display:flex;align-items:baseline;gap:14px;margin-top:clamp(6px,2vh,18px);flex-wrap:wrap">' +
-          '<span class="tv-num" style="font-size:clamp(18px,4vh,40px);color:' +
-            (t.fd >= 0 ? 'var(--tvpos)' : 'var(--tvm2)') + '">' + signed(t.fd) + '</span>' +
-          '<span style="font-size:clamp(13px,2vh,22px);color:var(--tvdim)">за сутки</span>' +
-        '</div>' +
-      '</div>' +
-      '<div style="display:flex;justify-content:space-between;align-items:flex-end;gap:clamp(12px,2vw,40px)">' +
-        netMetrics.map(function (m) {
-          return '<div style="min-width:0;flex:1 1 0">' +
-            '<div class="tv-lbl">' + m[0] + '</div>' +
-            '<div class="tv-num tv-mid-xl"' + (m[4] ? ' data-vc="' + m[4] + '" data-vc-fmt="full"' : '') +
-              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[3] + '">' + m[1] + '</div>' +
-            '<div class="tv-num trunc" style="font-size:clamp(12px,1.9vh,20px);color:var(--tvdim);margin-top:clamp(3px,0.9vh,8px)">' + m[2] + '</div>' +
-          '</div>';
-        }).join('') +
-      '</div>' +
-    '</div>';
-
-  /* --- сцена «Площадки»: сравнение по подписчикам --------------------
-     Одна мера на график (длина столбца = подписчики), остальное — текстом.
-     Цвет несёт принадлежность к площадке, но опознать её можно и без цвета:
-     у каждой строки есть название и значок. */
-  const byP = PLATFORMS.map(function (pl) {
-    const set = live.filter(function (a) { return a.platform === pl.v; });
-    let f = 0, v = 0, fd = 0;
-    set.forEach(function (a) { f += a.followers; v += a.views; fd += a.d[1].f; });
-    return { pl: pl, f: f, v: v, fd: fd, n: set.length };
-  }).filter(function (r) { return r.n > 0; }).sort(function (a, b) { return b.f - a.f; });
-  const maxF = byP.length ? Math.max.apply(null, byP.map(function (r) { return r.f; })) : 1;
-
-  const platScene =
-    '<div class="tv-scene" data-scene="plat" style="display:flex;flex-direction:column">' +
-      '<div style="display:flex;align-items:baseline;gap:16px;flex-shrink:0">' +
-        '<div class="tv-lbl">Подписчики по площадкам</div><div class="grow"></div>' +
-        '<div class="tv-num" style="font-size:var(--tv-sub);color:var(--tvdim)">всего ' + fmt(t.f) + '</div>' +
-      '</div>' +
-      '<div style="margin-top:clamp(10px,2.4vh,26px);flex-grow:1;display:flex;flex-direction:column;justify-content:space-between;gap:2px">' +
-        (byP.length ? byP.map(function (r) {
-          const w = maxF > 0 ? Math.max(1.5, r.f / maxF * 100) : 0;
-          return '<div class="tv-prow">' +
-            '<div class="tv-pname">' + pmark(r.pl.v) +
-              '<span class="trunc">' + esc(r.pl.l) + '</span></div>' +
-            '<div class="tv-ptrack">' +
-              '<i style="width:' + w.toFixed(1) + '%;background:' + platHue(r.pl.v) + '"></i></div>' +
-            '<div class="tv-num tv-pval">' + fmt(r.f) + '</div>' +
-            '<div class="tv-num tv-psub">' + (r.fd > 0 ? '+' + fmt(r.fd) : r.fd < 0 ? '−' + fmt(-r.fd) : '—') + '</div>' +
-            '<div class="tv-num tv-psub">' + r.n + ' ' + plural(r.n, ['аккаунт', 'аккаунта', 'аккаунтов']) + '</div>' +
-          '</div>';
-        }).join('') : '<div style="color:var(--tvmute);font-size:var(--tv-sub)">Нет данных по площадкам</div>') +
-      '</div>' +
-    '</div>';
-
-  /* --- сцена «Динамика»: настоящий ряд из auto-refresh-series ---------
-     Показываем только когда точек хватает на линию. Рисовать кривую по
-     двум замерам — врать о форме. */
-  let dynScene = '';
-  if (TV_SERIES.length >= 6) {
-    const pts = TV_SERIES;
-    const vals = pts.map(function (p) { return p.v; });
-    const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-    const span = (hi - lo) || 1;
-    const W = 1000, H = 300, PAD = 10;
-    const px = function (i) { return (i / (pts.length - 1) * (W - PAD * 2) + PAD).toFixed(1); };
-    const py = function (v) { return (H - PAD - (v - lo) / span * (H - PAD * 3)).toFixed(1); };
-    const line = pts.map(function (p, i) { return px(i) + ',' + py(p.v); }).join(' ');
-    const last = pts[pts.length - 1];
-    const grew = last.v - pts[0].v;
-    dynScene =
-      '<div class="tv-scene" data-scene="dyn" style="display:flex;flex-direction:column">' +
-        '<div style="display:flex;align-items:flex-end;gap:clamp(18px,3.2vw,44px);flex-wrap:wrap;flex-shrink:0">' +
-          '<div><div class="tv-lbl">Просмотры сети за 24 часа</div>' +
-            '<div class="tv-num tv-hero" style="margin-top:clamp(4px,1.4vh,12px)">' + comp(last.v) + '</div></div>' +
-          '<div style="padding-bottom:clamp(2px,1.6vh,14px)"><div class="tv-lbl">Прибавилось</div>' +
-            '<div class="tv-num tv-mid" style="margin-top:clamp(3px,0.9vh,8px);color:' +
-              (grew >= 0 ? 'var(--tvpos)' : 'var(--tvm2)') + '">' + signed(grew, true) + '</div></div>' +
-          '<div class="grow"></div>' +
-          '<div style="padding-bottom:clamp(2px,1.6vh,14px);text-align:right"><div class="tv-lbl">Замеров</div>' +
-            '<div class="tv-num tv-mid" style="margin-top:clamp(3px,0.9vh,8px)">' + pts.length + '</div></div>' +
-        '</div>' +
-        '<div style="flex:1 1 0;min-height:0;margin-top:clamp(10px,3vh,28px)">' +
-          '<svg width="100%" height="100%" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" style="display:block">' +
-            [0.33, 0.66].map(function (g) {
-              return '<line x1="0" y1="' + (H * g).toFixed(0) + '" x2="' + W + '" y2="' + (H * g).toFixed(0) +
-                '" stroke="var(--tvtrack)" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
-            }).join('') +
-            '<defs><linearGradient id="tvfill" x1="0" y1="0" x2="0" y2="1">' +
-              '<stop offset="0%" style="stop-color:var(--tvaccent)" stop-opacity="0.34"></stop>' +
-              '<stop offset="100%" style="stop-color:var(--tvaccent)" stop-opacity="0"></stop></linearGradient></defs>' +
-            '<path d="M' + px(0) + ',' + py(pts[0].v) + ' L' + line.split(' ').join(' L') +
-              ' L' + W + ',' + H + ' L0,' + H + ' Z" fill="url(#tvfill)"></path>' +
-            '<polyline points="' + line + '" fill="none" stroke="var(--tvaccent)" stroke-width="2" ' +
-              'stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"></polyline>' +
-            '<circle cx="' + px(pts.length - 1) + '" cy="' + py(last.v) + '" r="5" fill="var(--tvbg)" ' +
-              'stroke="var(--tvaccent)" stroke-width="3" vector-effect="non-scaling-stroke"></circle>' +
-          '</svg>' +
-        '</div>' +
-        '<div style="display:flex;justify-content:space-between;margin-top:8px;flex-shrink:0">' +
-          [pts[0], pts[Math.floor(pts.length / 2)], last].map(function (p) {
-            return '<span class="tv-num" style="font-size:clamp(11px,1.6vh,14px);color:var(--tvmute)">' + esc(p.t) + '</span>';
-          }).join('') +
-        '</div>' +
-      '</div>';
-  }
-
-  /* --- сцена 3: топ --- */
-  // Если за сутки никто не вырос (так бывает на свежей базе), лидерборд по
-  // приросту выродится в столбик нулей — тогда показываем крупнейших.
-  const byDelta = live.slice().sort(function (a, b) { return b.d[1].f - a.d[1].f; });
-  const growth = byDelta.length ? byDelta[0].d[1].f : 0;
-  const movedCount = live.filter(function (a) { return a.d[1].f > 0; }).length;
-  const leadBy = movedCount >= 3 ? 'delta' : 'size';
-  const top = (leadBy === 'delta' ? byDelta : live.slice().sort(function (a, b) { return b.followers - a.followers; })).slice(0, 8);
-  const topMax = leadBy === 'delta' ? (growth || 1) : (top.length ? top[0].followers || 1 : 1);
-  const topScene =
-    '<div class="tv-scene" data-scene="top" style="display:flex;flex-direction:column">' +
-      '<div style="display:flex;align-items:baseline;gap:16px">' +
-        '<div class="tv-lbl">' + (leadBy === 'delta' ? 'Лидеры суток · прирост подписчиков' : 'Крупнейшие аккаунты · за сутки роста нет') + '</div>' +
-        '<div class="grow"></div>' +
-        '<div class="tv-num" style="font-size:var(--tv-sub);color:var(--tvdim)">' + live.length + ' ' +
-          plural(live.length, ['аккаунт', 'аккаунта', 'аккаунтов']) + '</div>' +
-      '</div>' +
-      '<div style="margin-top:18px;flex-grow:1;display:flex;flex-direction:column;justify-content:space-between">' +
-        top.map(function (a, i) {
-          const pl = PF[a.platform];
-          return '<div class="tv-lead">' +
-            '<div class="tv-num rk" style="color:' + (i === 0 ? 'var(--tvaccent)' : 'var(--tvmute)') + '">' + (i + 1) + '</div>' +
-            '<div style="display:flex;align-items:center;gap:clamp(8px,1vw,12px);min-width:0">' +
-              '<div class="avt" style="background:' + tvHue(a.platform) + '22;color:' + tvHue(a.platform) + '">' +
-                a.username.replace(/^r\//, '').slice(0, 2).toUpperCase() + '</div>' +
-              '<div style="min-width:0"><div class="trunc nm">' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) + '</div>' +
-              '<div class="trunc" style="font-size:clamp(10px,1.5vh,12px);margin-top:2px">' +
-              '<span style="color:' + tvHue(a.platform) + '">' + pl.l + '</span>' +
-              '<span style="color:var(--tvmute)"> · ' + esc(profileOf(a).name) + '</span></div></div>' +
-            '</div>' +
-            '<div class="tv-num vl" style="text-align:right">' + fmt(a.followers) + '</div>' +
-            '<div style="display:flex;align-items:center;gap:clamp(8px,1vw,12px);justify-content:flex-end">' +
-              '<span style="width:clamp(40px,5vw,78px);height:6px;border-radius:3px;background:var(--tvtrack);overflow:hidden;flex-shrink:0">' +
-                '<i style="display:block;height:6px;border-radius:3px;background:' + tvHue(a.platform) + ';width:' +
-                Math.round(Math.max(0, (leadBy === 'delta' ? a.d[1].f : a.followers)) / topMax * 100) + '%"></i></span>' +
-              (leadBy === 'delta'
-                ? '<span class="tv-num vl" style="color:var(--tvpos);width:clamp(64px,7vw,88px);text-align:right">+' + fmt(a.d[1].f) + '</span>'
-                : '<span class="tv-num vl" style="color:var(--tvmute);width:clamp(64px,7vw,88px);text-align:right">' + fmt(a.posts) + ' пост.</span>') +
-            '</div>' +
-          '</div>';
-        }).join('') +
-      '</div>' +
-    '</div>';
-
-  const movers = live.slice().sort(function (a, b) { return b.d[1].v - a.d[1].v; }).slice(0, 5);
-  const now = new Date();
-  const clock = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
   return '<div class="tv">' +
     '<div class="tv-bar">' +
       '<div style="width:24px;height:24px;border-radius:7px;background:var(--tvaccent);display:flex;align-items:center;justify-content:center">' +
         '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--tvbg)" stroke-width="1.8" stroke-linecap="round"><path d="M2 12.5 5.5 7l3 2.5L14 3"></path></svg></div>' +
       '<span style="font-size:13px;font-weight:600;letter-spacing:.02em">AccountsStats</span>' +
-      '<span class="tv-lbl">Эфир</span>' +
+      '<span class="tv-lbl">Эфир · ' + esc(scopeName) + '</span>' +
       '<div class="grow"></div>' +
       (state.run.on
         ? '<span style="display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px;border-radius:15px;background:var(--tvsurf);font-size:12px">' +
@@ -2617,93 +2596,43 @@ function screenTV() {
       '<span class="tv-num" style="font-size:15px;color:var(--tvdim)">' + clock + '</span>' +
       '<button class="tv-btn" data-act="nav" data-v="accounts" aria-label="Выйти из эфира">' + ic('close', 16) + '</button>' +
     '</div>' +
-    netScene + platScene + dynScene + topScene +
-    '<div class="tv-foot">' +
-      '<button class="tv-btn" data-act="tv-play" aria-label="' + (state.tvPlay ? 'Пауза' : 'Продолжить') + '">' + ic(state.tvPlay ? 'pause' : 'play', 15) + '</button>' +
-      '<div style="display:flex;gap:6px">' + tvScenes().map(function (sc, i) {
-        return '<button class="tv-dot' + (state.tvScene === i ? ' on' : '') + '" data-act="tv-scene" data-v="' + i + '" ' +
-          'title="' + esc(sc.n) + '" aria-label="Сцена: ' + esc(sc.n) + '"></button>';
-      }).join('') + '</div>' +
-      '<span id="tv-name" style="font-size:12px;color:var(--tvmute);white-space:nowrap">' + tvName() + ' · колесо мыши или ← →</span>' +
-      '<div class="grow"></div>' +
-      '<div style="display:flex;gap:22px;overflow:hidden">' +
-        movers.map(function (a) {
-          return '<span style="display:inline-flex;align-items:center;gap:7px;font-size:12px;white-space:nowrap">' +
-            '<span style="width:6px;height:6px;border-radius:3px;background:' + tvHue(a.platform) + '"></span>' +
-            '<span style="color:var(--tvdim)">' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) + '</span>' +
-            '<span class="tv-num" style="color:' + tvHue(a.platform) + '">+' + comp(a.d[1].v) + '</span></span>';
+
+    /* Один экран, без ротации: просмотры — главная цифра по центру,
+       остальное под ней помельче. */
+    '<div class="tv-scene on" data-scene="net" ' +
+      'style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
+      'text-align:center;gap:clamp(20px,6vh,72px)">' +
+      '<div style="max-width:100%">' +
+        '<div class="tv-lbl">Просмотры · ' + esc(scopeName) + '</div>' +
+        '<div class="tv-num tv-hero-xl" data-vc="views" data-vc-fmt="full" ' +
+          'style="margin-top:clamp(6px,2vh,20px);color:var(--tvink)">' + fmt(vcOr(t.v, 'views')) + '</div>' +
+        '<div style="display:flex;align-items:baseline;gap:14px;justify-content:center;' +
+          'margin-top:clamp(6px,2vh,18px);flex-wrap:wrap">' +
+          '<span class="tv-num" style="font-size:clamp(18px,4vh,40px);color:' +
+            (t.vd >= 0 ? 'var(--tvpos)' : 'var(--tvm2)') + '">' + signed(t.vd) + '</span>' +
+          '<span style="font-size:clamp(13px,2vh,22px);color:var(--tvdim)">за сутки</span>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;justify-content:center;align-items:flex-start;' +
+        'gap:clamp(20px,5vw,88px);flex-wrap:wrap;width:100%">' +
+        sub.map(function (m) {
+          return '<div style="min-width:0">' +
+            '<div class="tv-lbl">' + m[0] + '</div>' +
+            '<div class="tv-num tv-mid-xl"' + (m[4] ? ' data-vc="' + m[4] + '" data-vc-fmt="full"' : '') +
+              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[3] + '">' + m[1] + '</div>' +
+            '<div class="tv-num trunc" style="font-size:clamp(12px,1.9vh,20px);color:var(--tvdim);margin-top:clamp(3px,0.9vh,8px)">' + m[2] + '</div>' +
+          '</div>';
         }).join('') +
       '</div>' +
     '</div>' +
-    '<div class="tv-prog" id="tv-prog"><i></i></div>' +
   '</div>';
 }
 
-/* Сцены собираются от данных: «Динамика» появляется, только когда замеров
-   хватает на честную линию. Выдуманного «Пульса» больше нет. */
-let TV_SERIES = [];
-function tvScenes() {
-  const list = [{ k: 'net', n: 'Сеть' }, { k: 'plat', n: 'Площадки' }, { k: 'top', n: 'Лидеры' }];
-  if (TV_SERIES.length >= 6) list.splice(2, 0, { k: 'dyn', n: 'Динамика' });
-  return list;
-}
-async function loadTvSeries() {
-  if (DEMO || !LIVE) return;
-  try {
-    const r = await api('/api/accounts/auto-refresh-series/');
-    TV_SERIES = (r.points || [])
-      .filter(function (p) { return p.view_count_total != null; })
-      .map(function (p) {
-        const d = new Date(p.measured_at);
-        return { v: p.view_count_total,
-                 t: p.slot_label || (isNaN(d) ? '' : String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')) };
-      });
-  } catch (e) { TV_SERIES = []; }
-}
-
-/* Смена сцены не перерисовывает эфир целиком — иначе ломается кроссфейд.
-   Значит всё, что зависит от номера сцены, надо обновить здесь руками. */
-function tvName() {
-  const list = tvScenes();
-  return (list[state.tvScene] || list[0] || { n: '' }).n;
-}
-function tvPaint() {
-  const list = tvScenes();
-  if (state.tvScene >= list.length) state.tvScene = 0;
-  const active = (list[state.tvScene] || list[0] || {}).k;
-  document.querySelectorAll('.tv-scene').forEach(function (el) {
-    el.classList.toggle('on', el.dataset.scene === active);
-  });
-  document.querySelectorAll('.tv-dot').forEach(function (el, i) {
-    el.classList.toggle('on', i === state.tvScene);
-  });
-  const name = document.getElementById('tv-name');
-  if (name) name.textContent = tvName() + ' · колесо мыши или ← →';
-  vcPaint();
-  tvProgress();
-}
-function tvProgress() {
-  const p = document.getElementById('tv-prog');
-  if (!p) return;
-  p.classList.remove('run');
-  void p.offsetWidth;                 // перезапуск анимации
-  if (state.tvPlay && state.route === 'tv') p.classList.add('run');
-}
-function tvStart() {
-  clearInterval(state.tvTimer);
-  tvProgress();
-  state.tvTimer = setInterval(function () {
-    if (state.route !== 'tv' || !state.tvPlay) return;
-    state.tvScene = (state.tvScene + 1) % tvScenes().length;
-    tvPaint();
-  }, 7000);
-}
-function tvGo(i) {
-  const n = tvScenes().length;
-  state.tvScene = ((i % n) + n) % n;
-  tvPaint();
-  tvStart();
-}
+/* Эфир — один экран, без ротации: сцен больше нет, поэтому нет ни таймера
+   переключения, ни точек, ни полосы прогресса. Осталось только обновление
+   живых цифр. */
+function tvPaint() { vcPaint(); }
+function tvStart() { clearInterval(state.tvTimer); }
 
 /* Алерты живут разделом настроек: на рабочих экранах они только мешали. */
 function alertsSection() {
@@ -3167,7 +3096,6 @@ document.addEventListener('click', function (e) {
   switch (act) {
     case 'nav':
       state.route = v; state.selected.clear();
-      if (v === 'tv') loadTvSeries().then(render);
       if (v === 'analytics' && LIVE && !state.an.items) loadAnalytics();
       if (v === 'settings' && LIVE) loadSessionsLive();
       break;
@@ -3178,8 +3106,6 @@ document.addEventListener('click', function (e) {
       state.audQ = ''; state.audPage = 1;     // иначе тянется поиск от прошлого аккаунта
       break;
     case 'tab':       state.detailTab = v; state.audQ = ''; state.audPage = 1; break;
-    case 'tv-play':   state.tvPlay = !state.tvPlay; break;
-    case 'tv-scene':  tvGo(+v); return;
     case 'aud-page':  state.audPage = Math.max(1, +v); break;
     case 'post-view': state.postView = v; break;
     case 'theme':      toggleTheme(); break;
@@ -3213,8 +3139,11 @@ document.addEventListener('click', function (e) {
       break;
     case 'mi': {
       const cut = v.indexOf('|');
-      applyMenu(v.slice(0, cut), v.slice(cut + 1));
+      const key = v.slice(0, cut);
+      // Закрываем меню до применения: пункт может открыть подменю, и слепое
+      // обнуление после вызова стирало бы его.
       state.menu = null;
+      applyMenu(key, v.slice(cut + 1));
       break;
     }
     case 'run-tab':      state.runTab = v; if (v === 'schedule') loadSchedule(); break;
@@ -3428,10 +3357,8 @@ document.addEventListener('keydown', function (e) {
     e.preventDefault(); state.modal = 'palette'; state.paletteQ = ''; state.paletteI = 0; render(); return;
   }
   if (state.route === 'tv') {
-    if (e.key === 'Escape')     { state.route = 'accounts'; render(); }
-    if (e.key === 'ArrowRight') { tvGo(state.tvScene + 1); }
-    if (e.key === 'ArrowLeft')  { tvGo(state.tvScene - 1); }
-    if (e.key === ' ')          { e.preventDefault(); state.tvPlay = !state.tvPlay; render(); }
+    // Экран один, переключать нечего — остаётся только выход.
+    if (e.key === 'Escape') { state.route = 'accounts'; render(); }
     return;
   }
   if (e.key === 'Escape') {
@@ -3496,13 +3423,19 @@ const ACC_QS = 'include_hidden=1&archived=all&banned=all';
    ============================================================ */
 const DOMAIN_AGGREGATE = 'efir';
 const RESERVED_PATH = { api: 1, admin: 1, media: 1, static: 1, healthz: 1, index: 1 };
+const PATH_SEGS = (location.pathname || '').split('/').filter(Boolean)
+  .map(function (s) { return s.toLowerCase(); });
 const DOMAIN = (function () {
-  const seg = (location.pathname || '').split('/').filter(Boolean)[0];
-  if (seg && !RESERVED_PATH[seg.toLowerCase()] && !/\./.test(seg)) return seg.toLowerCase();
+  const seg = PATH_SEGS[0];
+  if (seg && !RESERVED_PATH[seg] && !/\./.test(seg)) return seg;
   return '';
 })();
+/* Эфир открывается двумя адресами: /efir — сводный по всем доменам,
+   /reiz/efir — только по своему. Данные сужает та же логика домена, поэтому
+   отдельного кода эфиру не нужно: он показывает ровно то, что ему видно. */
+const TV_ON_LOAD = PATH_SEGS[0] === DOMAIN_AGGREGATE || PATH_SEGS[1] === DOMAIN_AGGREGATE;
 /* Префикс для ссылок внутри интерфейса, чтобы переходы не теряли домен. */
-const DOMAIN_PREFIX = DOMAIN ? '/' + DOMAIN : '';
+const DOMAIN_PREFIX = DOMAIN && DOMAIN !== DOMAIN_AGGREGATE ? '/' + DOMAIN : '';
 function domainHeaders(extra) {
   const h = extra || {};
   if (DOMAIN) h['X-Domain'] = DOMAIN;
@@ -3529,6 +3462,7 @@ function mapAccount(r) {
   const d = deltasOf(r);
   return {
     id: r.id, username: r.username, display: r.display_name || r.username, platform: r.platform,
+    domainId: r.domain_id || 0, domainName: r.domain_name || '',
     profileId: r.profile_id || 0, ownerId: r.owner_id || 0, groupId: r.group_id || 0, countryId: r.country_id || 0,
     followers: r.follower_count || 0, views: r.view_count || 0, likes: r.like_count || 0,
     posts: r.post_count || 0, clicks: r.link_click_count || 0,
@@ -3968,6 +3902,20 @@ const A = {
     return run(function () { return apiSend('/api/accounts/bulk-delete/', { ids: ids }); },
       function (r) { return 'Удалено ' + (r.deleted != null ? r.deleted : ids.length); });
   },
+  /* Перенос в домен. Внутри домена перенесённый аккаунт из списка пропадёт —
+     он теперь в другом, поэтому так и пишем, чтобы это не выглядело пропажей. */
+  setDomain: function (ids, domainId) {
+    const list = (state.domains && state.domains.list) || [];
+    const d = list.filter(function (x) { return x.id === domainId; })[0];
+    const where = d ? '«' + d.name + '»' : 'без домена';
+    return run(function () {
+      return apiSend('/api/accounts/bulk-update/', { ids: ids, domain_id: domainId || null });
+    }, function (r) {
+      const n = r.updated != null ? r.updated : ids.length;
+      return 'Перенесено в ' + where + ': ' + n +
+        (DOMAIN && DOMAIN !== DOMAIN_AGGREGATE && d && d.slug !== DOMAIN ? ' — здесь их больше нет' : '');
+    });
+  },
   refreshAll: function () {
     return run(function () { return apiSend('/api/accounts/refresh_all/'); },
       'Полный прогон запущен', { reload: false });
@@ -4108,15 +4056,6 @@ async function bootLive() {
   }
 }
 
-/* Колесо мыши в эфире переключает сцены */
-let wheelAt = 0;
-document.addEventListener('wheel', function () {
-  if (state.route !== 'tv') return;
-  const now = Date.now();
-  if (now - wheelAt < 600) return;
-  wheelAt = now;
-  tvGo(state.tvScene + 1);
-}, { passive: true });
 
 /* Пересобираем при переходе через контрольные размеры окна: на узком экране
    список всегда карточками, в невысоком — обычная прокрутка страницы. */
@@ -4158,10 +4097,10 @@ function runTick() {
   bar.style.width = Math.round(state.run.done / state.run.total * 100) + '%';
   cur.textContent = 'Сейчас: ' + state.run.cur + ' · осталось ~' + Math.max(1, Math.round((state.run.total - state.run.done) / 16)) + ' мин';
 }
-/* Адрес /efir — это сводный эфир по всем доменам: сразу открываем экран
-   на стене, а не список аккаунтов. Сохранённый маршрут тут не спрашиваем:
-   на такой адрес заходят ровно за эфиром. */
-if (DOMAIN === DOMAIN_AGGREGATE) state.route = 'tv';
+/* На /efir и /<домен>/efir сразу открываем экран на стене, а не список
+   аккаунтов: на такой адрес заходят ровно за эфиром. Сохранённый маршрут
+   тут не спрашиваем. */
+if (TV_ON_LOAD) state.route = 'tv';
 
 /* Первая отрисовка — скелетон, пока идут запросы к API */
 render();

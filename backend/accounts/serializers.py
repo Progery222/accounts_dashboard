@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 import re
-from .models import Account, Platform, Post, Profile, Owner, AccountGroup, Country, AudienceMember, AudienceMemberPost
+from .models import Account, Domain, Platform, Post, Profile, Owner, AccountGroup, Country, AudienceMember, AudienceMemberPost
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -69,6 +69,11 @@ class CountrySerializer(serializers.ModelSerializer):
 
 class AccountSerializer(serializers.ModelSerializer):
     platform_label = serializers.CharField(source="get_platform_display", read_only=True)
+    domain_id = serializers.PrimaryKeyRelatedField(
+        queryset=Domain.objects.all(), source="domain", allow_null=True, required=False,
+    )
+    domain_slug = serializers.CharField(source="domain.slug", read_only=True, allow_null=True)
+    domain_name = serializers.CharField(source="domain.name", read_only=True, allow_null=True)
     profile_id = serializers.PrimaryKeyRelatedField(
         queryset=Profile.objects.all(), source="profile", allow_null=True, required=False,
     )
@@ -105,6 +110,7 @@ class AccountSerializer(serializers.ModelSerializer):
         model = Account
         fields = [
             "id", "username", "platform", "platform_label",
+            "domain_id", "domain_slug", "domain_name",
             "profile_id", "profile_name", "profile_color",
             "owner_id", "owner_name", "owner_color",
             "group_id", "group_name", "group_color",
