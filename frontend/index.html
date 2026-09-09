@@ -2688,10 +2688,10 @@ function screenTV() {
   /* Внизу — остальные показатели, помельче. Только подпись и число:
      приросты под цифрами убраны, на стене они читались как шум. */
   const sub = [
-    ['Подписчики', fmt(vcOr(t.f, 'followers')), 'var(--tvaccent)', 'followers'],
-    ['Лайки', fmt(vcOr(t.l, 'likes')), 'var(--tvm2)', 'likes'],
-    ['Посты', fmt(vcOr(t.p, 'posts')), 'var(--tvm3)', 'posts'],
-    ['Аккаунтов', fmt(live.length), 'var(--tvm1)'],
+    ['Followers', fmt(vcOr(t.f, 'followers')), 'var(--tvaccent)', 'followers'],
+    ['Likes', fmt(vcOr(t.l, 'likes')), 'var(--tvm2)', 'likes'],
+    ['Posts', fmt(vcOr(t.p, 'posts')), 'var(--tvm3)', 'posts'],
+    ['Accounts', fmt(live.length), 'var(--tvm1)'],
   ];
 
   return '<div class="tv">' +
