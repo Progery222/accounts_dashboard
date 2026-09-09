@@ -404,7 +404,7 @@ svg { flex-shrink: 0; }
    так что в разряде проступала соседняя цифра. */
 .odo-c { display: block; height: 1em; overflow: hidden; line-height: 1; }
 .odo-s { display: block; transform: translateY(0);
-         transition: transform .6s cubic-bezier(.22, .61, .36, 1); }
+         transition: transform 1.8s cubic-bezier(.16, .72, .24, 1.06); }
 .odo-s > i { display: block; height: 1em; line-height: 1; font-style: normal; }
 @media (prefers-reduced-motion: reduce) { .odo-s { transition: none; } }
 .kpi .hd { display: flex; align-items: center; gap: 8px; }
@@ -688,7 +688,7 @@ svg { flex-shrink: 0; }
 .tv-lbl { font-size: clamp(9px, 1.3vh, 12px); font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--tvdim); }
 .tv-hero { font-size: var(--tv-hero); font-weight: 500; }
 /* Первая сцена без графиков — цифрам можно отдать всю ширину */
-.tv-hero-xl { font-size: clamp(48px, min(13vw, 19vh), 210px); font-weight: 500; line-height: .95; }
+.tv-hero-xl { font-size: clamp(56px, min(16.5vw, 25vh), 300px); font-weight: 500; line-height: .95; }
 .tv-mid-xl  { font-size: clamp(26px, min(5.6vw, 8vh), 84px);  font-weight: 500; }
 .tv-mid  { font-size: var(--tv-mid);  font-weight: 500; }
 .tv-metrics { display: flex; gap: clamp(20px, 3.4vw, 46px); margin-top: var(--tv-gap); flex-wrap: wrap; }
@@ -2685,15 +2685,13 @@ function screenTV() {
   const d = state.domains && state.domains.current;
   const scopeName = DOMAIN === DOMAIN_AGGREGATE ? 'все домены' : (d ? d.name : 'вся сеть');
 
-  /* Под главной цифрой — остальное, помельче. «Аккаунтов» без дельты:
-     это не растущий показатель, а размер сети. */
+  /* Внизу — остальные показатели, помельче. Только подпись и число:
+     приросты под цифрами убраны, на стене они читались как шум. */
   const sub = [
-    ['Подписчики', fmt(vcOr(t.f, 'followers')), signed(t.fd), 'var(--tvaccent)', 'followers'],
-    ['Лайки', fmt(vcOr(t.l, 'likes')), signed(t.ld, true), 'var(--tvm2)', 'likes'],
-    ['Посты', fmt(vcOr(t.p, 'posts')), signed(t.pd), 'var(--tvm3)', 'posts'],
-    ['Аккаунтов', fmt(live.length), PLATFORMS.filter(function (p) {
-      return live.some(function (a) { return a.platform === p.v; });
-    }).length + ' площадок', 'var(--tvm1)'],
+    ['Подписчики', fmt(vcOr(t.f, 'followers')), 'var(--tvaccent)', 'followers'],
+    ['Лайки', fmt(vcOr(t.l, 'likes')), 'var(--tvm2)', 'likes'],
+    ['Посты', fmt(vcOr(t.p, 'posts')), 'var(--tvm3)', 'posts'],
+    ['Аккаунтов', fmt(live.length), 'var(--tvm1)'],
   ];
 
   return '<div class="tv">' +
@@ -2713,30 +2711,24 @@ function screenTV() {
       '<button class="tv-btn" data-act="nav" data-v="accounts" aria-label="Выйти из эфира">' + ic('close', 16) + '</button>' +
     '</div>' +
 
-    /* Один экран, без ротации: просмотры — главная цифра по центру,
-       остальное под ней помельче. */
+    /* Один экран, без ротации. Просмотры прижаты кверху и без подписи
+       «просмотры»: на стене и так понятно, что за число такой величины.
+       Остальные показатели — отдельной группой у нижнего края. */
     '<div class="tv-scene on" data-scene="net" ' +
-      'style="display:flex;flex-direction:column;align-items:center;justify-content:center;' +
-      'text-align:center;gap:clamp(20px,6vh,72px)">' +
+      'style="display:flex;flex-direction:column;align-items:center;justify-content:space-between;' +
+      'text-align:center;padding:clamp(8px,3vh,40px) 0 clamp(14px,6vh,72px)">' +
       '<div style="max-width:100%">' +
-        '<div class="tv-lbl">Просмотры · ' + esc(scopeName) + '</div>' +
+        '<div class="tv-lbl">' + esc(scopeName) + '</div>' +
         '<div class="tv-num tv-hero-xl" data-vc="views" data-vc-fmt="full" ' +
           'style="margin-top:clamp(6px,2vh,20px);color:var(--tvink)">' + fmt(vcOr(t.v, 'views')) + '</div>' +
-        '<div style="display:flex;align-items:baseline;gap:14px;justify-content:center;' +
-          'margin-top:clamp(6px,2vh,18px);flex-wrap:wrap">' +
-          '<span class="tv-num" style="font-size:clamp(18px,4vh,40px);color:' +
-            (t.vd >= 0 ? 'var(--tvpos)' : 'var(--tvm2)') + '">' + signed(t.vd) + '</span>' +
-          '<span style="font-size:clamp(13px,2vh,22px);color:var(--tvdim)">за сутки</span>' +
-        '</div>' +
       '</div>' +
       '<div style="display:flex;justify-content:center;align-items:flex-start;' +
         'gap:clamp(20px,5vw,88px);flex-wrap:wrap;width:100%">' +
         sub.map(function (m) {
           return '<div style="min-width:0">' +
             '<div class="tv-lbl">' + m[0] + '</div>' +
-            '<div class="tv-num tv-mid-xl"' + (m[4] ? ' data-vc="' + m[4] + '" data-vc-fmt="full"' : '') +
-              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[3] + '">' + m[1] + '</div>' +
-            '<div class="tv-num trunc" style="font-size:clamp(12px,1.9vh,20px);color:var(--tvdim);margin-top:clamp(3px,0.9vh,8px)">' + m[2] + '</div>' +
+            '<div class="tv-num tv-mid-xl"' + (m[3] ? ' data-vc="' + m[3] + '" data-vc-fmt="full"' : '') +
+              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[2] + '">' + m[1] + '</div>' +
           '</div>';
         }).join('') +
       '</div>' +
@@ -4036,6 +4028,19 @@ function vcPaint() {
 /* --- одометр -------------------------------------------------------
    Рисунок числа: где цифра, где разделитель. Если он поменялся (число
    выросло на разряд), одометр пересобираем целиком. */
+/* Барабан игрового автомата: разряд не переставляется на соседнюю цифру, а
+   прокручивает целый оборот и тормозит с лёгким проскоком. Втрое медленнее
+   прежних 600 мс; правые разряды крутятся дольше левых, поэтому останавливаются
+   по очереди слева направо — как барабаны в автомате. */
+const VC_ROLL_MS = 1800;
+const VC_ROLL_STEP_MS = 150;
+const VC_ROLL_EASE = 'cubic-bezier(.16, .72, .24, 1.06)';
+const VC_SPIN_TURNS = 1;                 // сколько полных оборотов добавляем
+function vcReduceMotion() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  catch (e) { return false; }
+}
+
 function vcShape(s) { return s.replace(/\d/g, '#'); }
 function isDigit(ch) { return ch >= '0' && ch <= '9'; }
 
@@ -4054,8 +4059,13 @@ function vcSet(el, s) {
     if (isDigit(s[i]) && (+cells[i].dataset.i) % 10 !== +s[i]) changed++;
   }
   if (changed > 3) { vcBuild(el, s); return; }
+  let order = 0;
   for (let i = 0; i < s.length; i++) {
-    if (isDigit(s[i])) vcRoll(cells[i], +s[i]);
+    if (!isDigit(s[i])) continue;
+    // Порядковый номер считаем только по меняющимся разрядам: иначе у числа с
+    // неподвижными старшими разрядами лесенка начиналась бы с большой задержки.
+    const moves = (+cells[i].dataset.i) % 10 !== +s[i];
+    vcRoll(cells[i], +s[i], moves ? order++ : 0);
   }
 }
 /* Первая сборка (и после каждой перерисовки слоя) — без анимации:
@@ -4071,7 +4081,7 @@ function vcBuild(el, s) {
       const strip = document.createElement('span');
       strip.className = 'odo-s';
       strip.style.transition = 'none';
-      for (let k = 0; k < 20; k++) {       // два круга 0…9 — на перенос разряда
+      for (let k = 0; k < 30; k++) {       // три круга 0…9: оборот барабана + перенос разряда
         const d = document.createElement('i');
         d.textContent = String(k % 10);
         strip.appendChild(d);
@@ -4090,7 +4100,7 @@ function vcBuild(el, s) {
   const strips = odo.getElementsByClassName('odo-s');
   for (let i = 0; i < strips.length; i++) strips[i].style.transition = '';
 }
-function vcRoll(cell, next) {
+function vcRoll(cell, next, order) {
   const strip = cell.firstElementChild;
   if (!strip) return;
   let idx = +cell.dataset.i;               // где стоит лента: 0…19
@@ -4108,8 +4118,14 @@ function vcRoll(cell, next) {
     strip.style.transition = '';
   }
   // Счётчик только растёт, поэтому крутим всегда вперёд: при переносе через
-  // девятку уезжаем на второй круг ленты.
-  const target = next > cur ? next : next + 10;
+  // девятку уезжаем на следующий круг ленты. Сверху добавляем полный оборот —
+  // без него разряд просто переставлялся на соседнюю цифру, а нужен барабан.
+  const spin = vcReduceMotion() ? 0 : VC_SPIN_TURNS * 10;
+  const target = (next > cur ? next : next + 10) + spin;
+  const ms = VC_ROLL_MS + (order || 0) * VC_ROLL_STEP_MS;
+  strip.style.transition = vcReduceMotion()
+    ? 'none'
+    : 'transform ' + ms + 'ms ' + VC_ROLL_EASE;
   cell.dataset.i = target;
   strip.style.transform = 'translateY(-' + target + 'em)';
   // Досылаем цифру на место, даже если переход не отработал. В фоновой или
@@ -4123,7 +4139,7 @@ function vcRoll(cell, next) {
     void strip.offsetWidth;
     strip.style.transition = '';
     cell.dataset.i = target % 10;
-  }, 900);
+  }, ms + 800);
 }
 function vcStart() {
   clearInterval(vcTimer);
