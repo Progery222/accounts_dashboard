@@ -939,9 +939,21 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
     try:
         with account_refresh_priority_session():
             try:
-                from platforms.worker_pool import shutdown_all_workers
+                from platforms.worker_pool import (
+                    clear_playwright_refresh_force_stop,
+                    shutdown_all_workers,
+                )
 
+                # Закрываем демоны, оставшиеся от прошлого прогона.
                 shutdown_all_workers()
+                # И сразу снимаем флаг. shutdown_all_workers() взводит force_stop,
+                # чтобы демоны не поднялись обратно, пока идёт kill, — но здесь мы
+                # сами же собираемся их поднимать. Без этого каждый аккаунт,
+                # которому нужен браузер, получал «Остановлено пользователем» без
+                # единой попытки: 22 из 25 в одном прогоне, 18 из 22 в другом, при
+                # нуле настоящих отказов. Так же поступает interrupt_audience_
+                # scrape_for_account_refresh в своём finally.
+                clear_playwright_refresh_force_stop()
             except Exception:
                 pass
 
