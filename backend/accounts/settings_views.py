@@ -558,11 +558,77 @@ def _release_chrome_profile_lock(profile_dir: str) -> None:
         pass
 
 
+def _auth_display() -> str | None:
+    """На каком экране открывать окно входа.
+
+    На сервере обычно два экрана: Xvfb (на нём молча работают воркеры, его
+    не видно) и экран RDP-сессии. Вход руками имеет смысл только там, где
+    человек видит окно, поэтому адрес экрана задаётся отдельно от того, где
+    крутятся фоновые прогоны.
+    """
+    raw = (os.environ.get("AUTH_DISPLAY") or _get_setting("AUTH_DISPLAY", "") or "").strip()
+    if raw:
+        return raw
+    return _detect_human_display()
+
+
+def _worker_display() -> str:
+    """Экран фоновых воркеров — тот, на который человек как раз не смотрит."""
+    for key in ("MOBILEFARM_DISPLAY", "BROWSER_DISPLAY"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return v
+    return (_get_setting("BROWSER_DISPLAY", ":99") or ":99").strip()
+
+
+def _detect_human_display() -> str | None:
+    """Найти экран, который видит человек (обычно сессия RDP).
+
+    На сервере рядом живут Xvfb воркеров (невидимый) и экран RDP. Номер у
+    RDP меняется от сессии к сессии (:10, :11, …), поэтому не прибиваем его
+    гвоздями, а берём самый свежий сокет, кроме экрана воркеров и консоли :0.
+    """
+    try:
+        socket_dir = Path("/tmp/.X11-unix")
+        if not socket_dir.is_dir():
+            return None
+        skip = {_worker_display().lstrip(":").split(".")[0], "0"}
+        found = []
+        for entry in socket_dir.iterdir():
+            if not entry.name.startswith("X"):
+                continue
+            num = entry.name[1:]
+            if not num.isdigit() or num in skip:
+                continue
+            try:
+                found.append((entry.stat().st_mtime, num))
+            except OSError:
+                continue
+        if not found:
+            return None
+        found.sort(reverse=True)
+        return ":" + found[0][1]
+    except Exception:
+        return None
+
+
+def _apply_auth_display(job_id: str | None = None) -> str | None:
+    """Поставить DISPLAY для окна входа и сказать, куда смотреть."""
+    disp = _auth_display()
+    if not disp:
+        return os.environ.get("DISPLAY")
+    os.environ["DISPLAY"] = disp
+    if job_id:
+        _set_job(job_id, "pending", f"Окно откроется на экране {disp}…")
+    return disp
+
+
 def _prepare_browser_for_headed_auth(job_id: str | None = None) -> str:
     """
     Перед окном входа: остановить фоновые Playwright-воркеры (они держат профиль)
     и снять lock Chromium.
     """
+    _apply_auth_display(job_id)
     profile_dir = _get_profile_dir()
     if job_id:
         _set_job(
