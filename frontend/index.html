@@ -1711,6 +1711,39 @@ function domainItems(curId) {
   return items;
 }
 
+/* Ссылка на профиль у площадки. Адрес нигде не хранился: mapAccount его не
+   заполнял, поэтому `a.url` всегда был undefined — пункт «Открыть на площадке»
+   не показывался никогда, а кнопка в карточке висела заглушкой-тостом.
+   Собираем из платформы и логина по тем же правилам, что и воркеры. */
+function accountUrl(a) {
+  if (!a) return '';
+  const u = String(a.username || '').trim().replace(/^@/, '');
+  if (!u) return '';
+  switch (a.platform) {
+    case 'tiktok':    return 'https://www.tiktok.com/@' + encodeURIComponent(u);
+    case 'instagram': return 'https://www.instagram.com/' + encodeURIComponent(u) + '/';
+    case 'youtube':   return 'https://www.youtube.com/@' + encodeURIComponent(u);
+    case 'telegram':  return 'https://t.me/' + encodeURIComponent(u);
+    case 'x':         return 'https://x.com/' + encodeURIComponent(u);
+    case 'threads':   return 'https://www.threads.com/@' + encodeURIComponent(u);
+    // У Rumble канал живёт то на /user/, то на /c/. Воркер (platforms/rumble/parse.py)
+    // пробует /user/ первым — ссылка идёт туда же, чтобы не расходиться с ним.
+    case 'rumble':    return 'https://rumble.com/user/' + encodeURIComponent(u);
+    case 'reddit':    return 'https://www.reddit.com/r/' + encodeURIComponent(u.replace(/^r\//, '')) + '/';
+    // У Facebook логин бывает числовым id, и тогда vanity-адреса не существует.
+    case 'facebook':  return /^\d{6,24}$/.test(u)
+      ? 'https://www.facebook.com/profile.php?id=' + encodeURIComponent(u)
+      : 'https://www.facebook.com/' + encodeURIComponent(u);
+    default: return '';
+  }
+}
+
+function openAccountSite(a) {
+  const url = accountUrl(a);
+  if (!url) { toast('Для этой площадки нет публичной ссылки'); return; }
+  window.open(url, '_blank', 'noopener');
+}
+
 function menuDef(key) {
   const kind = menuKind(key);
   if (kind === 'row' || kind === 'rowdom') {
@@ -1723,7 +1756,7 @@ function menuDef(key) {
       { v: 'open', l: 'Открыть карточку' },
       { v: 'refresh', l: 'Обновить сейчас' },
     ];
-    if (a.url) items.push({ v: 'site', l: 'Открыть на площадке' });
+    if (accountUrl(a)) items.push({ v: 'site', l: 'Открыть на площадке' });
     if (domainItems(a.domainId).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
     items.push({ v: 'archive', l: a.archived ? 'Вернуть из архива' : 'Архивировать' });
     items.push({ v: 'ban', l: a.banned ? 'Снять бан' : 'Забанить' });
@@ -1837,7 +1870,7 @@ function applyRowMenu(key, v) {
   switch (v) {
     case 'open':    state.route = 'detail'; state.detailId = id; state.detailTab = 'overview'; break;
     case 'refresh': A.refreshOne(id); return;
-    case 'site':    window.open(a.url, '_blank', 'noopener'); return;
+    case 'site':    openAccountSite(a); return;
     case 'domain':  state.menu = 'rowdom:' + id; return;
     case 'archive': A.bulkUpdate([id], { is_archived: !a.archived },
                       a.archived ? 'Вернули из архива' : 'В архиве'); return;
@@ -2350,7 +2383,7 @@ function screenDetail() {
       '</div>' +
       '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' + esc(a.display) + ' · ' + pr.name + ' · ' + ow.name + '</div></div>' +
       '<div class="grow"></div>' +
-      '<button class="btn" data-act="toast" data-v="Открыть на площадке">' + ic('link', 13) + 'На площадке</button>' +
+      '<button class="btn" data-act="site-open" data-v="' + a.id + '"' + (accountUrl(a) ? '' : ' disabled title="Для этой площадки нет публичной ссылки"') + '>' + ic('link', 13) + 'На площадке</button>' +
       '<button class="btn" data-act="refresh-one" data-v="' + a.id + '">' + ic('refresh', 13) + 'Обновить</button>' +
       '<button class="btn pri" data-act="toast" data-v="Открыт редактор аккаунта">Изменить</button>' +
     '</div>' +
@@ -3309,6 +3342,7 @@ document.addEventListener('click', function (e) {
     case 'run-tab':      state.runTab = v; if (v === 'schedule') loadSchedule(); break;
     case 'run-tab-open': state.modal = 'refreshAll'; state.runTab = v; state.runError = false; if (v === 'schedule') loadSchedule(); break;
     case 'refresh-one': A.refreshOne(+v); return;
+    case 'site-open':   openAccountSite(ACCOUNTS.filter(function (x) { return x.id === +v; })[0]); return;
     case 'auto-now':    A.autoRunNow(); return;
     case 'export-csv':  A.exportCsv(); return;
     case 'sess-logout': {
