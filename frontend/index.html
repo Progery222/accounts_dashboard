@@ -404,7 +404,7 @@ svg { flex-shrink: 0; }
    так что в разряде проступала соседняя цифра. */
 .odo-c { display: block; height: 1em; overflow: hidden; line-height: 1; }
 .odo-s { display: block; transform: translateY(0);
-         transition: transform 1.8s cubic-bezier(.16, .72, .24, 1.06); }
+         transition: transform 3s cubic-bezier(.16, .72, .24, 1.06); }
 .odo-s > i { display: block; height: 1em; line-height: 1; font-style: normal; }
 @media (prefers-reduced-motion: reduce) { .odo-s { transition: none; } }
 .kpi .hd { display: flex; align-items: center; gap: 8px; }
@@ -4033,11 +4033,12 @@ function vcPaint() {
    Рисунок числа: где цифра, где разделитель. Если он поменялся (число
    выросло на разряд), одометр пересобираем целиком. */
 /* Барабан игрового автомата: разряд не переставляется на соседнюю цифру, а
-   прокручивает целый оборот и тормозит с лёгким проскоком. Втрое медленнее
+   прокручивает целый оборот и тормозит с лёгким проскоком. Впятеро медленнее
    прежних 600 мс; правые разряды крутятся дольше левых, поэтому останавливаются
-   по очереди слева направо — как барабаны в автомате. */
-const VC_ROLL_MS = 1800;
-const VC_ROLL_STEP_MS = 150;
+   по очереди слева направо — как барабаны в автомате. Дольше делать нельзя:
+   тик счётчика идёт раз в 10 с, и докрутка должна успевать закончиться. */
+const VC_ROLL_MS = 3000;
+const VC_ROLL_STEP_MS = 250;
 const VC_ROLL_EASE = 'cubic-bezier(.16, .72, .24, 1.06)';
 const VC_SPIN_TURNS = 1;                 // сколько полных оборотов добавляем
 function vcReduceMotion() {
