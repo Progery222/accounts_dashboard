@@ -43,6 +43,10 @@ def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[di
             tv = int(p.get("view_count") or 0)
             gv = int(g.get("view_count") or 0)
             p["view_count"] = max(tv, gv)
+            # Лайки и комментарии есть только у сетки (сняты наведением) —
+            # берём большее, чтобы ноль с одной стороны не затёр число с другой.
+            p["like_count"] = max(int(p.get("like_count") or 0), int(g.get("like_count") or 0))
+            p["comment_count"] = max(int(p.get("comment_count") or 0), int(g.get("comment_count") or 0))
             if not p.get("thumbnail_url") and g.get("thumbnail_url"):
                 p["thumbnail_url"] = g["thumbnail_url"]
             if not p.get("description") and g.get("description"):
@@ -60,7 +64,7 @@ def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[di
             "post_url": f"https://www.instagram.com/reel/{sc}/",
             "view_count": int(r.get("view_count") or 0),
             "like_count": int(r.get("like_count") or 0),
-            "comment_count": 0,
+            "comment_count": int(r.get("comment_count") or 0),
             "share_count": 0,
             "posted_at": None,
         })
@@ -283,6 +287,66 @@ _EXTRACT_REELS_GRID_ROWS_JS = r"""
 """
 
 
+def _parse_compact_int(raw: str) -> int:
+    """«2,935», «1.1M», «83,2 тыс.» → число."""
+    s = str(raw or "").strip().replace("\u00a0", "").replace("\u202f", "").replace(" ", "")
+    m = re.match(r"^([\d.,]+)([KMBkmb])?$", s)
+    if not m:
+        digits = re.sub(r"[^\d]", "", s)
+        return int(digits) if digits else 0
+    num, suf = m.group(1), (m.group(2) or "").lower()
+    if suf:
+        num = num.replace(",", ".")
+        try:
+            val = float(num)
+        except ValueError:
+            return 0
+        mul = {"k": 1e3, "m": 1e6, "b": 1e9}[suf]
+        return int(round(val * mul))
+    digits = re.sub(r"[^\d]", "", num)
+    return int(digits) if digits else 0
+
+
+async def _hover_grid_engagement(page, limit: int = 60) -> dict:
+    """Лайки и комментарии с сетки — они появляются в плитке при наведении.
+
+    Без курсора плитка показывает только просмотры («1.1M»), при наведении —
+    два числа: лайки и комментарии («2,935\\n70»). Открывать каждый пост ради
+    этого не нужно — сетевых запросов наведение не делает вообще.
+
+    Если после наведения число всё ещё одно — накладка не появилась, и мы
+    пропускаем плитку: иначе приняли бы просмотры за лайки.
+    """
+    out: dict[str, dict] = {}
+    try:
+        tiles = await page.query_selector_all('a[href*="/reel/"], a[href*="/p/"]')
+    except Exception:
+        return out
+    for tile in tiles[:limit]:
+        try:
+            href = await tile.get_attribute("href") or ""
+            m = re.search(r"/(?:reel|p)/([^/?#]+)", href)
+            if not m:
+                continue
+            shortcode = m.group(1)
+            if shortcode in out:
+                continue
+            await tile.scroll_into_view_if_needed(timeout=3000)
+            await tile.hover(timeout=3000)
+            await page.wait_for_timeout(180)
+            text = (await tile.inner_text()) or ""
+        except Exception:
+            continue
+        parts = [x.strip() for x in text.split("\n") if x.strip()]
+        if len(parts) < 2:
+            continue
+        likes = _parse_compact_int(parts[0])
+        comments = _parse_compact_int(parts[1])
+        if likes or comments:
+            out[shortcode] = {"like_count": likes, "comment_count": comments}
+    return out
+
+
 async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
     """Одна вкладка /reels/ для username; возвращает rows для _EXTRACT_REELS_GRID_ROWS_JS."""
     u = username.lstrip("@")
@@ -318,7 +382,20 @@ async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
         await page.wait_for_timeout(650)
 
     await page.wait_for_timeout(800)
-    return await page.evaluate(_EXTRACT_REELS_GRID_ROWS_JS) or []
+    rows = await page.evaluate(_EXTRACT_REELS_GRID_ROWS_JS) or []
+    # Лайки и комментарии снимаем отдельно: в разметке их нет, они
+    # появляются только под курсором.
+    try:
+        eng = await _hover_grid_engagement(page)
+    except Exception as exc:
+        print(f"[instagram_worker] наведение за лайками не удалось: {exc}", file=sys.stderr)
+        eng = {}
+    for r in rows:
+        e = eng.get(str(r.get("external_id") or ""))
+        if e:
+            r["like_count"] = e["like_count"]
+            r["comment_count"] = e["comment_count"]
+    return rows
 
 
 def _load_worker_utils():
