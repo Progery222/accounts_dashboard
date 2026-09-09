@@ -364,7 +364,12 @@ def _delete_chrome_cookies_by_host_needles(needles: list[str]) -> None:
     db_path = profile_dir / "Default" / "Network" / "Cookies"
     if not db_path.exists():
         return
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db")
+    # Временный файл — рядом с целевым, а не в системном /tmp. В контейнере
+    # /tmp и /app — разные файловые системы, и os.replace между ними падает с
+    # «Errno 18 Invalid cross-device link» — именно на этом ломался выход из сессии.
+    # В одном каталоге переименование ещё и атомарно: файл куков не останется
+    # наполовину записанным.
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".db", dir=str(db_path.parent))
     os.close(tmp_fd)
     try:
         shutil.copy2(db_path, tmp_path)

@@ -376,7 +376,51 @@ async def _page_indicates_profile_unavailable(page) -> bool:
     return any(marker in text for marker in markers)
 
 
-async def _extract_profile_counts_from_dom(page) -> dict:
+async def _profile_counts_via_web_api(page, username: str) -> dict:
+    """Счётчики из web_profile_info — того же запроса, который делает сам сайт.
+
+    Разбор вёрстки ломается при каждой смене разметки Instagram — именно так
+    подписчики и превратились в нули. Здесь числа приходят готовыми и точными,
+    а не округлёнными до «1,7 млн», как в подписи на странице. Запрос идёт из
+    самой страницы, поэтому куки сессии подставляются браузером сами.
+    """
+    try:
+        return await page.evaluate(
+            """
+            (async (u) => {
+                const out = { followers: 0, following: 0, posts: 0 };
+                try {
+                    const r = await fetch(
+                        '/api/v1/users/web_profile_info/?username=' + encodeURIComponent(u),
+                        { headers: { 'X-IG-App-ID': '936619743392459' }, credentials: 'include' },
+                    );
+                    if (!r.ok) return out;
+                    const j = await r.json();
+                    const usr = j && j.data && j.data.user;
+                    if (!usr) return out;
+                    out.followers = (usr.edge_followed_by && usr.edge_followed_by.count) || 0;
+                    out.following = (usr.edge_follow && usr.edge_follow.count) || 0;
+                    out.posts = (usr.edge_owner_to_timeline_media && usr.edge_owner_to_timeline_media.count) || 0;
+                } catch (_) {}
+                return out;
+            })
+            """,
+            (username or "").lstrip("@"),
+        )
+    except Exception:
+        return {}
+
+
+async def _extract_profile_counts_from_dom(page, username: str = "") -> dict:
+    # Сначала спрашиваем у самого Instagram, и только потом читаем вёрстку.
+    if username:
+        api = await _profile_counts_via_web_api(page, username)
+        if isinstance(api, dict) and int(api.get("followers") or 0) > 0:
+            return {
+                "followers": int(api.get("followers") or 0),
+                "following": int(api.get("following") or 0),
+                "posts": int(api.get("posts") or 0),
+            }
     stats = await page.evaluate("""
         (() => {
             const toInt = (raw) => {
@@ -477,7 +521,7 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         follower_count = _parse(m.group(1))
         following_count = _parse(m.group(2))
         post_count = _parse(m.group(3))
-    dom_stats = await _extract_profile_counts_from_dom(page)
+    dom_stats = await _extract_profile_counts_from_dom(page, username)
     if dom_stats:
         follower_count = int(dom_stats.get("followers") or follower_count or 0)
         following_count = int(dom_stats.get("following") or following_count or 0)
@@ -543,7 +587,7 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
         )
 
     reels_rows = await _scrape_reels_tab_once(page, _wu, username)
-    reels_dom_stats = await _extract_profile_counts_from_dom(page)
+    reels_dom_stats = await _extract_profile_counts_from_dom(page, username)
     if reels_dom_stats.get("followers", 0) > 0:
         follower_count = int(reels_dom_stats["followers"])
     if reels_dom_stats.get("following", 0) > 0:
@@ -559,7 +603,11 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
             "bio": bio,
             "follower_count": follower_count,
             "following_count": following_count,
-            "like_count": 0,
+            # У профиля Instagram нет счётчика «всего лайков», как у TikTok, поэтому
+            # здесь стоял жёсткий ноль — и лайки никогда не появлялись. Складываем по
+            # собранным постам: это единственный доступный источник, и число честно
+            # значит «лайки на собранных постах», а не за всю историю.
+            "like_count": sum(int(p.get("like_count") or 0) for p in (posts or [])),
             "post_count": post_count,
             "_posts": posts or [],
         },
@@ -571,7 +619,7 @@ async def scrape_profile_counts_only_on_page(page, _wu, username: str) -> dict:
     await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
     await _wu.wait_for_anti_bot_clear(page, platform="instagram")
     await page.wait_for_timeout(1800)
-    stats = await _extract_profile_counts_from_dom(page)
+    stats = await _extract_profile_counts_from_dom(page, username)
     return {
         "follower_count": int(stats.get("followers") or 0),
         "following_count": int(stats.get("following") or 0),
