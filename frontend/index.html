@@ -2680,11 +2680,6 @@ function screenTV() {
   const now = new Date();
   const clock = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
-  /* Чей это эфир. Без подписи одинаковые экраны на стене не различить, а
-     сводный от доменного отличается только числами. */
-  const d = state.domains && state.domains.current;
-  const scopeName = DOMAIN === DOMAIN_AGGREGATE ? 'все домены' : (d ? d.name : 'вся сеть');
-
   /* Внизу — остальные показатели, помельче. Только подпись и число:
      приросты под цифрами убраны, на стене они читались как шум. */
   const sub = [
@@ -2699,7 +2694,7 @@ function screenTV() {
       '<div style="width:24px;height:24px;border-radius:7px;background:var(--tvaccent);display:flex;align-items:center;justify-content:center">' +
         '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--tvbg)" stroke-width="1.8" stroke-linecap="round"><path d="M2 12.5 5.5 7l3 2.5L14 3"></path></svg></div>' +
       '<span style="font-size:13px;font-weight:600;letter-spacing:.02em">AccountsStats</span>' +
-      '<span class="tv-lbl">Эфир · ' + esc(scopeName) + '</span>' +
+      '<span class="tv-lbl">Эфир</span>' +
       '<div class="grow"></div>' +
       (state.run.on
         ? '<span style="display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px;border-radius:15px;background:var(--tvsurf);font-size:12px">' +
@@ -2711,16 +2706,15 @@ function screenTV() {
       '<button class="tv-btn" data-act="nav" data-v="accounts" aria-label="Выйти из эфира">' + ic('close', 16) + '</button>' +
     '</div>' +
 
-    /* Один экран, без ротации. Просмотры прижаты кверху и без подписи
-       «просмотры»: на стене и так понятно, что за число такой величины.
+    /* Один экран, без ротации. Над главной цифрой нет ничего: ни слова
+       «просмотры», ни имени эфира — чьё это табло, видно в верхней панели.
        Остальные показатели — отдельной группой у нижнего края. */
     '<div class="tv-scene on" data-scene="net" ' +
       'style="display:flex;flex-direction:column;align-items:center;justify-content:space-between;' +
-      'text-align:center;padding:clamp(8px,3vh,40px) 0 clamp(14px,6vh,72px)">' +
+      'text-align:center;padding:clamp(20px,8vh,104px) 0 clamp(14px,6vh,72px)">' +
       '<div style="max-width:100%">' +
-        '<div class="tv-lbl">' + esc(scopeName) + '</div>' +
         '<div class="tv-num tv-hero-xl" data-vc="views" data-vc-fmt="full" ' +
-          'style="margin-top:clamp(6px,2vh,20px);color:var(--tvink)">' + fmt(vcOr(t.v, 'views')) + '</div>' +
+          'style="color:var(--tvink)">' + fmt(vcOr(t.v, 'views')) + '</div>' +
       '</div>' +
       '<div style="display:flex;justify-content:center;align-items:flex-start;' +
         'gap:clamp(20px,5vw,88px);flex-wrap:wrap;width:100%">' +
