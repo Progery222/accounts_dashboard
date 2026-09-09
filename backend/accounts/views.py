@@ -930,7 +930,11 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
     from .refresh_queue import order_accounts_for_refresh
 
     accounts = order_accounts_for_refresh(ordered)
-    skip_recent_hours, cutoff = _schedule_skip_recent_cutoff()
+    # Здесь аккаунты выбраны руками — правило «не трогать недавно обновлённые»
+    # к ним не относится: оно для прогонов по расписанию, чтобы не скрести всю сеть
+    # заново. Раньше выбор трёх аккаунтов и «Обновить» давали прогон на секунду
+    # с тремя «пропущено» — со стороны это выглядело как «кнопка не работает».
+    skip_recent_hours, cutoff = 0, None
     from .refresh_priority import account_refresh_priority_session
 
     stop_requested = threading.Event()
