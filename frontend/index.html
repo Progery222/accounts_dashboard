@@ -2699,7 +2699,7 @@ function screenTV() {
       (state.run.on
         ? '<span style="display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px;border-radius:15px;background:var(--tvsurf);font-size:12px">' +
           '<span style="width:7px;height:7px;border-radius:4px;background:var(--tvaccent)"></span>' +
-          '<span class="tv-num">' + state.run.done + ' / ' + state.run.total + '</span>' +
+          '<span class="tv-num" id="tv-run-done">' + state.run.done + ' / ' + state.run.total + '</span>' +
           '<span style="color:var(--tvdim)">обновление</span></span>'
         : '') +
       '<span class="tv-num" style="font-size:15px;color:var(--tvdim)">' + clock + '</span>' +
@@ -3809,6 +3809,16 @@ function audienceList(a) { return LIVE ? (a._audLive || []) : audienceOf(a); }
    опрос идёт каждые 4 секунды, и страница моргала бы всё время простоя. */
 function paintRun() {
   const pct = state.run.total ? Math.round(state.run.done / state.run.total * 100) : 0;
+  // Эфир рисует прогон своей плашкой, ленты #rb-done там нет. Без этой ветки
+  // ветка «лента должна быть, но её нет» звала render() на каждый опрос, то
+  // есть раз в 4 секунды пересобирала одометр — цифры подменялись без
+  // анимации, барабан не успевал докрутиться (у него 1.8–2.1 с).
+  const tvDone = document.getElementById('tv-run-done');
+  if (tvDone) {
+    tvDone.textContent = state.run.done + ' / ' + state.run.total;
+    paintRunModal(pct);
+    return;
+  }
   const done = document.getElementById('rb-done');
   if (state.run.on) {
     if (!done) { render(); return; }          // лента должна быть, но её нет
