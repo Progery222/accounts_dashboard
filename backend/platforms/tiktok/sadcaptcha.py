@@ -99,6 +99,46 @@ async def _wait_tiktok_captcha_ui(page, *, timeout_ms: int = 12_000) -> None:
     await asyncio.sleep(0.8)
 
 
+_EXPECT_ALIGNED_TO: str | None = None
+
+
+def _align_solver_to_browser_engine(page) -> None:
+    """Свести типы решателя SadCaptcha с движком, которым открыта страница.
+
+    ``tiktok_captcha_solver`` берёт ``expect`` и ``TimeoutError`` из
+    ``playwright``, а страницу мы открываем **patchright** (стелс-форк). Внутри
+    ``expect()`` идут isinstance-проверки по своим классам, и чужой Locator под
+    них не подходит — любая попытка решить капчу падает на
+
+        ValueError: Unsupported type: <class 'patchright...Locator'>
+
+    Падали все пять стратегий подряд, капча не решалась, прогон висел до
+    таймаута в 300 с. ``TimeoutError`` — та же беда с другой стороны: except
+    ловит playwright'овский, а прилетает patchright'овский.
+
+    Подменяем оба имени в модуле решателя на те, что соответствуют движку.
+    """
+    global _EXPECT_ALIGNED_TO
+    engine = "patchright" if (type(page).__module__ or "").startswith("patchright") else "playwright"
+    if _EXPECT_ALIGNED_TO == engine:
+        return
+    try:
+        import importlib
+
+        api = importlib.import_module(f"{engine}.async_api")
+        solver_mod = importlib.import_module("tiktok_captcha_solver.asyncplaywrightsolver")
+        solver_mod.expect = api.expect
+        solver_mod.TimeoutError = api.TimeoutError
+        _EXPECT_ALIGNED_TO = engine
+        print(f"[tiktok] SadCaptcha: типы решателя сведены с {engine}", file=sys.stderr, flush=True)
+    except Exception as exc:
+        print(
+            f"[tiktok] SadCaptcha: не удалось свести типы решателя ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 async def _solve_tiktok_captcha_fallback(solver) -> None:
     """Если identify_captcha не сработал — пробуем типовые solvers по очереди."""
     for name, method in (
@@ -146,6 +186,7 @@ async def solve_tiktok_captcha_if_present(page, *, force: bool = False) -> bool:
         file=sys.stderr,
         flush=True,
     )
+    _align_solver_to_browser_engine(page)
     solver = AsyncPlaywrightSolver(page, api_key)
     try:
         if force:
