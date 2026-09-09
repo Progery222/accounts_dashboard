@@ -470,7 +470,11 @@ async def _extract_profile_counts_from_dom(page, username: str = "") -> dict:
                 // Fallback for layouts where list items are absent:
                 // parse nearby label + value nodes in profile header.
                 if (!out.followers || !out.following || !out.posts) {
-                    const text = (root.innerText || '').replace(/\\s+/g, ' ');
+                    // Ищем по всей странице, а не внутри <header>: в нынешней разметке
+                    // Instagram счётчиков в header нет, и поиск в нём давал нули, хотя в тексте
+                    // страницы чёрным по белому «456K followers».
+                    const text = ((root.innerText || '') + ' ' + (document.body ? document.body.innerText : ''))
+                        .replace(/\\s+/g, ' ');
                     const mf = text.match(/([\\d.,]+\\s*[KMBkmb]?)\\s+followers?/i);
                     const mfo = text.match(/([\\d.,]+\\s*[KMBkmb]?)\\s+following/i);
                     const mp = text.match(/([\\d.,]+\\s*[KMBkmb]?)\\s+posts?/i);
