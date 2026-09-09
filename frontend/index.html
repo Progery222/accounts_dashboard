@@ -3455,6 +3455,9 @@ document.addEventListener('click', function (e) {
       break;
     default: return;
   }
+  // Адрес следует за экраном — одной точкой на все действия, а не в каждом
+  // case по отдельности: маршрут меняют и рельс, и командная палитра, и выход из эфира.
+  syncUrl();
   // Каждое действие трогает свой слой: клик в модалке не пересобирает таблицу.
   if (OVERLAY_ACTS.has(act)) paintOverlay();
   else if (MAIN_ACTS.has(act)) paintMain();
@@ -3519,7 +3522,7 @@ document.addEventListener('keydown', function (e) {
   }
   if (state.route === 'tv') {
     // Экран один, переключать нечего — остаётся только выход.
-    if (e.key === 'Escape') { state.route = 'accounts'; render(); }
+    if (e.key === 'Escape') { state.route = 'accounts'; syncUrl(); render(); }
     return;
   }
   if (e.key === 'Escape') {
@@ -3584,12 +3587,18 @@ const ACC_QS = 'include_hidden=1&archived=all&banned=all';
    ============================================================ */
 const DOMAIN_AGGREGATE = 'efir';
 const RESERVED_PATH = { api: 1, admin: 1, media: 1, static: 1, healthz: 1, index: 1 };
+/* Экраны, у которых есть свой адрес. Первым куском пути они значат «экран без
+   домена», вторым — «этот экран внутри домена»: /analytics и /reiz/analytics. */
+const SCREEN_SEG = { efir: 'tv', analytics: 'analytics', settings: 'settings' };
+const SEG_BY_ROUTE = { tv: DOMAIN_AGGREGATE, analytics: 'analytics', settings: 'settings' };
 const PATH_SEGS = (location.pathname || '').split('/').filter(Boolean)
   .map(function (s) { return s.toLowerCase(); });
 const DOMAIN = (function () {
   const seg = PATH_SEGS[0];
-  if (seg && !RESERVED_PATH[seg] && !/\./.test(seg)) return seg;
-  return '';
+  if (!seg || RESERVED_PATH[seg] || /\./.test(seg)) return '';
+  // /analytics — это экран, а не домен; /efir — сводный эфир, он тоже домен.
+  if (SCREEN_SEG[seg] && seg !== DOMAIN_AGGREGATE) return '';
+  return seg;
 })();
 /* Эфир открывается двумя адресами: /efir — сводный по всем доменам,
    /reiz/efir — только по своему. Данные сужает та же логика домена, поэтому
@@ -3597,6 +3606,46 @@ const DOMAIN = (function () {
 const TV_ON_LOAD = PATH_SEGS[0] === DOMAIN_AGGREGATE || PATH_SEGS[1] === DOMAIN_AGGREGATE;
 /* Префикс для ссылок внутри интерфейса, чтобы переходы не теряли домен. */
 const DOMAIN_PREFIX = DOMAIN && DOMAIN !== DOMAIN_AGGREGATE ? '/' + DOMAIN : '';
+
+/* ---- адрес следует за экраном --------------------------------------
+   Раньше интерфейс адрес не трогал совсем. Пришли по старой ссылке вида
+   ?route=tv или /emu — и она висела в строке, пока вы ходите по экранам,
+   будто приложение её само подставляет. Плюс на любой экран нельзя было
+   дать ссылку и не работало «назад».
+   Теперь адрес пересобирается из домена и экрана, а чужие параметры из
+   строки убираем: приложение читает только demo. */
+const KEEP_PARAMS = { demo: 1 };
+function routeUrl(route) {
+  const seg = SEG_BY_ROUTE[route] || '';
+  const base = DOMAIN === DOMAIN_AGGREGATE ? '' : DOMAIN_PREFIX;
+  let path = base + (seg ? '/' + seg : '') || '/';
+  const keep = [];
+  try {
+    new URLSearchParams(location.search).forEach(function (val, key) {
+      if (KEEP_PARAMS[key]) keep.push(key + '=' + encodeURIComponent(val));
+    });
+  } catch (e) {}
+  return path + (keep.length ? '?' + keep.join('&') : '');
+}
+function syncUrl(replace) {
+  // Карточку аккаунта своим адресом не отмечаем: у неё нет собственного
+  // маршрута, и подменять его на список было бы враньём про «назад».
+  const route = state.route === 'detail' ? 'accounts' : state.route;
+  const url = routeUrl(route);
+  if (url === location.pathname + location.search) return;
+  try {
+    history[replace ? 'replaceState' : 'pushState']({ route: route }, '', url);
+  } catch (e) {}
+}
+window.addEventListener('popstate', function () {
+  const segs = (location.pathname || '').split('/').filter(Boolean).map(function (s) { return s.toLowerCase(); });
+  const last = segs[segs.length - 1];
+  const route = (last && SCREEN_SEG[last]) || 'accounts';
+  if (route === state.route) return;
+  state.route = route;
+  state.detailId = null;
+  render();
+});
 function domainHeaders(extra) {
   const h = extra || {};
   if (DOMAIN) h['X-Domain'] = DOMAIN;
@@ -4284,10 +4333,17 @@ function runTick() {
   bar.style.width = Math.round(state.run.done / state.run.total * 100) + '%';
   cur.textContent = 'Сейчас: ' + state.run.cur + ' · осталось ~' + Math.max(1, Math.round((state.run.total - state.run.done) / 16)) + ' мин';
 }
-/* На /efir и /<домен>/efir сразу открываем экран на стене, а не список
-   аккаунтов: на такой адрес заходят ровно за эфиром. Сохранённый маршрут
-   тут не спрашиваем. */
-if (TV_ON_LOAD) state.route = 'tv';
+/* Экран берём из адреса: /efir и /<домен>/efir — эфир, /analytics и
+   /settings — свои экраны. Сохранённый маршрут тут не спрашиваем: адрес
+   главнее. Заодно переписываем строку без чужих параметров — старые ссылки
+   вроде ?route=tv больше не висят в адресе. */
+if (TV_ON_LOAD) {
+  state.route = 'tv';
+} else {
+  const last = PATH_SEGS[PATH_SEGS.length - 1];
+  if (last && SCREEN_SEG[last]) state.route = SCREEN_SEG[last];
+}
+syncUrl(true);
 
 /* Первая отрисовка — скелетон, пока идут запросы к API */
 render();

@@ -3,10 +3,17 @@ from django.utils import timezone
 
 from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT
 
-#: Путь и поддомен, показывающие эфир сразу по всем доменам. Это не арендатор:
-#: своих аккаунтов у него нет, поэтому в таблице Domain строки для него не
-#: заводим — слово зарезервировано и разбирается при определении домена.
+#: Путь, показывающий эфир сразу по всем доменам. Это не арендатор: своих
+#: аккаунтов у него нет, поэтому в таблице Domain строки для него не заводим —
+#: слово зарезервировано и разбирается при определении домена.
 AGGREGATE_DOMAIN_SLUG = "efir"
+
+#: Куски пути, занятые экранами и служебными разделами. Домен с таким slug
+#: был бы недостижим: адрес /analytics фронт прочтёт как экран, а не как домен.
+RESERVED_DOMAIN_SLUGS = frozenset({
+    AGGREGATE_DOMAIN_SLUG, "analytics", "settings",
+    "api", "admin", "media", "static", "healthz", "index",
+})
 
 
 class Domain(models.Model):
@@ -43,9 +50,14 @@ class Domain(models.Model):
 
     def clean(self):
         from django.core.exceptions import ValidationError
-        if (self.slug or "").lower() == AGGREGATE_DOMAIN_SLUG:
+        slug = (self.slug or "").lower()
+        if slug == AGGREGATE_DOMAIN_SLUG:
             raise ValidationError({
                 "slug": f"«{AGGREGATE_DOMAIN_SLUG}» занято под сводный эфир по всем доменам.",
+            })
+        if slug in RESERVED_DOMAIN_SLUGS:
+            raise ValidationError({
+                "slug": f"«{slug}» занято экраном или служебным разделом — такой домен был бы недостижим.",
             })
 
     def save(self, *args, **kwargs):
