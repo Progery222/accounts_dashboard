@@ -1066,6 +1066,7 @@ const state = {
     return {
       on: true, total: total, done: Math.round(total * 0.36),
       cur: '@' + ((pool[3] || ACCOUNTS[0] || {}).username || '—'), timer: null,
+      startedAt: 0,       // начало последнего прогона, см. staleAccounts
     };
   })(),
   paletteQ: '', paletteI: 0,
@@ -1685,6 +1686,19 @@ function menuKind(key) { return String(key).split(':')[0]; }
 function menuArg(key)  { return String(key).split(':')[1] || ''; }
 const ACTION_MENUS = { row: 1, rowdom: 1, acts: 1, actsdom: 1 };
 
+/* Аккаунты, которых последний прогон не коснулся.
+   Отменённые от успешных по самим цифрам не отличить — у отменённых просто
+   осталось старое «Обновлён». Поэтому сравниваем с началом последнего прогона:
+   всё, что не обновлялось с тех пор, в нём и не обновилось.
+   Если о прогоне ничего не известно, берём порог в сутки. */
+function staleAccounts() {
+  const list = visible();
+  const started = state.run && state.run.startedAt;
+  const cutoffMin = started ? (Date.now() - started) / 60000 : 24 * 60;
+  return list.filter(function (a) {
+    return !a.archived && !a.banned && a.updated > cutoffMin;
+  });
+}
 /* Домены для подменю «Перенести в домен». Пока список не приехал — пусто,
    и пункт не показываем: лучше не рисовать заведомо пустое меню. */
 function domainItems(curId) {
@@ -1719,9 +1733,15 @@ function menuDef(key) {
     const n = state.selected.size;
     if (kind === 'actsdom') return { title: 'Перенести в домен', cur: '', items: domainItems(null) };
     if (!n) {
-      return { title: 'Действия', cur: '', items: [{ v: 'nosel', l: 'Сначала выберите аккаунты', muted: true }] };
+      const stale0 = staleAccounts();
+      return { title: 'Действия', cur: '', items: stale0.length
+        ? [{ v: 'pick-stale', l: 'Выделить необновившиеся (' + stale0.length + ')' },
+           { v: 'nosel', l: 'или отметьте аккаунты в списке', muted: true }]
+        : [{ v: 'nosel', l: 'Сначала выберите аккаунты', muted: true }] };
     }
     const items = [{ v: 'refresh', l: 'Обновить выбранные (' + n + ')' }];
+    const stale = staleAccounts();
+    if (stale.length) items.push({ v: 'pick-stale', l: 'Выделить необновившиеся (' + stale.length + ')' });
     if (domainItems(null).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
     items.push({ v: 'archive', l: 'В архив' });
     items.push({ v: 'unarchive', l: 'Вернуть из архива' });
@@ -1839,6 +1859,13 @@ function applyActsMenu(key, v) {
     return;
   }
   if (v === 'nosel') { state.menu = null; return; }
+  if (v === 'pick-stale') {
+    const stale = staleAccounts();
+    state.menu = null;
+    state.selected = new Set(stale.map(function (a) { return a.id; }));
+    toast('Отмечено ' + stale.length + ' — те, что не обновились');
+    return;
+  }
   state.menu = null;
   switch (v) {
     case 'refresh':   A.bulkRefresh(ids); return;
@@ -3706,6 +3733,10 @@ async function pollRun() {
     state.run.done  = s.processed_accounts || 0;
     state.run.cur   = s.current_account ? '@' + s.current_account : '—';
     state.run.failed = s.failed_accounts || 0;
+    // Начало последнего прогона нужно, чтобы отличить «обновился в нём»
+    // от «не обновлялся»: отменённые от успешных иначе не отличить.
+    const st = s.started_at ? Date.parse(s.started_at) : NaN;
+    state.run.startedAt = isFinite(st) ? st : state.run.startedAt || 0;
     if (was !== state.run.on) render(); else paintRun();
   } catch (e) {}
 }

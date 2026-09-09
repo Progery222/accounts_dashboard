@@ -12,11 +12,26 @@ _REFRESH_FORCE_STOP = threading.Event()
 
 
 def mark_playwright_refresh_force_stop() -> None:
-    """Сразу после «Остановить» — не поднимать новые демоны до сброса флага."""
+    """Сразу после «Остановить» — не поднимать новые демоны до сброса флага.
+
+    Пишем, кто именно поставил флаг. Пока он стоит, каждый следующий аккаунт
+    в прогоне получает «Остановлено пользователем» без единой попытки — и по
+    логам было не понять, откуда взялась остановка, которой никто не просил.
+    """
+    if not _REFRESH_FORCE_STOP.is_set():
+        try:
+            import traceback
+
+            where = "".join(traceback.format_stack(limit=6)[:-1]).strip()
+            print(f"[worker_pool] force_stop ВЗВЕДЁН:\n{where}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
     _REFRESH_FORCE_STOP.set()
 
 
 def clear_playwright_refresh_force_stop() -> None:
+    if _REFRESH_FORCE_STOP.is_set():
+        print("[worker_pool] force_stop снят", file=sys.stderr, flush=True)
     _REFRESH_FORCE_STOP.clear()
 
 
