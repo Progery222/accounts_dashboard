@@ -22,6 +22,7 @@ from platforms.browser_engine import async_playwright
 
 from platforms.instagram.posts_meta import annotate_instagram_posts_payload, instagram_max_posts
 from platforms.instagram.posts_meta import instagram_reels_scroll_iterations as _reels_scroll_iters
+from platforms.instagram.posts_meta import instagram_reels_target_tiles as _reels_target_tiles
 
 
 def _merge_posts_with_reels_grid(posts: list[dict], rows: list[dict]) -> list[dict]:
@@ -307,7 +308,7 @@ def _parse_compact_int(raw: str) -> int:
     return int(digits) if digits else 0
 
 
-async def _hover_grid_engagement(page, limit: int = 60) -> dict:
+async def _hover_grid_engagement(page, limit: int = 60, known: set | None = None) -> dict:
     """Лайки и комментарии с сетки — они появляются в плитке при наведении.
 
     Без курсора плитка показывает только просмотры («1.1M»), при наведении —
@@ -329,7 +330,7 @@ async def _hover_grid_engagement(page, limit: int = 60) -> dict:
             if not m:
                 continue
             shortcode = m.group(1)
-            if shortcode in out:
+            if shortcode in out or (known and shortcode in known):
                 continue
             await tile.scroll_into_view_if_needed(timeout=3000)
             await tile.hover(timeout=3000)
@@ -347,8 +348,12 @@ async def _hover_grid_engagement(page, limit: int = 60) -> dict:
     return out
 
 
-async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
-    """Одна вкладка /reels/ для username; возвращает rows для _EXTRACT_REELS_GRID_ROWS_JS."""
+async def _scrape_reels_tab_once(page, _wu, username: str, post_count: int = 0) -> list:
+    """Одна вкладка /reels/ для username; возвращает rows для _EXTRACT_REELS_GRID_ROWS_JS.
+
+    ``post_count`` — сколько публикаций заявлено в профиле: от него зависит
+    глубина прокрутки.
+    """
     u = username.lstrip("@")
     reels_url = f"https://www.instagram.com/{u}/reels/"
     try:
@@ -377,24 +382,53 @@ async def _scrape_reels_tab_once(page, _wu, username: str) -> list:
 
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(500)
-    for _ in range(_reels_scroll_iters()):
+    # Глубина прокрутки зависит от числа публикаций, а не одна на всех.
+    # Собирать один раз в конце нельзя: Instagram выбрасывает уехавшие плитки
+    # из DOM, поэтому в конце видно только последний экран — сколько ни листай,
+    # больше трёх десятков постов не набиралось. Копим на каждом шаге и сами
+    # плитки, и лайки под курсором, пока они ещё на странице.
+    target = _reels_target_tiles(post_count)
+    iters = _reels_scroll_iters(post_count)
+    by_id: dict[str, dict] = {}
+    eng: dict[str, dict] = {}
+    stale = 0
+    for _ in range(iters):
+        try:
+            for r in (await page.evaluate(_EXTRACT_REELS_GRID_ROWS_JS) or []):
+                sid = str(r.get("external_id") or "")
+                if sid and sid not in by_id:
+                    by_id[sid] = r
+        except Exception:
+            pass
+        # Лайки и комментарии снимаем здесь же: в разметке их нет, они
+        # появляются только под курсором — и только пока плитка жива.
+        try:
+            eng.update(await _hover_grid_engagement(page, known=set(eng)))
+        except Exception as exc:
+            print(f"[instagram_worker] наведение за лайками: {exc}", file=sys.stderr)
+        if len(by_id) >= target:
+            break
+        before = len(by_id)
         await page.evaluate("window.scrollBy(0, Math.min(window.innerHeight, 900))")
-        await page.wait_for_timeout(650)
+        await page.wait_for_timeout(900)
+        if len(by_id) <= before:
+            stale += 1
+            if stale >= 8:
+                break
+        else:
+            stale = 0
 
-    await page.wait_for_timeout(800)
-    rows = await page.evaluate(_EXTRACT_REELS_GRID_ROWS_JS) or []
-    # Лайки и комментарии снимаем отдельно: в разметке их нет, они
-    # появляются только под курсором.
-    try:
-        eng = await _hover_grid_engagement(page)
-    except Exception as exc:
-        print(f"[instagram_worker] наведение за лайками не удалось: {exc}", file=sys.stderr)
-        eng = {}
+    rows = list(by_id.values())
     for r in rows:
         e = eng.get(str(r.get("external_id") or ""))
         if e:
             r["like_count"] = e["like_count"]
             r["comment_count"] = e["comment_count"]
+    print(
+        f"[instagram_worker] @{u}: публикаций {post_count or '?'}, цель {target} плиток, "
+        f"собрано {len(rows)}, с лайками {len(eng)}, скроллов до {iters}",
+        file=sys.stderr,
+    )
     return rows
 
 
@@ -667,7 +701,7 @@ async def scrape_full_profile_on_page(page, _wu, username: str) -> dict:
             },
         )
 
-    reels_rows = await _scrape_reels_tab_once(page, _wu, username)
+    reels_rows = await _scrape_reels_tab_once(page, _wu, username, post_count=post_count)
     reels_dom_stats = await _extract_profile_counts_from_dom(page, username)
     if reels_dom_stats.get("followers", 0) > 0:
         follower_count = int(reels_dom_stats["followers"])

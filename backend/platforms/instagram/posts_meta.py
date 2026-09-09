@@ -20,10 +20,30 @@ def instagram_max_posts() -> int:
         return 80
 
 
-def instagram_reels_scroll_iterations() -> int:
-    """Скроллы вкладки /reels/ — больше постов при большем лимите."""
+def instagram_reels_target_tiles(post_count: int = 0) -> int:
+    """Сколько плиток имеет смысл собрать у этого профиля.
+
+    Больше общего лимита не берём, меньше числа публикаций — тоже нет смысла.
+    """
     cap = instagram_max_posts()
-    return max(16, min(40, (cap + 7) // 5))
+    n = int(post_count or 0)
+    return min(n, cap) if n > 0 else cap
+
+
+def instagram_reels_scroll_iterations(post_count: int = 0) -> int:
+    """Скроллы вкладки /reels/: чем больше публикаций, тем глубже листаем.
+
+    Раньше число было одно на всех — 17 скроллов и для аккаунта с десятком
+    публикаций, и для аккаунта с двумя сотнями.
+
+    Считать «экран = три плитки» оказалось слишком оптимистично: сетка догружает
+    порциями и между порциями замирает, поэтому на прокрутку одной плитки уходит
+    около шага цикла. У @jggl_official (191 публикация) при 32 шагах собиралось
+    36 плиток, при запасе — 87. Даём с запасом, лишние шаги всё равно
+    отсекаются ранним выходом по цели и по «лента перестала расти».
+    """
+    target = instagram_reels_target_tiles(post_count)
+    return max(20, min(140, target + 20))
 
 
 def annotate_instagram_posts_payload(payload: dict) -> dict:
