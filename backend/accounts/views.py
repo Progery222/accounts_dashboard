@@ -2612,6 +2612,26 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             continue
         if is_partial and field in _STAT_FIELDS:
             continue  # don't zero-out existing stats on a partial update
+        # Ноль поверх живого числа — почти всегда неудавшийся съём, а не реальное
+        # падение до нуля. Флаг _partial спасает только когда не собралось вообщё
+        # ничего; частичный ответ (Instagram отдал просмотры и посты, а подписчиков
+        # и лайки — нулями) проходил мимо него и затирал накопленное.
+        if (
+            field in _STAT_FIELDS
+            and not value
+            and stats_before.get(field, 0) > 0
+        ):
+            logger.info(
+                "refresh.keep_stat_on_zero",
+                extra={
+                    "account_id": account.id,
+                    "platform": account.platform,
+                    "username": account.username,
+                    "field": field,
+                    "kept": stats_before.get(field, 0),
+                },
+            )
+            continue
         if value is not None:
             if field in _SKIP_EMPTY_STR_UPDATE and isinstance(value, str) and not value.strip():
                 continue

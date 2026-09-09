@@ -1085,6 +1085,7 @@ const state = {
   // Форма «Добавить аккаунты». Текст держим в состоянии, иначе выбор в любом
   // списке пересобирает слой модалки и стирает набранное.
   add: { text: '', platform: '', domainId: 0, profileId: 0, ownerId: 0, groupId: 0, countryId: 0 },
+  cookiesFor: '', cookiesText: '',   // окно импорта куков в настройках
 };
 function isNarrow() { return window.matchMedia('(max-width: 760px)').matches; }
 function effView() { return isNarrow() ? 'cards' : state.view; }
@@ -2564,10 +2565,12 @@ function screenSettings() {
         return '<div class="srow">' + pmark(s.p) +
           '<div style="flex-grow:1"><div style="font-size:13px;font-weight:500">' + PF[s.p].l + '</div>' +
           '<div style="font-size:12px;color:' + col + ';margin-top:2px">' + s.note + '</div></div>' +
+          // Раньше все три кнопки были заглушками data-act="toast": показывали
+          // уведомление и не делали ничего. Эндпоинты при этом были на месте.
           (s.ok === true
-            ? '<button class="btn sm" data-act="toast" data-v="Сессия сброшена">' + ic('logout', 12) + 'Выйти</button>'
-            : '<button class="btn sm pri" data-act="toast" data-v="Открыт браузерный вход">Войти</button>') +
-          '<button class="btn sm" data-act="toast" data-v="Импорт cookies">Cookies</button>' +
+            ? '<button class="btn sm" data-act="sess-logout" data-v="' + s.p + '">' + ic('logout', 12) + 'Выйти</button>'
+            : '<button class="btn sm pri" data-act="sess-login" data-v="' + s.p + '">Войти</button>') +
+          '<button class="btn sm" data-act="sess-cookies" data-v="' + s.p + '">Cookies</button>' +
         '</div>';
       }).join('') + '</div></div>' +
 
@@ -2966,6 +2969,28 @@ function modalAdd() {
   return modalShell('Добавить аккаунты', body, ft);
 }
 
+/* Импорт кук — рабочий способ восстановить сессию из веб-интерфейса.
+   Кнопка «Войти» открывает окно браузера на сервере, а не у вас, поэтому для
+   удалённой машины годится именно этот путь. */
+function modalCookies() {
+  const p = state.cookiesFor;
+  const pl = (PLATFORMS.filter(function (x) { return x.v === p; })[0] || { l: p });
+  const body =
+    '<div style="font-size:13px;color:var(--ink-2);line-height:1.5">' +
+      'Откройте <b>' + esc(pl.l) + '</b> в браузере, где вы уже вошли, скопируйте куки ' +
+      'и вставьте сюда. Подойдёт как строка <code>name=value; name2=value2</code>, ' +
+      'так и выгрузка расширения в JSON.' +
+    '</div>' +
+    '<textarea id="cookiestext" rows="9" placeholder="sessionid=...; csrftoken=...; ds_user_id=..." ' +
+      'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);' +
+      'color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none">' +
+      esc(state.cookiesText) + '</textarea>' +
+    '<div style="font-size:12px;color:var(--ink-3)">Куки уедут на сервер и заменят сохранённую сессию площадки.</div>';
+  const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
+    '<button class="btn pri" data-act="cookies-save">Импортировать</button>';
+  return modalShell('Куки · ' + pl.l, body, ft);
+}
+
 function modalCompare() {
   const picked = ACCOUNTS.filter(function (a) { return state.selected.has(a.id); }).slice(0, 5);
   if (!picked.length) return modalShell('Сравнение', '<div class="empty">Выберите от двух аккаунтов в списке.</div>', '<div class="grow"></div><button class="btn" data-act="close">Закрыть</button>');
@@ -3124,7 +3149,8 @@ function modalsHtml() {
     (state.modal === 'compare'  ? modalCompare()  : '') +
     (state.modal === 'cols'     ? modalCols()     : '') +
     (state.modal === 'confirm'  ? modalConfirm()  : '') +
-    (state.modal === 'palette'  ? modalPalette()  : '');
+    (state.modal === 'palette'  ? modalPalette()  : '') +
+    (state.modal === 'cookies'  ? modalCookies()  : '');
 }
 
 let mountedModal = null;   // чтобы не проигрывать анимацию появления на каждом клике внутри окна
@@ -3285,6 +3311,27 @@ document.addEventListener('click', function (e) {
     case 'refresh-one': A.refreshOne(+v); return;
     case 'auto-now':    A.autoRunNow(); return;
     case 'export-csv':  A.exportCsv(); return;
+    case 'sess-logout': {
+      const pl = (PLATFORMS.filter(function (x) { return x.v === v; })[0] || { l: v }).l;
+      askConfirm({
+        title: 'Выйти из ' + pl + '?',
+        text: 'Сохранённая сессия будет удалена. Пока не войдёте заново или не импортируете куки, ' +
+              'аккаунты этой площадки перестанут обновляться.',
+        ok: 'Выйти', danger: true, run: function () { A.sessionLogout(v); },
+      });
+      break;
+    }
+    case 'sess-login':   A.sessionLogin(v); return;
+    case 'sess-cookies': state.modal = 'cookies'; state.cookiesFor = v; state.cookiesText = ''; break;
+    case 'cookies-save': {
+      const el = document.getElementById('cookiestext');
+      const raw = el ? el.value : state.cookiesText;
+      if (!String(raw || '').trim()) { toast('Вставьте куки'); return; }
+      const pf = state.cookiesFor;
+      state.modal = null;
+      A.sessionCookies(pf, raw);
+      break;
+    }
     case 'tg-test':     A.telegramTest(); return;
     case 'sched-bool':
       if (state.sched) state.sched[v] = !state.sched[v];
@@ -3486,6 +3533,7 @@ document.addEventListener('input', function (e) {
     return;
   }
   if (e.target.id === 'addlist') { state.add.text = e.target.value; return; }
+  if (e.target.id === 'cookiestext') { state.cookiesText = e.target.value; return; }
   if (e.target.id === 'pal')  { state.paletteQ = e.target.value; state.paletteI = 0; render(); }
   if (e.target.id === 'audq') { state.audQ = e.target.value; state.audPage = 1; render(); }
 });
@@ -4024,6 +4072,22 @@ function vcStart() {
   }, VC_TICK_MS);
 }
 
+/* Задачи настроек (вход, импорт куков) идут фоном: сразу возвращается
+   job_id, результат приходит позже. Ответ берём у сервера, а не придумываем. */
+async function waitSettingsJob(jobId, tries) {
+  if (!jobId) return null;
+  const max = tries || 60;
+  for (let i = 0; i < max; i++) {
+    await new Promise(function (r) { setTimeout(r, 1000); });
+    let j = null;
+    try { j = await api('/api/settings/job/' + encodeURIComponent(jobId) + '/'); } catch (e) { continue; }
+    if (!j) continue;
+    if (j.status === 'done') return j;
+    if (j.status === 'error') { const e = new Error(j.message || 'Не удалось'); throw e; }
+  }
+  throw new Error('Сервер не ответил за минуту — посмотрите состояние сессий позже');
+}
+
 async function loadSessionsLive() {
   try {
     const s = await api('/api/settings/status/');
@@ -4193,6 +4257,31 @@ const A = {
         ? 'Добавлено ' + r.ok + ', с ошибкой ' + r.errs.length + ' (' + r.errs[0] + ')'
         : 'Добавлено ' + r.ok;
     });
+  },
+  /* Сброс сессии площадки. Необратимо: куки удаляются, и без повторного
+     входа площадка перестанёт собираться вообще — поэтому через подтверждение. */
+  sessionLogout: function (p) {
+    return run(function () { return apiSend('/api/settings/' + p + '/logout/'); },
+      'Сессия сброшена', { reload: false })
+      .then(function () { loadSessionsLive(); });
+  },
+  /* Импорт куков. Бэкенд отвечает job_id и работает фоном, поэтому ждём
+     его собственного вердикта, а не говорим «готово» сразу после отправки. */
+  sessionCookies: function (p, raw) {
+    return run(async function () {
+      const r = await apiSend('/api/settings/' + p + '/import-cookies/', { cookies: raw });
+      return await waitSettingsJob(r.job_id);
+    }, function (r) { return r && r.message ? r.message : 'Куки импортированы'; }, { reload: false })
+      .then(function () { loadSessionsLive(); });
+  },
+  /* Вход открывает окно браузера на сервере, а не у вас. Сообщаем то, что
+     говорит сам сервер, без своих формулировок. */
+  sessionLogin: function (p) {
+    return run(async function () {
+      const r = await apiSend('/api/settings/' + p + '/start-auth/');
+      return await waitSettingsJob(r.job_id);
+    }, function (r) { return r && r.message ? r.message : 'Вход запущен на сервере'; }, { reload: false })
+      .then(function () { loadSessionsLive(); });
   },
   exportCsv: function () {
     if (DEMO || !LIVE) { toast('Демо-режим: выгрузка недоступна'); return; }
