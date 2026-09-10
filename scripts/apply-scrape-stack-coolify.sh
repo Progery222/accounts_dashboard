@@ -31,7 +31,6 @@ docker cp "$REMOTE_ROOT/backend/accounts/threads_worker.py" "$BACKEND:/app/accou
 docker cp "$REMOTE_ROOT/backend/accounts/x_worker.py" "$BACKEND:/app/accounts/x_worker.py"
 docker cp "$REMOTE_ROOT/backend/accounts/settings_views.py" "$BACKEND:/app/accounts/settings_views.py"
 docker cp "$REMOTE_ROOT/backend/accounts/management/commands/setup_tiktok_auth.py" "$BACKEND:/app/accounts/management/commands/setup_tiktok_auth.py"
-docker cp "$REMOTE_ROOT/backend/tiktok_app/playwright_worker.py" "$BACKEND:/app/tiktok_app/playwright_worker.py"
 docker cp "$REMOTE_ROOT/backend/config/settings.py" "$BACKEND:/app/config/settings.py"
 docker cp "$REMOTE_ROOT/backend/config/worker_accounts.env.example" "$BACKEND:/app/config/worker_accounts.env.example"
 docker cp "$REMOTE_ROOT/backend/requirements.txt" "$BACKEND:/app/requirements.txt"

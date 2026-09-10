@@ -11,5 +11,5 @@
   "hide_automation_flags": true,
   "refresh_browser_slot": "authorized",
   "sadcaptcha_enabled": true,
-  "sadcaptcha_api_key": "62e553d68badfa677fc0f6f9dbabc161"
+  "sadcaptcha_api_key": ""
 }

@@ -2,8 +2,10 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from urllib.parse import quote
 
 from platforms.http_client import HttpClient
+from platforms.youtube.profile_url import is_youtube_channel_id
 
 _HEADERS = {
     "User-Agent": (
@@ -12,10 +14,18 @@ _HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
 }
 
 _YT_API_BASE = "https://www.googleapis.com/youtube/v3"
+
+
+def _youtube_profile_url(username: str) -> str:
+    """URL канала: UC… → /channel/, иначе /@handle (кириллица в percent-encoding)."""
+    u = (username or "").strip().lstrip("@")
+    if is_youtube_channel_id(u):
+        return f"https://www.youtube.com/channel/{quote(u, safe='')}"
+    return f"https://www.youtube.com/@{quote(u, safe='')}"
 
 
 def _parse_count(text: str) -> int:
@@ -49,12 +59,17 @@ def fetch_youtube_channel(username: str) -> dict:
 def _fetch_youtube_api(username: str, api_key: str) -> dict:
     """Fetch channel data via YouTube Data API v3 (requires API key)."""
     with HttpClient(timeout=15.0) as client:
-        # 1. Resolve channel — try @handle first, fall back to legacy username
+        # 1. Resolve channel — UC id напрямую, иначе @handle / legacy username
         channel = None
-        for params in (
-            {"forHandle": f"@{username}"},
-            {"forUsername": username},
-        ):
+        param_sets = []
+        if is_youtube_channel_id(username):
+            param_sets.append({"id": username})
+        else:
+            param_sets.extend((
+                {"forHandle": username if username.startswith("@") else f"@{username}"},
+                {"forUsername": username.lstrip("@")},
+            ))
+        for params in param_sets:
             r = client.get(
                 f"{_YT_API_BASE}/channels",
                 params={**params, "part": "snippet,statistics", "key": api_key},
@@ -164,7 +179,7 @@ def _fetch_youtube_playlist_api(client: HttpClient, playlist_id: str, api_key: s
 
 def _fetch_youtube_scrape(username: str) -> dict:
     """Fallback: scrape YouTube channel page + RSS (no API key needed)."""
-    url = f"https://www.youtube.com/@{username}"
+    url = _youtube_profile_url(username)
     with HttpClient(headers=_HEADERS, follow_redirects=True, timeout=15.0) as client:
         r = client.get(url)
         if r.status_code == 404:

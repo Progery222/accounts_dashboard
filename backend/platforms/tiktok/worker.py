@@ -280,34 +280,6 @@ async def _run_with_context(
     page=None,
 ) -> dict:
     data = dict(data)
-    if data.get("audience_followers"):
-        from platforms.tiktok.audience_scrape import scrape_tiktok_audience_followers
-
-        username = (data.get("username") or "").lstrip("@").strip().lower()
-        lim = int(data.get("limit") or 100)
-        _mpp = data.get("max_posts_per_follower")
-        mpp = int(_mpp) if _mpp is not None else 35
-        if not username:
-            return {"error": "Не указан username для съёма подписчиков."}
-        own_page = page is None
-        if page is None:
-            page = await context.new_page()
-        try:
-            _raw_aid = data.get("audience_account_id")
-            audience_account_id = int(_raw_aid) if _raw_aid is not None else None
-            return await scrape_tiktok_audience_followers(
-                page, _wu, username, lim,
-                max_posts_per_follower=mpp,
-                skip_existing_member_profiles=bool(data.get("skip_existing_member_profiles")),
-                audience_account_id=audience_account_id,
-                list_only=bool(data.get("list_only")),
-                enrich_only=bool(data.get("enrich_only")),
-                enrich_usernames=data.get("enrich_usernames"),
-            )
-        finally:
-            if own_page:
-                await page.close()
-
     url: str = data["url"]
     m_user = re.search(r"/@([^/?#]+)", url)
     profile_username = m_user.group(1).strip().lower() if m_user else ""
@@ -378,7 +350,7 @@ async def _run_with_context(
 
             # Navigate to the profile page (без двойного goto: сразу стабилизация URL)
             if profile_username and "/@" in (url or ""):
-                from platforms.tiktok.audience_scrape import (
+                from platforms.tiktok.profile_nav import (
                     _tiktok_goto_profile_with_redirect_recovery,
                     _tiktok_profile_url_regex,
                 )
@@ -528,7 +500,7 @@ async def _run_with_context(
                 print("[worker] требуется вход — войдите в TikTok в открытом окне", file=sys.stderr)
                 await page.wait_for_url("**/tiktok.com/**/", timeout=120_000)
                 if profile_username and "/@" in (url or ""):
-                    from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+                    from platforms.tiktok.profile_nav import _tiktok_goto_profile_with_redirect_recovery
 
                     await _tiktok_goto_profile_with_redirect_recovery(
                         page, profile_username, url.split("#")[0], _wu, rounds=4, dwell_s=9.0,
@@ -598,7 +570,7 @@ async def _run_with_context(
 
                         # Без захода на главную: для залогиненных она часто = /foryou, ломает сценарий.
                         if profile_username and "/@" in (url or ""):
-                            from platforms.tiktok.audience_scrape import _tiktok_goto_profile_with_redirect_recovery
+                            from platforms.tiktok.profile_nav import _tiktok_goto_profile_with_redirect_recovery
 
                             await _tiktok_goto_profile_with_redirect_recovery(
                                 page, profile_username, url.split("#")[0], _wu, rounds=6, dwell_s=9.0,

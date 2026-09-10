@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AccountsStats</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<meta name="theme-color" content="#4B38B8">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -299,14 +304,24 @@ button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, trans
       display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 600; color: var(--ink-3); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
 .cbx {
-  width: 15px; height: 15px; border-radius: 4px; border: 1.5px solid var(--line-2);
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer;
+  width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line-2);
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; cursor: pointer;
+  position: relative; box-sizing: border-box;
 }
 .cbx.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+/* Увеличенная зона клика — по 18px чекбоксу в узкой колонке легко промахнуться. */
+.cbx[data-act="sel"]::before,
+.cbx[data-act="sel-page"]::before {
+  content: "";
+  position: absolute;
+  inset: -12px;
+}
 .sw { width: 34px; height: 20px; border-radius: 10px; background: var(--line-2); position: relative; flex-shrink: 0; transition: background .15s; }
 .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 8px; background: #fff; transition: left .15s; }
 .sw.on { background: var(--accent); }
 .sw.on::after { left: 16px; }
+.sw[data-act] { cursor: pointer; border: 0; padding: 0; display: inline-block; vertical-align: middle; }
+.sw[data-act]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ============================================================
    КАРКАС
@@ -502,6 +517,7 @@ button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, trans
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap: 12px; }
 .acard { padding: 14px; display: flex; flex-direction: column; gap: 12px; cursor: pointer; }
 .acard:hover { border-color: var(--line-2); box-shadow: var(--shadow-sm); }
+.acard.sel { border-color: var(--accent-line); background: var(--accent-row); }
 .acard .row3 { display: flex; gap: 18px; border-top: 1px solid var(--line-soft); padding-top: 10px; }
 
 /* Панель массовых действий */
@@ -596,10 +612,6 @@ button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, trans
 /* Скелетон загрузки */
 @keyframes sk { 0%, 100% { opacity: .5 } 50% { opacity: 1 } }
 .sk { background: var(--line-soft); border-radius: 6px; animation: sk 1.25s ease-in-out infinite; }
-
-/* Аудитория */
-.mrow { display: grid; grid-template-columns: 34px minmax(0,1fr) 110px 100px 92px; gap: 12px; align-items: center; padding: 9px 14px; border-bottom: 1px solid var(--line-soft); }
-.mrow:last-child { border-bottom: none; }
 
 /* Посты — плитка */
 .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px,1fr)); gap: 12px; padding: 14px; }
@@ -740,8 +752,6 @@ button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, trans
   .cards { grid-template-columns: minmax(0,1fr); }
   .prow { grid-template-columns: 56px minmax(0,1fr) 84px; }
   .prow > :nth-child(n+4) { display: none; }
-  .mrow { grid-template-columns: 34px minmax(0,1fr) 92px; }
-  .mrow > :nth-child(n+4) { display: none; }
   .modal-bd, .modal-hd, .modal-ft { padding-left: 14px; padding-right: 14px; }
   .scrim { padding: 20px 10px; }
   .tv-bar { padding: 0 18px; }
@@ -885,6 +895,9 @@ const SEED = [
   ['fb_sport','FB Sport','facebook',4,4],             ['threads_news','Threads News','threads',1,1],
 ];
 
+/* Демо только по флагу/параметру. Без него тяжёлые сиды не строим. */
+const DEMO = !!window.__DEMO__ || /[?&]demo=1/.test(location.search);
+
 let _seed = 987654321;
 function rnd() { _seed = (_seed * 1103515245 + 12345) & 0x7fffffff; return _seed / 0x7fffffff; }
 function ri(a, b) { return Math.floor(a + rnd() * (b - a + 1)); }
@@ -893,6 +906,7 @@ function ri(a, b) { return Math.floor(a + rnd() * (b - a + 1)); }
    («не обновлялись 3 дня» вообще ноль), и интерфейс нечем показать,
    поэтому досыпаем генератором до ~170. */
 (function expandSeed() {
+  if (!DEMO) return;
   const LAT1 = ['gorod','media','daily','sport','tech','moda','kino','auto','dom','fit',
                 'travel','food','news','biz','game','photo','pets','music','art','life',
                 'stroyka','sever','more','vecher','utro'];
@@ -923,7 +937,7 @@ const POST_TITLES = [
 ];
 const HASHTAGS = ['#рек','#дляподписчиков','#обзор','#лайфхак','#новости','#спорт','#еда','#путешествия','#бизнес','#технологии','#мода','#дом'];
 
-const ACCOUNTS = SEED.map(function (row, i) {
+const ACCOUNTS = DEMO ? SEED.map(function (row, i) {
   const [username, display, platform, profileId, ownerId] = row;
   const base = ri(12, 1400) * 1000 + ri(0, 999);
   const followers = base;
@@ -980,48 +994,9 @@ const ACCOUNTS = SEED.map(function (row, i) {
     unavailable,
     archived,
     banned,
-    audience: ['tiktok','instagram','x','threads'].indexOf(platform) >= 0 ? ri(400, 24000) : 0,
   };
-});
+}) : [];
 
-/* Аудитория — генерируется по требованию, детерминированно от id аккаунта */
-const FIRST = ['Анна','Мария','Иван','Дмитрий','Ольга','Сергей','Елена','Павел','Ксения','Артём','Наталья','Роман','Юлия','Егор','Вера','Никита'];
-const LATIN = ['anna','maria','ivan','dmitry','olga','sergey','elena','pavel','ksenia','artem','natalia','roman','julia','egor','vera','nikita'];
-const LAST  = ['Ковалёв','Смирнова','Орлов','Титова','Гусев','Лебедева','Панов','Зайцева','Морозов','Крылова','Ершов','Белова'];
-function audienceOf(a) {
-  if (a._aud) return a._aud;
-  let s = a.id * 7919 + 13;
-  const r = function () { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
-  const n = Math.min(a.audience, 60);
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const fi = Math.floor(r() * FIRST.length);
-    out.push({
-      id: i,
-      name: FIRST[fi] + ' ' + LAST[Math.floor(r() * LAST.length)],
-      handle: '@' + LATIN[fi] + '_' + Math.floor(r() * 8999 + 1000),
-      followers: Math.floor(r() * 24000),
-      posts: Math.floor(r() * 900),
-      days: Math.floor(r() * 380) + 4,
-      hue: Math.floor(r() * 360),
-    });
-  }
-  a._aud = out;
-  return out;
-}
-
-const ALERTS = [
-  { id:1, sev:'neg',  title:'@gorod_news — подписчики −0,6% за 7 дней', rule:'Просадка подписчиков > 0,5%', ago:'12 мин' },
-  { id:2, sev:'warn', title:'@threads_lab — 3 неудачи скрапа подряд',   rule:'Профиль недоступен',          ago:'15 мин' },
-  { id:3, sev:'warn', title:'Сессия Threads истекла',                    rule:'Сессии площадок',             ago:'1 ч' },
-];
-const EVENTS = [
-  { t:'14:22', txt:'Алерт: @gorod_news −0,6% подписчиков за 7 дней', sub:'правило «Просадка > 0,5%»' },
-  { t:'14:19', txt:'Ошибка скрапа @threads_lab', sub:'3-я неудача подряд · сессия Threads истекла' },
-  { t:'14:12', txt:'Прогон запущен · 412 аккаунтов', sub:'по расписанию · каждые 6 часов' },
-  { t:'13:47', txt:'М. Орлова перенесла 6 аккаунтов в «Медиа»', sub:'' },
-  { t:'12:00', txt:'Снимок дня сохранён', sub:'48 записей · CSV отправлен в Telegram' },
-];
 const SESSIONS = [
   { p:'tiktok',    ok:true,  note:'cookies до 12 окт' },
   { p:'instagram', ok:true,  note:'активна' },
@@ -1031,6 +1006,13 @@ const SESSIONS = [
   { p:'rumble',    ok:true,  note:'активна' },
   { p:'reddit',    ok:false, note:'нет сессии' },
 ];
+/* Без демо сиды меток не нужны — их подставит API. ACCOUNTS уже [] выше. */
+if (!DEMO) {
+  PROFILES.length = 0;
+  OWNERS.length = 0;
+  GROUPS.length = 0;
+  COUNTRIES.length = 0;
+}
 /* ============================================================
    3. КОЛОНКИ И СОСТОЯНИЕ
    ============================================================ */
@@ -1044,7 +1026,6 @@ const COLUMNS = [
   { k: 'likes',     n: 'Лайки',      w: 118, num: true, sort: 'l' },
   { k: 'posts',     n: 'Посты',      w: 76,  num: true, sort: 'p' },
   { k: 'clicks',    n: 'Клики',      w: 88,  num: true, off: true },
-  { k: 'audience',  n: 'Аудитория',  w: 96,  num: true, off: true },
   { k: 'updated',   n: 'Обновлён',   w: 96,  num: true, sort: 'u' },
 ];
 const DEFAULT_COLS = COLUMNS.filter(function (c) { return !c.off; }).map(function (c) { return c.k; });
@@ -1068,7 +1049,8 @@ const state = {
     const pool = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
     const total = pool.length || ACCOUNTS.length;
     return {
-      on: true, total: total, done: Math.round(total * 0.36),
+      // В LIVE лента включается только после pollRun / старта прогона.
+      on: !!DEMO && total > 0, total: total, done: DEMO ? Math.round(total * 0.36) : 0,
       cur: '@' + ((pool[3] || ACCOUNTS[0] || {}).username || '—'), timer: null,
       startedAt: 0,       // начало последнего прогона, см. staleAccounts
     };
@@ -1081,7 +1063,7 @@ const state = {
   booting: true,
   postSort: 'vd', postView: 'list',
   sched: null, schedError: null,
-  audQ: '', audPage: 1,
+  scrape: null, scrapeError: null,  // /api/accounts/scrape-backend/
   tvTimer: null,          // остался только для clearInterval при выходе из эфира
   runError: false,
   vc: null,            // якоря живого счётчика просмотров, см. loadViewsAnchors
@@ -1089,6 +1071,7 @@ const state = {
   // Форма «Добавить аккаунты». Текст держим в состоянии, иначе выбор в любом
   // списке пересобирает слой модалки и стирает набранное.
   add: { text: '', platform: '', domainId: 0, profileId: 0, ownerId: 0, groupId: 0, countryId: 0 },
+  edit: null,          // форма «Изменить» на карточке аккаунта
   cookiesFor: '', cookiesText: '',   // окно импорта куков в настройках
   catalog: null,   // форма создания/правки профиля, владельца, группы, страны
 };
@@ -1154,10 +1137,22 @@ function plural(n, forms) {
   return forms[2];
 }
 function ago(min) {
+  if (min == null || !isFinite(min) || min < 0) return '—';
   if (min < 1) return 'сейчас';
   if (min < 60) return min + ' мин';
   if (min < 1440) return Math.floor(min / 60) + ' ч';
   return Math.floor(min / 1440) + ' дн';
+}
+function downloadText(filename, text) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
 const NO_PROFILE = { id: 0, name: 'Без профиля', color: '#8A857C' };
@@ -1193,25 +1188,48 @@ function catalogFind(kind, id) {
   if (!c) return null;
   return c.list().filter(function (x) { return String(x.id) === String(id); })[0] || null;
 }
-function currentDomainIdForCatalog() {
-  /* Из формы «Добавить» — выбранный там домен; иначе домен из адреса. */
-  if (state.catalog && state.catalog.selectInto === 'add' && state.add && state.add.domainId) {
+function currentDomainIdForCatalog(selectInto) {
+  /* Из формы «Добавить»/«Изменить» — выбранный там домен; иначе домен из адреса. */
+  const into = selectInto !== undefined
+    ? selectInto
+    : (state.catalog && state.catalog.selectInto);
+  if (into === 'add' && state.add && state.add.domainId) {
     return state.add.domainId;
   }
+  if (into === 'edit' && state.edit && state.edit.domainId) {
+    return state.edit.domainId;
+  }
   const d = state.domains && state.domains.current;
-  return d ? d.id : null;
+  return d ? d.id : 0;
+}
+function openEditAccount(a) {
+  if (!a) return;
+  state.edit = {
+    id: a.id,
+    username: a.username,
+    platform: a.platform,
+    domainId: a.domainId || 0,
+    profileId: a.profileId || 0,
+    ownerId: a.ownerId || 0,
+    groupId: a.groupId || 0,
+    countryId: a.countryId || 0,
+  };
+  state.menu = null;
+  state.modal = 'edit';
 }
 function openCatalogModal(kind, mode, id, selectInto) {
   const meta = catalogOf(kind);
   if (!meta) return;
   const row = id ? catalogFind(kind, id) : null;
+  const into = selectInto || null;
   state.catalog = {
     kind: kind,
     mode: mode || 'create',
     id: row ? row.id : null,
     name: row ? row.name : '',
     color: (row && row.color) || CATALOG_COLORS[Math.floor(Math.random() * CATALOG_COLORS.length)],
-    selectInto: selectInto || null,   // 'add' | 'filter' | null
+    domainId: row ? (row.domainId || 0) : currentDomainIdForCatalog(into),
+    selectInto: into,   // 'add' | 'filter' | null
   };
   state.menu = null;
   state.modal = 'catalog';
@@ -1328,6 +1346,9 @@ function pmark(pv) {
 }
 function plabel(pv) { return (PF[pv] || { l: String(pv || '—') }).l; }
 function deltaEl(n, compact) {
+  if (LIVE && !DEMO && !deltaLoaded[state.period]) {
+    return '<span class="sk" style="display:inline-block;height:12px;width:42px;vertical-align:middle"></span>';
+  }
   if (n === null || n === undefined) return '<span class="delta ze">—</span>';
   const cls = n > 0 ? 'up' : (n < 0 ? 'dn' : 'ze');
   const arrow = n === 0 ? '' : tri(n > 0);
@@ -1477,6 +1498,10 @@ function appbar() {
     '<div class="seg hide-sm">' + [1,7,30].map(function (p) {
       return '<button data-act="period" data-v="' + p + '" class="' + (state.period === p ? 'on' : '') + '">' + (p === 1 ? '24ч' : p + 'д') + '</button>';
     }).join('') + '</div>' +
+    '<div class="seg ico" title="Вид списка">' +
+      '<button class="' + (state.view === 'table' ? 'on' : '') + '" data-act="viewmode" data-v="table" title="Таблица" aria-label="Таблица">' + ic('rows', 14) + '</button>' +
+      '<button class="' + (state.view === 'cards' ? 'on' : '') + '" data-act="viewmode" data-v="cards" title="Карточки" aria-label="Карточки">' + ic('grid', 14) + '</button>' +
+    '</div>' +
     (function () {
       const cur = THEMES.filter(function (x) { return x.v === state.theme; })[0] || THEMES[0];
       return '<button class="btn ico ghost' + (state.menu === 'theme' ? ' on' : '') + '" data-act="menu" data-v="theme" ' +
@@ -1496,7 +1521,9 @@ function ribbon() {
     '<div class="track"><i id="rb-bar" style="width:' + pct + '%"></i></div>' +
     '<span id="rb-cur" class="hide-sm trunc" style="font-size:12px;color:var(--ink-3);flex-grow:1">Сейчас: ' + esc(state.run.cur) + ' · осталось ~' + Math.max(1, Math.round((state.run.total - state.run.done) / 16)) + ' мин</span>' +
     '<div style="display:flex;gap:6px;flex-shrink:0">' +
-      '<button class="btn sm" data-act="run-pause">' + ic('pause', 12) + '<span class="hide-sm">Пауза</span></button>' +
+      (DEMO
+        ? '<button class="btn sm" data-act="run-pause">' + ic('pause', 12) + '<span class="hide-sm">Пауза</span></button>'
+        : '') +
       '<button class="btn sm hide-sm" data-act="run-tab-open" data-v="run">Подробнее</button>' +
       '<button class="btn sm dgr" data-act="run-stop">Остановить</button>' +
     '</div></div>';
@@ -1515,7 +1542,9 @@ function rail() {
     '<div class="nav">' + nav.map(function (n, i) {
       const on = state.route === n[0] || (n[0] === 'accounts' && state.route === 'detail');
       const badge = n[3] === null ? ''
-        : '<span class="mono" style="font-size:11px;font-weight:500">' + fmt(n[3]) + '</span>';
+        : (state.booting
+          ? '<span class="sk" style="display:inline-block;width:28px;height:11px"></span>'
+          : '<span class="mono" style="font-size:11px;font-weight:500">' + fmt(n[3]) + '</span>');
       const tone = ['var(--m1)', 'var(--m2)', 'var(--m3)', 'var(--ink-3)'][i] || 'var(--ink-3)';
       return '<button class="' + (on ? 'on' : '') + '" data-act="nav" data-v="' + n[0] + '">' +
              '<span style="display:flex;color:' + (on ? 'currentColor' : tone) + '">' + ic(n[1]) + '</span>' +
@@ -1570,7 +1599,7 @@ function rail() {
 /* ============================================================
    7. ЭКРАН «АККАУНТЫ»
    ============================================================ */
-function kpiCard(label, value, d, series, compact, total, tone, icon, live) {
+function kpiCard(label, value, d, series, compact, total, tone, icon) {
   const n = tone || 1;
   const style = '--tone:var(--m' + n + ');--tone-soft:var(--m' + n + 's)';
   if (state.booting) {
@@ -1592,7 +1621,7 @@ function kpiCard(label, value, d, series, compact, total, tone, icon, live) {
   return '<div class="card kpi" style="' + style + '">' +
     '<div class="hd"><span class="ico">' + ic(icon || 'users', 13) + '</span>' +
       '<span class="lbl">' + label + '</span></div>' +
-    '<div class="val"' + (live ? ' data-vc="' + live + '" data-vc-fmt="full"' : '') + '>' + value + '</div>' +
+    '<div class="val">' + value + '</div>' +
     '<div class="ft"><span style="display:flex;align-items:baseline;gap:6px;min-width:0">' +
       deltaEl(d, compact) + pct + '</span>' +
       (series ? spark(series, d >= 0, 'var(--tone)') : '') + '</div></div>';
@@ -1617,7 +1646,10 @@ function screenAccounts() {
   const fixed = !state.booting && list.length > 0 && effView() === 'table' && roomy;
   const anyFilter = anyFilterOn();
   return '<div class="main' + (fixed ? ' fixed' : '') + '" style="--page-max:1720px">' +
-    '<div class="page-hd"><h1>Аккаунты</h1><span class="count">' + fmt(list.length) + '</span>' +
+    '<div class="page-hd"><h1>Аккаунты</h1><span class="count">' +
+      (state.booting
+        ? '<span class="sk" style="display:inline-block;width:36px;height:12px;vertical-align:middle"></span>'
+        : fmt(list.length)) + '</span>' +
       '<div class="grow"></div>' +
       // «Действия» рядом с обновлением: массовые операции над выделенным,
       // включая перенос в домен, без ухода в нижнюю панель.
@@ -1631,16 +1663,13 @@ function screenAccounts() {
     '</div>' +
 
     '<div class="kpis">' +
-      // Без фильтра — живой сетевой счётчик (vc). С фильтром — сумма только
-      // по видимым: иначе KPI остаются от всей базы, а список уже сужен.
-      (function () {
-        const live = !anyFilter;
-        return kpiCard('Подписчики', fmt(live ? vcOr(t.f, 'followers') : t.f), t.fd, fs, false, t.f, 1, 'users', live ? 'followers' : null) +
-          kpiCard('Просмотры', fmt(live ? vcOr(t.v, 'views') : t.v), t.vd, null, true, t.v, 2, 'eye', live ? 'views' : null) +
-          kpiCard('Лайки', fmt(live ? vcOr(t.l, 'likes') : t.l), t.ld, null, true, t.l, 3, 'heart', live ? 'likes' : null) +
-          kpiCard('Посты', fmt(live ? vcOr(t.p, 'posts') : t.p), t.pd, null, false, t.p, 4, 'rows', live ? 'posts' : null) +
-          kpiCard('Клики по ссылке', fmt(live ? vcOr(t.c, 'clicks') : t.c), t.cd, null, false, t.c, 5, 'link', live ? 'clicks' : null);
-      })() +
+      // Только суммы из БД по видимому списку (на All — все домены).
+      // Живой одометр (vc) — только в эфире, здесь цифры не крутятся.
+      kpiCard('Подписчики', fmt(t.f), t.fd, fs, false, t.f, 1, 'users') +
+      kpiCard('Просмотры', fmt(t.v), t.vd, null, true, t.v, 2, 'eye') +
+      kpiCard('Лайки', fmt(t.l), t.ld, null, true, t.l, 3, 'heart') +
+      kpiCard('Посты', fmt(t.p), t.pd, null, false, t.p, 4, 'rows') +
+      kpiCard('Клики по ссылке', fmt(t.c), t.cd, null, false, t.c, 5, 'link') +
     '</div>' +
 
     '<div class="filters">' +
@@ -1708,6 +1737,31 @@ function skeleton() {
     '<div style="text-align:right">Подписчики</div><div style="text-align:right">Просмотры</div>' +
     '<div style="text-align:right">Лайки</div><div style="text-align:right">Посты</div>' +
     '<div style="text-align:right">Обновлён</div><div></div></div>' + rows + '</div></div>';
+}
+function analyticsSkeleton() {
+  let rows = '';
+  for (let i = 0; i < 6; i++) {
+    rows += '<div style="display:grid;grid-template-columns:24px 56px minmax(0,1fr) 96px 88px 88px;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line-soft)">' +
+      '<span class="sk" style="height:10px;width:14px"></span>' +
+      '<span class="sk" style="width:56px;height:40px;border-radius:8px"></span>' +
+      '<span style="display:flex;flex-direction:column;gap:6px"><span class="sk" style="height:11px;width:' + (140 + i * 18) + 'px"></span>' +
+        '<span class="sk" style="height:9px;width:90px"></span></span>' +
+      '<span class="sk" style="height:11px;width:52px;margin-left:auto"></span>' +
+      '<span class="sk" style="height:11px;width:48px;margin-left:auto"></span>' +
+      '<span class="sk" style="height:11px;width:48px;margin-left:auto"></span></div>';
+  }
+  return '<div class="card" style="margin-bottom:16px" aria-busy="true">' +
+    '<div style="padding:14px 16px;border-bottom:1px solid var(--line)"><span class="sk" style="height:14px;width:110px;display:inline-block"></span></div>' +
+    rows + '</div>' +
+    '<div class="ins">' +
+      [1,2,3,4].map(function () {
+        return '<div class="card" style="padding:16px;min-height:140px" aria-busy="true">' +
+          '<span class="sk" style="height:12px;width:140px;display:block;margin-bottom:16px"></span>' +
+          '<span class="sk" style="height:10px;width:100%;display:block;margin-bottom:8px"></span>' +
+          '<span class="sk" style="height:10px;width:86%;display:block;margin-bottom:8px"></span>' +
+          '<span class="sk" style="height:10px;width:72%;display:block"></span></div>';
+      }).join('') +
+    '</div>';
 }
 
 function emptyState() {
@@ -1789,7 +1843,9 @@ function accountUrl(a) {
   switch (a.platform) {
     case 'tiktok':    return 'https://www.tiktok.com/@' + encodeURIComponent(u);
     case 'instagram': return 'https://www.instagram.com/' + encodeURIComponent(u) + '/';
-    case 'youtube':   return 'https://www.youtube.com/@' + encodeURIComponent(u);
+    case 'youtube':   return /^UC[\w-]{10,}$/i.test(u)
+      ? 'https://www.youtube.com/channel/' + encodeURIComponent(u)
+      : 'https://www.youtube.com/@' + encodeURIComponent(u);
     case 'telegram':  return 'https://t.me/' + encodeURIComponent(u);
     case 'x':         return 'https://x.com/' + encodeURIComponent(u);
     case 'threads':   return 'https://www.threads.com/@' + encodeURIComponent(u);
@@ -1888,6 +1944,40 @@ function menuDef(key) {
     items: [{ v: '0', l: 'Без страны' }].concat(COUNTRIES.map(function (c) {
       return { v: String(c.id), l: c.name, dot: c.color };
     })).concat([{ v: '__new__', l: 'Добавить страну…', create: true }]),
+  };
+  if (kind === 'edit-domain') return {
+    title: 'Домен', cur: String((state.edit && state.edit.domainId) || 0),
+    items: [{ v: '0', l: 'Без домена' }].concat(((state.domains && state.domains.list) || [])
+      .map(function (d) { return { v: String(d.id), l: d.name, dot: d.color }; })),
+  };
+  if (kind === 'edit-profile') return {
+    title: 'Профиль', cur: String((state.edit && state.edit.profileId) || 0),
+    items: [{ v: '0', l: 'Без профиля' }].concat(PROFILES.map(function (p) {
+      return { v: String(p.id), l: p.name, dot: p.color };
+    })).concat([{ v: '__new__', l: 'Добавить профиль…', create: true }]),
+  };
+  if (kind === 'edit-owner') return {
+    title: 'Владелец', cur: String((state.edit && state.edit.ownerId) || 0),
+    items: [{ v: '0', l: 'Без владельца' }].concat(OWNERS.map(function (o) {
+      return { v: String(o.id), l: o.name, dot: o.color };
+    })).concat([{ v: '__new__', l: 'Добавить владельца…', create: true }]),
+  };
+  if (kind === 'edit-group') return {
+    title: 'Группа', cur: String((state.edit && state.edit.groupId) || 0),
+    items: [{ v: '0', l: 'Без группы' }].concat(GROUPS.map(function (g) {
+      return { v: String(g.id), l: g.name, dot: g.color };
+    })).concat([{ v: '__new__', l: 'Добавить группу…', create: true }]),
+  };
+  if (kind === 'edit-country') return {
+    title: 'Страна', cur: String((state.edit && state.edit.countryId) || 0),
+    items: [{ v: '0', l: 'Без страны' }].concat(COUNTRIES.map(function (c) {
+      return { v: String(c.id), l: c.name, dot: c.color };
+    })).concat([{ v: '__new__', l: 'Добавить страну…', create: true }]),
+  };
+  if (kind === 'cat-domain' || key === 'cat-domain') return {
+    title: 'Домен', cur: String((state.catalog && state.catalog.domainId) || 0),
+    items: [{ v: '0', l: 'Без домена' }].concat(((state.domains && state.domains.list) || [])
+      .map(function (d) { return { v: String(d.id), l: d.name, dot: d.color }; })),
   };
   switch (key) {
     case 'theme': return {
@@ -2018,6 +2108,25 @@ function applyMenu(key, v) {
     else if (kind === 'add-country') state.add.countryId = +v || 0;
     return;
   }
+  if (kind.indexOf('edit-') === 0) {
+    if (!state.edit) return;
+    if (v === '__new__') {
+      const map = { 'edit-profile': 'profile', 'edit-owner': 'owner',
+                    'edit-group': 'group', 'edit-country': 'country' };
+      openCatalogModal(map[kind], 'create', null, 'edit');
+      return;
+    }
+    if (kind === 'edit-domain')  state.edit.domainId  = +v || 0;
+    else if (kind === 'edit-profile') state.edit.profileId = +v || 0;
+    else if (kind === 'edit-owner')   state.edit.ownerId   = +v || 0;
+    else if (kind === 'edit-group')   state.edit.groupId   = +v || 0;
+    else if (kind === 'edit-country') state.edit.countryId = +v || 0;
+    return;
+  }
+  if (key === 'cat-domain') {
+    if (state.catalog) state.catalog.domainId = +v || 0;
+    return;
+  }
   switch (key) {
     case 'theme':       setTheme(v); break;
     case 'domain-switch': goDomain(v); return;
@@ -2110,8 +2219,8 @@ function shownCols() {
 }
 function gridStyle() {
   const cs = shownCols();
-  const tpl = '32px minmax(200px,1.6fr) ' + cs.map(function (c) { return c.w + 'px'; }).join(' ') + ' 38px';
-  const min = 32 + 200 + cs.reduce(function (s, c) { return s + c.w; }, 0) + 38 + 32;
+  const tpl = '44px minmax(200px,1.6fr) ' + cs.map(function (c) { return c.w + 'px'; }).join(' ') + ' 38px';
+  const min = 44 + 200 + cs.reduce(function (s, c) { return s + c.w; }, 0) + 38 + 32;
   return 'grid-template-columns:' + tpl + ';min-width:' + min + 'px';
 }
 function isRunning(a) { return state.run.on && ('@' + a.username) === state.run.cur; }
@@ -2142,7 +2251,6 @@ function cell(k, a) {
     case 'likes':     return numCell(comp(a.likes), delta(a, 'l'), true);
     case 'clicks':    return numCell(fmt(a.clicks), delta(a, 'c'), false);
     case 'posts':     return '<div class="num">' + fmt(a.posts) + '</div>';
-    case 'audience':  return '<div class="num">' + (a.audience ? fmt(a.audience) : '<span style="color:var(--ink-3)">—</span>') + '</div>';
     case 'updated':   return '<div class="num sub" style="color:' +
       (isRunning(a) ? 'var(--accent)' : (a.updated > 2880 ? 'var(--warn)' : 'var(--ink-2)')) + '">' +
       (isRunning(a) ? 'сейчас' : ago(a.updated)) + '</div>';
@@ -2156,7 +2264,7 @@ function table(slice, list, pages) {
   const allSel = slice.length > 0 && slice.every(function (a) { return state.selected.has(a.id); });
   return '<div class="card tbl' + (state.dense ? ' dense' : '') + '"><div class="tbl-scroll">' +
     '<div class="tr th" style="' + gs + '">' +
-      '<div><span class="cbx ' + (allSel ? 'on' : '') + '" data-act="sel-page" role="checkbox" aria-checked="' + allSel + '" aria-label="Выделить страницу">' + (allSel ? ic('check', 9) : '') + '</span></div>' +
+      '<div><span class="cbx ' + (allSel ? 'on' : '') + '" data-act="sel-page" role="checkbox" aria-checked="' + allSel + '" aria-label="Выделить страницу">' + (allSel ? ic('check', 11) : '') + '</span></div>' +
       sortTh('name', 'Аккаунт') +
       cs.map(function (c) {
         return c.sort ? sortTh(c.sort, c.n, !!c.num)
@@ -2169,7 +2277,7 @@ function table(slice, list, pages) {
       return '<div class="tr td ' + (sel ? 'sel' : '') + '" style="' + gs + ';height:' + (state.dense ? 42 : 58) + 'px"' +
         ' data-act="open" data-v="' + a.id + '" data-idx="' + i + '"' +
         ' tabindex="0" role="button" aria-label="Открыть ' + esc(a.username) + ', ' + plabel(a.platform) + '">' +
-        '<div><span class="cbx ' + (sel ? 'on' : '') + '" data-act="sel" data-v="' + a.id + '" data-idx="' + i + '" role="checkbox" aria-checked="' + sel + '"></span></div>' +
+        '<div><span class="cbx ' + (sel ? 'on' : '') + '" data-act="sel" data-v="' + a.id + '" data-idx="' + i + '" role="checkbox" aria-checked="' + sel + '">' + (sel ? ic('check', 11) : '') + '</span></div>' +
         '<div class="acc">' + avatarEl(a, state.dense ? 24 : 30, state.dense ? 7 : 9) + '<div style="min-width:0">' +
           '<div class="hn"><span class="h">' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) + '</span>' + pmark(a.platform) +
             (isRunning(a) ? '<span class="pill" style="background:var(--accent-soft);color:var(--accent)">обновляется</span>' : '') +
@@ -2191,10 +2299,9 @@ function cardsView(slice, list, pages) {
   return '<div class="cards">' + slice.map(function (a) {
     const pr = profileOf(a), sel = state.selected.has(a.id);
     return '<div class="card acard ' + (sel ? 'sel' : '') + '" style="--pl:' + platHue(a.platform) + '" data-act="open" data-v="' + a.id + '"' +
-      ' tabindex="0" role="button" aria-label="Открыть ' + esc(a.username) + ', ' + PF[a.platform].l + '"' +
-      ' style="' + (sel ? 'border-color:var(--accent-line);background:var(--accent-row)' : '') + '">' +
+      ' tabindex="0" role="button" aria-label="Открыть ' + esc(a.username) + ', ' + PF[a.platform].l + '">' +
       '<div style="display:flex;align-items:center;gap:10px">' +
-        '<span class="cbx ' + (sel ? 'on' : '') + '" data-act="sel" data-v="' + a.id + '">' + (sel ? ic('check', 9) : '') + '</span>' +
+        '<span class="cbx ' + (sel ? 'on' : '') + '" data-act="sel" data-v="' + a.id + '" role="checkbox" aria-checked="' + sel + '">' + (sel ? ic('check', 11) : '') + '</span>' +
         avatarEl(a, 30, 9) +
         '<div style="min-width:0;flex-grow:1"><div class="trunc" style="font-size:13px;font-weight:600">' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) + '</div>' +
         '<div class="trunc" style="font-size:11px;color:var(--ink-3);margin-top:1px">' + pr.name + ' · ' + ownerOf(a).name + '</div></div>' +
@@ -2256,9 +2363,6 @@ function bulkBar() {
     '<span class="sep"></span>' +
     '<button data-act="bulk" data-v="refresh">' + ic('refresh', 12) + 'Обновить</button>' +
     '<button data-act="modal" data-v="compare">' + ic('cmp', 12) + 'Сравнить</button>' +
-    '<button data-act="bulk" data-v="profile">Профиль</button>' +
-    '<button data-act="bulk" data-v="owner">Владелец</button>' +
-    '<button data-act="bulk" data-v="archive">' + ic('arch', 12) + 'В архив</button>' +
     '<button class="dgr" data-act="bulk" data-v="delete">' + ic('trash', 12) + 'Удалить</button>' +
     '<button data-act="bulk" data-v="clear" style="background:none;padding:0 8px">' + ic('close', 13) + '</button>' +
   '</div>';
@@ -2291,7 +2395,6 @@ function screenDetail() {
   const pr = profileOf(a), ow = ownerOf(a);
   const positive = delta(a, 'f') >= 0;
   if (LIVE && !a.postList && !a._postsLoading) loadPosts(a);
-  if (LIVE && state.detailTab === 'audience' && a.audience && !a._audLive && !a._audLoading) loadAudience(a);
   const PL = a.postList || [];
 
   const overview =
@@ -2332,10 +2435,11 @@ function screenDetail() {
       '<div style="display:flex;flex-direction:column;gap:12px">' +
         '<div class="card" style="padding:14px">' +
           '<div class="lbl" style="margin-bottom:10px">Свойства</div>' +
-          [['Платформа', (PF[a.platform] || { l: a.platform }).l], ['Профиль', pr.name], ['Владелец', ow.name],
+          [['Платформа', (PF[a.platform] || { l: a.platform }).l],
+           ['Домен', a.domainName || 'Без домена'],
+           ['Профиль', pr.name], ['Владелец', ow.name],
            ['Группа', groupOf(a).name], ['Страна', countryOf(a).name],
-           ['Обновлён', ago(a.updated) + ' назад'],
-           ['Аудитория', a.audience ? fmt(a.audience) + ' чел.' : 'не поддерживается']].map(function (r) {
+           ['Обновлён', ago(a.updated) + ' назад']].map(function (r) {
             return '<div style="display:flex;gap:10px;padding:6px 0;font-size:12px">' +
                    '<span style="color:var(--ink-3);width:96px;flex-shrink:0">' + r[0] + '</span>' +
                    '<span class="grow" style="text-align:right">' + r[1] + '</span></div>';
@@ -2405,60 +2509,6 @@ function screenDetail() {
           '</div>') +
     '</div>';
 
-  /* --- вкладка «Аудитория» --- */
-  let audience;
-  if (!a.audience) {
-    audience = '<div class="card empty"><div style="color:var(--ink-3)">' + ic('users', 28) + '</div>' +
-      '<div style="font-size:15px;font-weight:600">Аудитория недоступна</div>' +
-      '<div style="font-size:13px;color:var(--ink-3);max-width:440px">Площадка ' + plabel(a.platform) + ' не отдаёт список подписчиков. Съём аудитории поддерживают TikTok, Instagram, X и Threads.</div></div>';
-  } else if (LIVE && !a._audLive) {
-    audience = '<div class="card empty"><span class="sk" style="display:block;width:180px;height:14px"></span>' +
-      '<div style="font-size:13px;color:var(--ink-3)">Загружаем аудиторию…</div></div>';
-  } else {
-    const all = audienceList(a);
-    const aq = state.audQ.trim().toLowerCase();
-    const f = aq ? all.filter(function (m) { return m.name.toLowerCase().indexOf(aq) >= 0 || m.handle.toLowerCase().indexOf(aq) >= 0; }) : all;
-    const ps = 12;
-    const apages = Math.max(1, Math.ceil(f.length / ps));
-    const apage = Math.min(state.audPage, apages);
-    const aslice = f.slice((apage - 1) * ps, apage * ps);
-    audience = '<div class="card">' +
-      '<div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap">' +
-        '<span style="font-size:14px;font-weight:600">Аудитория</span>' +
-        '<span class="count">' + fmt(a.audience) + '</span>' +
-        '<span style="font-size:12px;color:var(--ink-3)">съём ' + ago(a.updated * 3) + ' назад</span>' +
-        '<div class="grow"></div>' +
-        '<div class="field" style="width:200px">' + ic('search', 14) +
-          '<input id="audq" placeholder="Имя или ник" value="' + esc(state.audQ) + '" aria-label="Поиск по аудитории"></div>' +
-        '<button class="btn" data-act="toast" data-v="Съём аудитории запущен">' + ic('refresh', 13) + 'Обновить</button>' +
-      '</div>' +
-      (aslice.length === 0
-        ? '<div class="empty"><span style="color:var(--ink-3)">Никого не нашлось по запросу «' + esc(state.audQ) + '»</span></div>'
-        : '<div>' +
-            '<div class="mrow" style="border-bottom:1px solid var(--line);background:var(--surface-2)">' +
-              '<div></div><div class="lbl">Участник</div><div class="lbl" style="text-align:right">Подписчики</div>' +
-              '<div class="lbl" style="text-align:right">Посты</div><div class="lbl" style="text-align:right">В подписке</div></div>' +
-            aslice.map(function (m) {
-              return '<div class="mrow">' +
-                '<div style="width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,hsl(' + m.hue + ',34%,76%),hsl(' + ((m.hue + 50) % 360) + ',30%,62%))"></div>' +
-                '<div style="min-width:0"><div class="trunc" style="font-size:13px;font-weight:500">' + esc(m.name) + '</div>' +
-                  '<div class="trunc" style="font-size:11px;color:var(--ink-3);margin-top:1px">' + esc(m.handle) + '</div></div>' +
-                '<div class="num">' + fmt(m.followers) + '</div>' +
-                '<div class="num">' + fmt(m.posts) + '</div>' +
-                '<div class="num sub" style="color:var(--ink-2)">' + m.days + ' дн</div></div>';
-            }).join('') +
-          '</div>') +
-      '<div class="tfoot">' +
-        '<span class="mono" style="font-size:12px;color:var(--ink-2)">показано ' + aslice.length + ' из ' + fmt(a.audience) + '</span>' +
-        '<div class="grow"></div>' +
-        '<div class="pager">' +
-          '<button data-act="aud-page" data-v="' + (apage - 1) + '"' + (apage === 1 ? ' disabled' : '') + ' aria-label="Предыдущая страница">' + ic('cleft', 12) + '</button>' +
-          '<span class="mono" style="font-size:12px;color:var(--ink-2);padding:0 8px">' + apage + ' / ' + apages + '</span>' +
-          '<button data-act="aud-page" data-v="' + (apage + 1) + '"' + (apage === apages ? ' disabled' : '') + ' aria-label="Следующая страница">' + ic('cright', 12) + '</button>' +
-        '</div></div>' +
-    '</div>';
-  }
-
   return '<div class="main">' +
     '<button class="btn ghost" data-act="nav" data-v="accounts" style="align-self:flex-start;margin-bottom:12px;padding-left:0">' + ic('back', 14) + 'Все аккаунты</button>' +
     '<div class="page-hd" style="align-items:flex-start">' +
@@ -2471,7 +2521,7 @@ function screenDetail() {
       '<div class="grow"></div>' +
       '<button class="btn" data-act="site-open" data-v="' + a.id + '"' + (accountUrl(a) ? '' : ' disabled title="Для этой площадки нет публичной ссылки"') + '>' + ic('link', 13) + 'На площадке</button>' +
       '<button class="btn" data-act="refresh-one" data-v="' + a.id + '">' + ic('refresh', 13) + 'Обновить</button>' +
-      '<button class="btn pri" data-act="toast" data-v="Открыт редактор аккаунта">Изменить</button>' +
+      '<button class="btn pri" data-act="edit-open" data-v="' + a.id + '">Изменить</button>' +
     '</div>' +
 
     '<div class="kpis" style="grid-template-columns:repeat(5,minmax(0,1fr))">' +
@@ -2483,11 +2533,11 @@ function screenDetail() {
     '</div>' +
 
     '<div class="tabs">' +
-      [['overview','Обзор'],['posts','Посты'],['audience','Аудитория']].map(function (t) {
+      [['overview','Обзор'],['posts','Посты']].map(function (t) {
         return '<button class="' + (state.detailTab === t[0] ? 'on' : '') + '" data-act="tab" data-v="' + t[0] + '">' + t[1] + '</button>';
       }).join('') +
     '</div>' +
-    (state.detailTab === 'audience' ? audience : state.detailTab === 'posts' ? postsView : overview) +
+    (state.detailTab === 'posts' ? postsView : overview) +
   '</div>';
 }
 
@@ -2495,7 +2545,21 @@ function screenDetail() {
    10. ЭКРАН «АНАЛИТИКА»
    ============================================================ */
 function screenAnalytics() {
+  if (state.booting) {
+    return '<div class="main"><div class="page-hd"><h1>Аналитика</h1></div>' + analyticsSkeleton() + '</div>';
+  }
   if (LIVE && !state.an.items && !state.an.loading) loadAnalytics();
+  const waiting = LIVE && (state.an.loading || state.an.items === null);
+  if (waiting) {
+    return '<div class="main">' +
+      '<div class="page-hd"><h1>Аналитика</h1><div class="grow"></div>' +
+        dd('an-platform', state.an.platform !== 'all') +
+        dd('an-sort') +
+        '<div class="seg">' + [['1d','24ч'],['7d','7д'],['30d','30д']].map(function (p) {
+          return '<button class="' + (state.an.period === p[0] ? 'on' : '') + '" data-act="an-period" data-v="' + p[0] + '">' + p[1] + '</button>';
+        }).join('') + '</div>' +
+      '</div>' + analyticsSkeleton() + '</div>';
+  }
   const acc = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
   const ins = state.an.insights;
 
@@ -2653,6 +2717,17 @@ function screenAnalytics() {
    11. ЭКРАН «НАСТРОЙКИ»
    ============================================================ */
 function screenSettings() {
+  if (state.booting) {
+    return '<div class="main"><div class="page-hd"><h1>Настройки</h1></div>' +
+      '<div class="sect"><div class="card" style="padding:16px" aria-busy="true">' +
+        [1,2,3,4].map(function () {
+          return '<div style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line-soft)">' +
+            '<span class="sk" style="width:10px;height:10px;border-radius:5px"></span>' +
+            '<span class="sk" style="height:12px;width:160px;flex:1"></span>' +
+            '<span class="sk" style="height:12px;width:36px"></span></div>';
+        }).join('') +
+      '</div></div></div>';
+  }
   return '<div class="main" style="--page-max:960px">' +
     '<div class="page-hd"><h1>Настройки</h1></div>' +
 
@@ -2693,34 +2768,9 @@ function screenSettings() {
         '</div>';
       }).join('') + '</div></div>' +
 
-    '<div class="sect"><div class="hd">' + ic('cal', 17) + '<h2>Расписание обновления</h2>' +
-      '<div class="grow"></div>' +
-      '<button class="btn" data-act="run-tab-open" data-v="schedule">Настроить</button></div>' +
-      '<div class="card">' +
-        '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Автообновление включено</div>' +
-          '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Каждые 6 часов · пропускать обновлённые за последние 2 часа</div></div>' +
-          '<span class="sw on"></span></div>' +
-        '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Отчёт в Telegram</div>' +
-          '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">CSV после каждого прогона · 2 получателя</div></div>' +
-          '<button class="btn sm" data-act="tg-test">Проверить</button>' +
-          '<span class="sw on"></span></div>' +
-        '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Включать архив и баны</div>' +
-          '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Сейчас архивные и забаненные аккаунты вне прогона</div></div>' +
-          '<span class="sw"></span></div>' +
-      '</div></div>' +
+    settingsScheduleSection() +
 
-    alertsSection() +
-
-    '<div class="sect"><div class="hd">' + ic('gear', 17) + '<h2>Движок скрапинга</h2></div>' +
-      '<div class="card">' + PLATFORMS.slice(0, 5).map(function (p, i) {
-        const apify = i === 1 || i === 4;
-        return '<div class="srow">' + pmark(p.v) +
-          '<div style="flex-grow:1;font-size:13px;font-weight:500">' + p.l + '</div>' +
-          '<div class="seg"><button class="' + (apify ? '' : 'on') + '" data-act="toast" data-v="Движок: Playwright">Playwright</button>' +
-          '<button class="' + (apify ? 'on' : '') + '" data-act="toast" data-v="Движок: Apify">Apify</button></div>' +
-          '<span class="pill" style="background:var(--chip);color:var(--ink-3)">fallback ' + (apify ? 'вкл' : 'выкл') + '</span>' +
-        '</div>';
-      }).join('') + '</div></div>' +
+    scrapeEngineSection() +
 
     '<div class="sect"><div class="hd">' + ic('down', 17) + '<h2>Экспорт данных</h2></div>' +
       '<div class="card">' +
@@ -2729,7 +2779,7 @@ function screenSettings() {
           '<button class="btn" data-act="export-csv">' + ic('down', 13) + 'Выгрузить</button></div>' +
         '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Полный снимок базы</div>' +
           '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Аккаунты, профили и метки одним файлом — для переноса или бэкапа</div></div>' +
-          '<button class="btn" data-act="toast" data-v="Снимок базы подготовлен">' + ic('down', 13) + 'Выгрузить</button></div>' +
+          '<button class="btn" data-act="export-snapshot">' + ic('down', 13) + 'Выгрузить</button></div>' +
       '</div></div>' +
 
     '<div class="sect"><div class="hd">' + ic('cols', 17) + '<h2>Профили и метки</h2></div>' +
@@ -2753,6 +2803,9 @@ function screenSettings() {
                     '<span class="dot" style="background:' + esc(r.color || '#8A857C') + '"></span>' +
                     '<div class="grow trunc" style="font-size:13px;font-weight:500">' + esc(r.name) +
                       (r.hidden ? ' <span class="pill" style="background:var(--chip);color:var(--ink-3)">скрыт</span>' : '') +
+                      (r.domainName
+                        ? ' <span class="pill" style="background:var(--accent-soft);color:var(--accent)">' + esc(r.domainName) + '</span>'
+                        : '') +
                     '</div>' +
                     '<span class="mono" style="font-size:11px;color:var(--ink-3)" title="Аккаунтов">' +
                       fmt(r.count || 0) + '</span>' +
@@ -2769,6 +2822,108 @@ function screenSettings() {
   '</div>';
 }
 
+/* Сводка расписания на экране настроек — живые значения, не заглушки. */
+function settingsScheduleSection() {
+  const s = state.sched;
+  let body;
+  if (!s && state.schedError) {
+    body = '<div class="card" style="padding:14px;font-size:13px;color:var(--warn)">' +
+      'Не удалось загрузить: ' + esc(state.schedError) +
+      ' <button class="btn sm" data-act="sched-reload" style="margin-left:8px">Повторить</button></div>';
+  } else if (!s) {
+    body = '<div class="card" style="padding:14px;font-size:13px;color:var(--ink-3)">Загрузка…</div>';
+  } else {
+    const mode = s.mode === 'times' ? 'times' : 'interval';
+    const times = (s.times || []).slice().sort();
+    const when = !s.enabled
+      ? 'выключено'
+      : (mode === 'times'
+        ? (times.length ? 'по времени: ' + times.join(', ') : 'по времени, но часы не заданы')
+        : ('каждые ' + (s.interval_hours || 6) + ' ч'));
+    const skip = +s.skip_recent_hours || 0;
+    const skipTxt = skip > 0
+      ? (' · пропускать обновлённые за последние ' + skip + ' ч')
+      : '';
+    const tgIds = s.auto_refresh_telegram_chat_ids || [];
+    const tgOn = !!s.auto_refresh_telegram_enabled;
+    const archOn = !!(s.include_archived_accounts || s.include_banned_accounts);
+    body = '<div class="card">' +
+      '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Автообновление включено</div>' +
+        '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' + esc(when) + esc(skipTxt) + '</div></div>' +
+        '<button type="button" class="sw ' + (s.enabled ? 'on' : '') + '" data-act="sched-quick" data-v="enabled" ' +
+          'role="switch" aria-checked="' + (s.enabled ? 'true' : 'false') + '"></button></div>' +
+      '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Отчёт в Telegram</div>' +
+        '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' +
+          (tgOn
+            ? ('CSV после каждого прогона · ' + (tgIds.length
+              ? (tgIds.length + ' ' + plural(tgIds.length, ['получатель', 'получателя', 'получателей']))
+              : 'получатели не заданы'))
+            : 'выключен') +
+        '</div></div>' +
+        '<button class="btn sm" data-act="tg-test">Проверить</button>' +
+        '<button type="button" class="sw ' + (tgOn ? 'on' : '') + '" data-act="sched-quick" data-v="auto_refresh_telegram_enabled" ' +
+          'role="switch" aria-checked="' + (tgOn ? 'true' : 'false') + '"></button></div>' +
+      '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Включать архив и баны</div>' +
+        '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' +
+          (archOn ? 'архивные и забаненные участвуют в автообновлении' : 'архивные и забаненные вне прогона') +
+        '</div></div>' +
+        '<button type="button" class="sw ' + (archOn ? 'on' : '') + '" data-act="sched-quick" data-v="include_archived_banned" ' +
+          'role="switch" aria-checked="' + (archOn ? 'true' : 'false') + '"></button></div>' +
+    '</div>';
+  }
+  return '<div class="sect"><div class="hd">' + ic('cal', 17) + '<h2>Расписание обновления</h2>' +
+    '<div class="grow"></div>' +
+    '<button class="btn" data-act="run-tab-open" data-v="schedule">Настроить</button></div>' +
+    body + '</div>';
+}
+
+/* Площадки, у которых в ScrapeBackendConfig есть выбор Playwright/Apify. */
+const SCRAPE_ENGINE_PLATS = ['tiktok', 'instagram', 'youtube', 'facebook', 'reddit', 'rumble'];
+
+function scrapeEngineSection() {
+  const cfg = state.scrape;
+  let body;
+  if (!cfg && state.scrapeError) {
+    body = '<div style="padding:14px;font-size:13px;color:var(--warn)">' +
+      'Не удалось загрузить: ' + esc(state.scrapeError) +
+      ' <button class="btn sm" data-act="scrape-reload" style="margin-left:8px">Повторить</button></div>';
+  } else if (!cfg) {
+    body = '<div style="padding:14px;font-size:13px;color:var(--ink-3)">Загрузка…</div>';
+  } else {
+    const apifyOk = !!cfg.apify_enabled;
+    const note = apifyOk
+      ? (cfg.apify_active_jobs
+        ? '<div style="font-size:12px;color:var(--ink-3);margin:-4px 0 12px;line-height:1.45">' +
+            'Apify настроен. Активных задач: ' + fmt(cfg.apify_active_jobs) + '.</div>'
+        : '')
+      : '<div style="font-size:12px;color:var(--warn);margin:-4px 0 12px;line-height:1.45">' +
+          'Apify недоступен: задайте APIFY_ENABLED=1 и APIFY_TOKEN на сервере. Можно выбрать только Playwright.</div>';
+    body = note + '<div class="card">' + SCRAPE_ENGINE_PLATS.map(function (pv) {
+      const p = PF[pv];
+      if (!p) return '';
+      const eng = String(cfg[pv + '_backend'] || 'playwright');
+      const fbOn = !!cfg[pv + '_fallback_enabled'];
+      const apifyDis = !apifyOk ? ' disabled title="Apify не настроен на сервере"' : '';
+      return '<div class="srow">' + pmark(pv) +
+        '<div style="flex-grow:1;font-size:13px;font-weight:500">' + p.l + '</div>' +
+        '<div class="seg">' +
+          '<button class="' + (eng === 'playwright' ? 'on' : '') + '" data-act="scrape-eng" data-v="' + pv + '|playwright">Playwright</button>' +
+          '<button class="' + (eng === 'apify' ? 'on' : '') + '" data-act="scrape-eng" data-v="' + pv + '|apify"' + apifyDis + '>Apify</button>' +
+        '</div>' +
+        '<button type="button" class="pill" data-act="scrape-fb" data-v="' + pv + '" ' +
+          'title="Fallback: при сбое Playwright попробовать Apify в том же прогоне" ' +
+          'style="background:' + (fbOn ? 'var(--accent-soft)' : 'var(--chip)') +
+          ';color:' + (fbOn ? 'var(--accent)' : 'var(--ink-3)') + ';cursor:pointer;border:0">' +
+          'fallback ' + (fbOn ? 'вкл' : 'выкл') + '</button>' +
+      '</div>';
+    }).join('') + '</div>';
+  }
+  return '<div class="sect"><div class="hd">' + ic('gear', 17) + '<h2>Движок скрапинга</h2></div>' +
+    '<div style="font-size:13px;color:var(--ink-3);margin:-4px 0 12px;line-height:1.45">' +
+      'Основной способ сбора по площадке. Fallback — запасной путь Playwright → Apify при ошибке.' +
+    '</div>' + body + '</div>';
+}
+
 function screenSimple(title, text, iconName) {
   return '<div class="main"><div class="page-hd"><h1>' + title + '</h1></div>' +
     '<div class="card empty"><div style="color:var(--ink-3)">' + ic(iconName, 28) + '</div>' +
@@ -2783,6 +2938,20 @@ function tvHues() { return platHues(); }
 function tvHue(platform) { return platHue(platform); }
 
 function screenTV() {
+  if (state.booting) {
+    return '<div class="tv" aria-busy="true"><div class="tv-bar">' +
+      '<span class="sk" style="width:24px;height:24px;border-radius:7px;background:var(--tvsurf)"></span>' +
+      '<span class="sk" style="width:110px;height:14px;background:var(--tvsurf)"></span>' +
+      '<div class="grow"></div></div>' +
+      '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:40px">' +
+        '<span class="sk" style="width:120px;height:14px;background:var(--tvsurf)"></span>' +
+        '<span class="sk" style="width:min(70vw,420px);height:72px;background:var(--tvsurf);border-radius:12px"></span>' +
+        '<div style="display:flex;gap:24px;margin-top:24px">' +
+          [1,2,3,4].map(function () {
+            return '<span class="sk" style="width:88px;height:48px;background:var(--tvsurf);border-radius:8px"></span>';
+          }).join('') +
+        '</div></div></div>';
+  }
   const live = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
   const t = totals(live);
   const now = new Date();
@@ -2844,33 +3013,7 @@ function screenTV() {
 function tvPaint() { vcPaint(); }
 function tvStart() { clearInterval(state.tvTimer); }
 
-/* Алерты живут разделом настроек: на рабочих экранах они только мешали. */
-function alertsSection() {
-  return '<div class="sect"><div class="hd">' + ic('alert', 17) + '<h2>Алерты</h2>' +
-      '<span class="count">' + ALERTS.length + '</span><div class="grow"></div>' +
-      '<button class="btn" data-act="toast" data-v="Открыт конструктор правила">' + ic('plus', 13) + 'Новое правило</button></div>' +
-    '<div class="card">' + ALERTS.map(function (al) {
-      const col = al.sev === 'neg' ? 'var(--neg)' : 'var(--warn)';
-      const bg = al.sev === 'neg' ? 'var(--neg-soft)' : 'var(--warn-soft)';
-      return '<div class="srow">' +
-        '<span style="width:28px;height:28px;border-radius:8px;background:' + bg + ';color:' + col + ';display:flex;align-items:center;justify-content:center">' + ic('alert', 15) + '</span>' +
-        '<div style="flex-grow:1;min-width:0"><div class="trunc" style="font-size:13px;font-weight:500">' + esc(al.title) + '</div>' +
-        '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' + esc(al.rule) + ' · ' + al.ago + ' назад</div></div>' +
-        '<button class="btn sm" data-act="toast" data-v="Алерт отмечен как прочитанный">Прочитано</button></div>';
-    }).join('') + '</div>' +
-    '<div class="lbl" style="margin:4px 0 -4px">Правила</div>' +
-    '<div class="card">' +
-      [['Просадка подписчиков', 'больше 0,5% за 7 дней · все профили', true],
-       ['Профиль недоступен', '3 неудачи скрапа подряд', true],
-       ['Нет обновления', 'аккаунт не обновлялся 3 дня', true],
-       ['Всплеск просмотров', 'рост больше 200% за сутки · только «Медиа»', false]].map(function (r) {
-        return '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">' + r[0] + '</div>' +
-          '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' + r[1] + '</div></div>' +
-          '<span class="pill" style="background:var(--chip);color:var(--ink-3)">Telegram</span>' +
-          '<span class="sw ' + (r[2] ? 'on' : '') + '"></span></div>';
-      }).join('') +
-    '</div></div>';
-}
+
 
 /* ============================================================
    12. МОДАЛКИ
@@ -2991,17 +3134,23 @@ function collectSchedule() {
     auto_refresh_telegram_enabled: !!s.auto_refresh_telegram_enabled,
   };
 }
-async function loadSchedule() {
-  if (DEMO || !LIVE || state.sched) return;
+async function loadSchedule(force) {
+  if (DEMO || !LIVE) return;
+  if (state.sched && !force) {
+    if (state.route === 'settings') paintBody();
+    else if (document.getElementById('overlay')) paintOverlay();
+    return;
+  }
   try {
     state.sched = await api('/api/accounts/schedule/');
     state.schedError = null;
   } catch (e) {
     state.schedError = String(e.message || e);
   }
-  // Расписание живёт в модалке: полная перерисовка ради него пересобрала бы
-  // и таблицу под затемнением — это и было моргание при открытии окна.
-  if (document.getElementById('overlay')) paintOverlay(); else render();
+  // Расписание живёт и в модалке, и в сводке настроек.
+  if (state.route === 'settings') render();
+  else if (document.getElementById('overlay')) paintOverlay();
+  else render();
 }
 
 function modalRefreshAll() {
@@ -3098,6 +3247,25 @@ function modalAdd() {
   return modalShell('Добавить аккаунты', body, ft);
 }
 
+function modalEdit() {
+  const e = state.edit;
+  if (!e) return '';
+  const body =
+    '<div style="font-size:13px;color:var(--ink-2)">' +
+      'Метки аккаунта <b>' + (String(e.username || '').indexOf('r/') === 0 ? '' : '@') +
+      esc(e.username) + '</b> · ' + esc(plabel(e.platform)) +
+    '</div>' +
+    '<div class="frow"><span class="lb">Домен</span>' + dd('edit-domain') + '</div>' +
+    '<div class="frow"><span class="lb">Профиль и владелец</span>' +
+      dd('edit-profile') + dd('edit-owner') + '</div>' +
+    '<div class="frow"><span class="lb">Группа и страна</span>' +
+      dd('edit-group') + dd('edit-country') + '</div>' +
+    '<div style="font-size:12px;color:var(--ink-3)">Статистика и дата «Обновлён» не меняются — только домен и метки.</div>';
+  const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
+    '<button class="btn pri" data-act="edit-save">Сохранить</button>';
+  return modalShell('Изменить аккаунт', body, ft);
+}
+
 function modalCatalog() {
   const c = state.catalog;
   if (!c) return '';
@@ -3109,6 +3277,11 @@ function modalCatalog() {
       '<input id="catname" type="text" value="' + esc(c.name) + '" placeholder="Например, Миньёны" ' +
       'autofocus style="width:100%;padding:11px 12px;border:1px solid var(--line-2);border-radius:8px;' +
       'background:var(--surface);color:var(--ink);font:inherit;font-size:13px;outline:none"></div>' +
+    '<div class="frow"><span class="lb">Домен</span>' + dd('cat-domain') +
+      '<span style="font-size:12px;color:var(--ink-3)">' +
+        (c.domainId ? 'метка видна в этом домене и на All'
+          : 'без домена — видна на All со всеми доменами') +
+      '</span></div>' +
     '<div><div class="lbl" style="margin-bottom:8px">Цвет</div>' +
       '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
         CATALOG_COLORS.map(function (col) {
@@ -3177,7 +3350,7 @@ function modalCompare() {
       '</div>' +
     '</div></div>';
   const ft = '<span style="font-size:12px;color:var(--ink-3)">Выбрано ' + picked.length + ' из максимум 5</span><div class="grow"></div>' +
-    '<button class="btn" data-act="toast" data-v="Сравнение выгружено в CSV">' + ic('down', 13) + 'Экспорт</button>' +
+    '<button class="btn" data-act="compare-export">' + ic('down', 13) + 'Экспорт</button>' +
     '<button class="btn" data-act="close">Закрыть</button>';
   return modalShell('Сравнение аккаунтов', body, ft, true);
 }
@@ -3244,7 +3417,8 @@ function offlineBar() {
   return '<div style="padding:10px 16px;background:var(--warn-soft);border-bottom:1px solid var(--warn);' +
     'display:flex;align-items:center;gap:10px;font-size:12px;color:var(--ink);flex-wrap:wrap">' +
     '<span style="color:var(--warn);display:flex">' + ic('alert', 15) + '</span>' +
-    '<div><b>API недоступен — показаны демо-данные.</b> ' + esc(state.apiError) + '</div>' +
+    '<div><b>API недоступен.</b> ' + esc(state.apiError) +
+      (DEMO ? ' Показаны демо-данные.' : ' Список пуст — повторите запрос.') + '</div>' +
     '<div class="grow"></div>' +
     '<button class="btn sm" data-act="retry-api">' + ic('refresh', 12) + 'Повторить</button></div>';
 }
@@ -3301,6 +3475,7 @@ function screen() {
 function modalsHtml() {
   return (state.modal === 'refreshAll' ? modalRefreshAll() : '') +
     (state.modal === 'add'      ? modalAdd()      : '') +
+    (state.modal === 'edit'     ? modalEdit()     : '') +
     (state.modal === 'compare'  ? modalCompare()  : '') +
     (state.modal === 'cols'     ? modalCols()     : '') +
     (state.modal === 'confirm'  ? modalConfirm()  : '') +
@@ -3317,15 +3492,82 @@ function paintChrome() {
   el.innerHTML = appbar() + ribbon() + offlineBar();
   return true;
 }
+/* .main / .rail / .tbl-scroll пересоздаются вместе с #body — без снимка
+   скролл каждый раз уезжает наверх (удаление метки в Настройках и т.п.). */
+function captureScroll() {
+  const pick = function (sel) {
+    const el = document.querySelector(sel);
+    return el ? { top: el.scrollTop || 0, left: el.scrollLeft || 0 } : null;
+  };
+  return {
+    main: pick('.main'),
+    rail: pick('.rail'),
+    tbl: pick('.tbl-scroll'),
+  };
+}
+function restoreScroll(snap) {
+  if (!snap) return;
+  const apply = function (sel, s) {
+    if (!s) return;
+    const el = document.querySelector(sel);
+    if (!el) return;
+    el.scrollTop = s.top;
+    el.scrollLeft = s.left;
+  };
+  apply('.main', snap.main);
+  apply('.rail', snap.rail);
+  apply('.tbl-scroll', snap.tbl);
+  // Браузер иногда сбрасывает scrollTop сразу после innerHTML — повторяем на кадре.
+  requestAnimationFrame(function () {
+    apply('.main', snap.main);
+    apply('.rail', snap.rail);
+    apply('.tbl-scroll', snap.tbl);
+  });
+}
 function paintBody() {
   const el = document.getElementById('body');
   if (!el) { render(); return; }
+  const scroll = captureScroll();
   const focus = document.activeElement && document.activeElement.id;
   const at = document.activeElement && document.activeElement.selectionStart;
   el.innerHTML = rail() + screen();
+  restoreScroll(scroll);
   restoreFocus(focus, at);
-  vcPaint();          // цифры счётчика собраны из state, но тик мог уйти вперёд
+  // vcPaint только в эфире (render → tvPaint); на рабочих экранах — цифры из БД.
   saveUi();
+}
+/* Выделение без пересборки списка — иначе .main/.tbl-scroll уезжают наверх. */
+function paintSelection() {
+  const rows = document.querySelectorAll('.tr.td[data-act="open"], .acard[data-act="open"]');
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const id = +row.dataset.v;
+    const on = state.selected.has(id);
+    row.classList.toggle('sel', on);
+    const box = row.querySelector('[data-act="sel"]');
+    if (!box) continue;
+    box.classList.toggle('on', on);
+    box.setAttribute('aria-checked', on ? 'true' : 'false');
+    box.innerHTML = on ? ic('check', 11) : '';
+  }
+  const slice = (typeof visible === 'function' && state.route === 'accounts')
+    ? visible().slice((state.page - 1) * state.pageSize, state.page * state.pageSize)
+    : [];
+  const allSel = slice.length > 0 && slice.every(function (a) { return state.selected.has(a.id); });
+  const pageBox = document.querySelector('[data-act="sel-page"]');
+  if (pageBox) {
+    pageBox.classList.toggle('on', allSel);
+    pageBox.setAttribute('aria-checked', allSel ? 'true' : 'false');
+    pageBox.innerHTML = allSel ? ic('check', 11) : '';
+  }
+  const actsBtn = document.querySelector('[data-act="menu"][data-v="acts:"]');
+  if (actsBtn) {
+    const n = state.selected.size;
+    const label = ic('dots', 13) + 'Действия' +
+      (n ? '<span class="count">' + n + '</span>' : '');
+    actsBtn.innerHTML = label;
+  }
+  paintOverlay();
 }
 function paintOverlay() {
   const el = document.getElementById('overlay');
@@ -3357,8 +3599,10 @@ function render() {
     mountedModal = null;
     tvPaint();
     tvStart();
+    if (state.vc) vcStart();
     return;
   }
+  clearInterval(vcTimer);   // одометр крутится только в эфире
   clearInterval(state.tvTimer);
   const app = document.getElementById('app');
   // Каркас пересобираем только когда его нет (первый заход или выход из эфира)
@@ -3413,23 +3657,34 @@ document.addEventListener('click', function (e) {
   switch (act) {
     case 'nav':
       state.route = v; state.selected.clear();
-      if (v === 'analytics' && LIVE && !state.an.items) loadAnalytics();
-      if (v === 'settings' && LIVE) loadSessionsLive();
+      if (v === 'analytics') {
+        // При каждом заходе на экран — свежие данные, без чужих цифр с прошлого раза.
+        state.an.items = null;
+        state.an.insights = null;
+        if (LIVE) loadAnalytics();
+      }
+      if (v === 'settings' && LIVE) { loadSessionsLive(); loadScrapeBackend(); loadSchedule(); }
       break;
     case 'retry-api': state.apiError = null; state.booting = true; render(); bootLive(); return;
     case 'open':
       if (e.target.closest('[data-act="sel"]')) return;
       state.route = 'detail'; state.detailId = +v; state.detailTab = 'overview';
-      state.audQ = ''; state.audPage = 1;     // иначе тянется поиск от прошлого аккаунта
       break;
-    case 'tab':       state.detailTab = v; state.audQ = ''; state.audPage = 1; break;
-    case 'aud-page':  state.audPage = Math.max(1, +v); break;
+    case 'tab':
+      state.detailTab = (v === 'posts' ? 'posts' : 'overview');
+      break;
     case 'post-view': state.postView = v; break;
     case 'theme':      toggleTheme(); break;
     case 'set-theme':  setTheme(v); break;
     case 'period':    state.period = +v; ensureDeltas(+v); break;
     case 'an-period': state.an.period = v; state.an.items = null; loadAnalytics(); break;
-    case 'viewmode':  state.view = v; break;
+    case 'viewmode':
+      state.view = v;
+      // Шапка и список: MAIN_ACTS не трогает chrome, а переключатель теперь и там.
+      syncUrl();
+      paintChrome();
+      paintMain();
+      return;
     case 'page':      state.page = Math.max(1, +v); break;
     case 'sort':
       if (state.sort.key === v) state.sort.dir = state.sort.dir === 'desc' ? 'asc' : 'desc';
@@ -3468,7 +3723,9 @@ document.addEventListener('click', function (e) {
     case 'refresh-one': A.refreshOne(+v); return;
     case 'site-open':   openAccountSite(ACCOUNTS.filter(function (x) { return x.id === +v; })[0]); return;
     case 'auto-now':    A.autoRunNow(); return;
-    case 'export-csv':  A.exportCsv(); return;
+    case 'export-csv':  A.exportAccountsCsv(); return;
+    case 'export-snapshot': A.exportSnapshot(); return;
+    case 'compare-export': A.exportCompareCsv(); return;
     case 'sess-logout': {
       const pl = (PLATFORMS.filter(function (x) { return x.v === v; })[0] || { l: v }).l;
       askConfirm({
@@ -3489,6 +3746,27 @@ document.addEventListener('click', function (e) {
       state.modal = null;
       A.sessionCookies(pf, raw);
       break;
+    }
+    case 'sched-reload':
+      loadSchedule(true);
+      return;
+    case 'sched-quick': {
+      if (!state.sched) {
+        loadSchedule(true);
+        toast('Загружаю расписание…');
+        return;
+      }
+      if (v === 'include_archived_banned') {
+        const on = !(state.sched.include_archived_accounts || state.sched.include_banned_accounts);
+        state.sched.include_archived_accounts = on;
+        state.sched.include_banned_accounts = on;
+      } else if (v === 'enabled' || v === 'auto_refresh_telegram_enabled') {
+        state.sched[v] = !state.sched[v];
+      } else {
+        break;
+      }
+      A.saveSchedule(collectSchedule());
+      return;
     }
     case 'tg-test':     A.telegramTest(); return;
     case 'sched-bool':
@@ -3551,18 +3829,20 @@ document.addEventListener('click', function (e) {
         state.selected.add(id);
       }
       if (idx >= 0) state.lastSel = idx;
-      break;
+      paintSelection();
+      return;
     }
     case 'sel-page': {
       const slice = visible().slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
       const all = slice.every(function (a) { return state.selected.has(a.id); });
       slice.forEach(function (a) { if (all) state.selected.delete(a.id); else state.selected.add(a.id); });
-      break;
+      paintSelection();
+      return;
     }
     case 'bulk': {
       const n = state.selected.size;
-      if (v === 'clear') { state.selected.clear(); state.lastSel = -1; break; }
-      if (v === 'all')   { visible().forEach(function (a) { state.selected.add(a.id); }); break; }
+      if (v === 'clear') { state.selected.clear(); state.lastSel = -1; paintSelection(); return; }
+      if (v === 'all')   { visible().forEach(function (a) { state.selected.add(a.id); }); paintSelection(); return; }
       const ids = Array.from(state.selected);
       if (v === 'refresh') { A.bulkRefresh(ids); return; }
       if (v === 'archive') {
@@ -3593,6 +3873,16 @@ document.addEventListener('click', function (e) {
         return;
       }
       toast('Массовое изменение: ' + v); return;
+    }
+    case 'edit-open': {
+      const acc = ACCOUNTS.filter(function (x) { return x.id === +v; })[0];
+      openEditAccount(acc);
+      break;
+    }
+    case 'edit-save': {
+      if (!state.edit) break;
+      A.saveEdit(state.edit);
+      return;
     }
     case 'modal':
       state.modal = v;
@@ -3630,10 +3920,39 @@ document.addEventListener('click', function (e) {
       if (DEMO || !LIVE) { toast('Демо-режим: отчёта нет'); return; }
       window.open(API_BASE + '/api/accounts/refresh-all-report/', '_blank');
       return;
+    case 'scrape-reload':
+      loadScrapeBackend(true);
+      return;
+    case 'scrape-eng': {
+      const cut = String(v || '').indexOf('|');
+      if (cut < 0 || !state.scrape) break;
+      const plat = v.slice(0, cut);
+      const eng = v.slice(cut + 1);
+      if (SCRAPE_ENGINE_PLATS.indexOf(plat) < 0) break;
+      if (eng !== 'playwright' && eng !== 'apify') break;
+      if (eng === 'apify' && !state.scrape.apify_enabled) {
+        toast('Apify не настроен на сервере');
+        return;
+      }
+      if (state.scrape[plat + '_backend'] === eng) return;
+      const patchEng = {};
+      patchEng[plat + '_backend'] = eng;
+      A.saveScrapeBackend(patchEng);
+      return;
+    }
+    case 'scrape-fb': {
+      if (!state.scrape || SCRAPE_ENGINE_PLATS.indexOf(v) < 0) break;
+      const key = v + '_fallback_enabled';
+      const patchFb = {};
+      patchFb[key] = !state.scrape[key];
+      A.saveScrapeBackend(patchFb);
+      return;
+    }
     case 'confirm-ok': {
       const c = PENDING_CONFIRM;
       PENDING_CONFIRM = null; state.modal = null;
-      render();
+      // Только overlay: полный render() здесь сбрасывал скролл до завершения API.
+      paintOverlay();
       if (c && c.run) c.run();
       return;
     }
@@ -3667,8 +3986,9 @@ document.addEventListener('click', function (e) {
       break;
     case 'catalog-cancel': {
       const backAdd = state.catalog && state.catalog.selectInto === 'add';
+      const backEdit = state.catalog && state.catalog.selectInto === 'edit';
       state.catalog = null;
-      state.modal = backAdd ? 'add' : null;
+      state.modal = backAdd ? 'add' : (backEdit ? 'edit' : null);
       break;
     }
     case 'catalog-save': {
@@ -3681,8 +4001,8 @@ document.addEventListener('click', function (e) {
       A.saveCatalog(cat);
       return;
     }
-    case 'close':     state.modal = null; state.runError = false; PENDING_CONFIRM = null; state.catalog = null; break;
-    case 'scrim':     state.modal = null; state.runError = false; state.catalog = null; break;
+    case 'close':     state.modal = null; state.runError = false; PENDING_CONFIRM = null; state.catalog = null; state.edit = null; break;
+    case 'scrim':     state.modal = null; state.runError = false; state.catalog = null; state.edit = null; break;
     case 'palette':   state.modal = 'palette'; state.paletteQ = ''; state.paletteI = 0; break;
     case 'pal-go': {
       const it = PALETTE_ITEMS[+v];
@@ -3691,7 +4011,10 @@ document.addEventListener('click', function (e) {
       else { state.route = 'detail'; state.detailId = it.d.id; state.detailTab = 'overview'; state.modal = null; }
       break;
     }
-    case 'run-pause': state.run.on = false; clearInterval(state.run.timer); toast('Прогон поставлен на паузу'); return;
+    case 'run-pause':
+      // В LIVE паузы нет (только остановка на сервере) — кнопка скрыта в ribbon.
+      if (LIVE && !DEMO) { toast('В живом режиме используйте «Остановить»'); return; }
+      state.run.on = false; clearInterval(state.run.timer); toast('Прогон поставлен на паузу'); return;
     case 'run-stop':
       if (LIVE && !DEMO) { state.modal = null; A.refreshAllStop(); return; }
       state.run.on = false; state.modal = null; clearInterval(state.run.timer); toast('Прогон остановлен'); return;
@@ -3717,12 +4040,13 @@ document.addEventListener('click', function (e) {
 const OVERLAY_ACTS = new Set([
   'menu', 'modal', 'close', 'scrim', 'run-tab', 'start-all', 'palette',
   'sched-bool', 'sched-int', 'sched-skip', 'sched-plat', 'sched-mode', 'sched-time',
-  'cat-new', 'cat-edit', 'cat-color', 'catalog-cancel',
+  'cat-new', 'cat-edit', 'cat-del', 'cat-color', 'catalog-cancel',
+  'edit-open',
 ]);
 /* Действия, меняющие список и рельс, но не шапку */
 const MAIN_ACTS = new Set([
-  'sel', 'sel-page', 'page', 'sort', 'viewmode', 'dense', 'col', 'cols-reset',
-  'fpick', 'f-clear', 'f-reset', 'cat', 'tab', 'aud-page', 'post-view',
+  'sel', 'sel-page', 'page', 'sort', 'dense', 'col', 'cols-reset',
+  'fpick', 'f-clear', 'f-reset', 'cat', 'tab', 'post-view',
 ]);
 
 let qTimer = null;
@@ -3742,7 +4066,6 @@ document.addEventListener('input', function (e) {
   }
   if (e.target.id === 'cookiestext') { state.cookiesText = e.target.value; return; }
   if (e.target.id === 'pal')  { state.paletteQ = e.target.value; state.paletteI = 0; render(); }
-  if (e.target.id === 'audq') { state.audQ = e.target.value; state.audPage = 1; render(); }
 });
 
 /* Меню закрывается при прокрутке и ресайзе: оно позиционировано
@@ -3784,11 +4107,12 @@ document.addEventListener('keydown', function (e) {
     if (state.menu) { state.menu = null; render(); }
     else if (state.modal === 'catalog') {
       const backAdd = state.catalog && state.catalog.selectInto === 'add';
+      const backEdit = state.catalog && state.catalog.selectInto === 'edit';
       state.catalog = null;
-      state.modal = backAdd ? 'add' : null;
+      state.modal = backAdd ? 'add' : (backEdit ? 'edit' : null);
       render();
     }
-    else if (state.modal) { state.modal = null; state.catalog = null; render(); }
+    else if (state.modal) { state.modal = null; state.catalog = null; state.edit = null; render(); }
     else if (state.selected.size) { state.selected.clear(); render(); }
     return;
   }
@@ -3814,15 +4138,11 @@ document.addEventListener('keydown', function (e) {
 
 /* ============================================================
    15. ЖИВЫЕ ДАННЫЕ — Django API
-   Данные-заглушки выше остаются как fallback: если API недоступен,
-   интерфейс продолжает работать на них и честно об этом говорит.
+   Без ?demo=1 сиды очищены: при ошибке API список пуст, а не «демо».
    ============================================================ */
 let LIVE = false;
-/* Демо-режим: ни одного обращения к API, только встроенные данные.
-   Включается флагом window.__DEMO__ (его ставит сборка автономного
-   прототипа) или параметром ?demo=1. */
-const DEMO = !!window.__DEMO__ || /[?&]demo=1/.test(location.search);
-const API_PORT = '8020';            // порт Django локально; переопределяется ключом as_api_base
+/* Демо-режим объявлен выше (DEMO): без него сиды очищены до первой отрисовки. */
+const API_PORT = '8000';            // порт Django локально (manage.py runserver); переопределяется as_api_base
 const API_BASE = (function () {
   try { const o = localStorage.getItem('as_api_base'); if (o) return o.replace(/\/+$/, ''); } catch (e) {}
   if (location.protocol === 'file:') return 'http://127.0.0.1:' + API_PORT;
@@ -3980,7 +4300,6 @@ function mapAccount(r) {
     d: { 1: d, 7: d, 30: d },
     updated: minutesSince(r.updated_at),
     unavailable: !!r.profile_unavailable, archived: !!r.is_archived, banned: !!r.is_banned,
-    audience: r.audience_members_count || 0,
   };
 }
 function mapPost(p) {
@@ -4001,11 +4320,11 @@ function mapPost(p) {
 const deltaLoaded = { 1: false, 7: false, 30: false };
 async function ensureDeltas(period) {
   if (!LIVE || deltaLoaded[period]) return;
-  deltaLoaded[period] = true;
   try {
     const rows = await api('/api/accounts/?' + ACC_QS + '&delta_period_days=' + period);
     const by = {}; rows.forEach(function (r) { by[r.id] = r; });
     ACCOUNTS.forEach(function (a) { const r = by[a.id]; if (r) a.d[period] = deltasOf(r); });
+    deltaLoaded[period] = true;
     render();
   } catch (e) { deltaLoaded[period] = false; }
 }
@@ -4019,23 +4338,6 @@ async function loadPosts(a) {
   a._postsLoading = false;
   if (state.route === 'detail' && state.detailId === a.id) render();
 }
-
-async function loadAudience(a) {
-  a._audLoading = true;
-  try {
-    const r = await api('/api/accounts/' + a.id + '/audience/?page=1');
-    const rows = r.results || [];
-    a._audLive = rows.map(function (m, i) {
-      return { id: m.id || i, name: m.display_name || m.username || '—',
-               handle: '@' + (m.username || ''), followers: m.follower_count || 0,
-               posts: m.post_count || 0, days: 0, hue: ((m.id || i) * 53) % 360 };
-    });
-    a._audCount = r.count || a._audLive.length;
-  } catch (e) { a._audLive = []; }
-  a._audLoading = false;
-  if (state.route === 'detail' && state.detailId === a.id) render();
-}
-function audienceList(a) { return LIVE ? (a._audLive || []) : audienceOf(a); }
 
 /* Точечное обновление прогресса. Полная перерисовка тут недопустима:
    опрос идёт каждые 4 секунды, и страница моргала бы всё время простоя. */
@@ -4132,26 +4434,20 @@ async function pollRun() {
 }
 
 /* ============================================================
-   ЖИВОЙ СЧЁТЧИК ПРОСМОТРОВ
+   ЖИВОЙ СЧЁТЧИК (только эфир: /efir и /<домен>/efir)
 
-   Сутки счётчика идут с 10:00 до 10:00 по Москве. Внутри текущих суток
-   показанное число едет от «вчера в 10:00» к «сегодня в 10:00»: то есть мы
-   растягиваем по времени прирост, который уже измерен и лежит в базе. Отсюда
-   два свойства — число всегда отстаёт примерно на сутки и никогда не обгоняет
-   базу.
+   На странице «Аккаунты» KPI — актуальные суммы из БД, без анимации.
+   В эфире рост идёт с 10:00 до 20:00 по Москве: от «вчера в 10:00» к
+   «сегодня в 10:00». После 20:00 цифра заморожена до следующих 10:00.
+   Тик — раз в секунду; прирост размазан по всем ~36 000 секундам окна
+   (где-то +1/+2, где-то 0), а не «съеден» в начале.
 
-   Прибавка на каждый десятисекундный тик не одинаковая: 8640 тиков получают
-   случайные веса, и прирост делится по ним. Поэтому идёт +1, +7, +13, а на
-   малом приросте часть тиков нулевая. Случайность детерминированная — сеется
-   от даты окна, поэтому во всех вкладках и у всех зрителей число совпадает и
-   не сбрасывается при перезагрузке.
-
-   Прирост может быть нулём: значит, за прошлые сутки прогонов не было.
-   Тогда счётчик стоит. Дорисовывать движение, которого не было, — значит
-   показывать выдуманные цифры.
+   Случайность детерминированная — сеется от даты окна, поэтому во всех
+   вкладках и у всех зрителей число совпадает и не сбрасывается при
+   перезагрузке. Прирост 0 — счётчик стоит (не выдумываем движение).
    ============================================================ */
-const VC_TICK_MS = 10000;
-const VC_TICKS = 24 * 60 * 60 * 1000 / VC_TICK_MS;   // 8640 тиков в сутках
+const VC_TICK_MS = 1000;
+const VC_TICKS_FALLBACK = 10 * 60 * 60;   // 10:00–20:00, если бэкенд без окна
 let vcTimer = null;
 
 function vcSeed(s) {                       // строка окна -> 32-битное зерно
@@ -4169,33 +4465,74 @@ function vcRand(seed) {                    // mulberry32
   };
 }
 /* Накопленная прибавка по тикам. Веса положительные, поэтому ряд не убывает —
-   счётчик не может пойти назад. В последнем тике сумма ровно равна приросту. */
-function vcSteps(growth, seed) {
-  const cum = new Int32Array(VC_TICKS + 1);
+   счётчик не может пойти назад. В последнем тике сумма ровно равна приросту.
+   Прирост меньше числа тиков → часть секунд даёт +0 (тик «пропускается»). */
+function vcSteps(growth, seed, ticks) {
+  const n = Math.max(1, ticks | 0);
+  const cum = new Int32Array(n + 1);
   if (growth <= 0) return cum;
   const rnd = vcRand(seed);
-  const w = new Float64Array(VC_TICKS);
+  const w = new Float64Array(n);
   let sum = 0;
-  for (let i = 0; i < VC_TICKS; i++) { w[i] = 0.15 + rnd() * 1.7; sum += w[i]; }
+  for (let i = 0; i < n; i++) { w[i] = 0.15 + rnd() * 1.7; sum += w[i]; }
   let acc = 0;
-  for (let i = 0; i < VC_TICKS; i++) {
+  for (let i = 0; i < n; i++) {
     acc += w[i];
     cum[i + 1] = Math.round(growth * acc / sum);
   }
-  cum[VC_TICKS] = growth;
+  cum[n] = growth;
   return cum;
 }
 /* Кто мы и какие домены вообще есть. Ответ нужен только для подписи в шапке —
    сужает выдачу всё равно бэкенд, по заголовку. */
+function applyDomainsPayload(d) {
+  if (!d) { state.domains = null; return; }
+  const cur = (d.domains || []).filter(function (x) { return x.slug === d.current; })[0] || null;
+  state.domains = { current: cur, unknown: d.unknown || null, list: d.domains || [],
+                    unassigned: d.unassigned_accounts || 0 };
+  [PROFILES, OWNERS, GROUPS, COUNTRIES].forEach(function (arr) {
+    arr.forEach(function (r) {
+      if (!r.domainId) { r.domainName = ''; return; }
+      const hit = state.domains.list.filter(function (x) { return x.id === r.domainId; })[0];
+      r.domainName = hit ? hit.name : '';
+    });
+  });
+}
+function applyViewsAnchorsPayload(a) {
+  if (!a) { state.vc = null; return; }
+  const start = Date.parse(a.window_start);
+  const end = Date.parse(a.window_end);
+  if (!isFinite(start) || !isFinite(end) || end <= start) { state.vc = null; return; }
+  const ticks = Math.max(1, Math.round((end - start) / VC_TICK_MS));
+  const nextAt = Date.parse(a.next_window_start);
+  const m = {};
+  const src = a.metrics || {};
+  Object.keys(src).forEach(function (key) {
+    const p = src[key];
+    if (!p || p.prev === null || p.prev === undefined) return;
+    const growth = Math.max(0, p.growth || 0);
+    m[key] = {
+      prev: p.prev,
+      growth: growth,
+      source: p.source,
+      cum: vcSteps(growth, vcSeed(a.window_start + ':' + key), ticks),
+    };
+  });
+  if (!Object.keys(m).length) { state.vc = null; return; }
+  state.vc = {
+    start: start,
+    end: end,
+    // Новые якоря — в следующие 10:00; после 20:00 просто стоим на финише.
+    next: isFinite(nextAt) ? nextAt : (start + 24 * 60 * 60 * 1000),
+    ticks: ticks,
+    skew: a.server_now ? Date.parse(a.server_now) - Date.now() : 0,
+    m: m,
+  };
+}
 async function loadDomains() {
   if (DEMO || !LIVE) return;
   try {
-    const d = await api('/api/accounts/domains/');
-    const cur = (d.domains || []).filter(function (x) { return x.slug === d.current; })[0] || null;
-    state.domains = { current: cur, unknown: d.unknown || null, list: d.domains || [],
-                      unassigned: d.unassigned_accounts || 0 };
-    // Не только шапку: от ответа зависит и сам экран — на неизвестном адресе
-    // вместо списка аккаунтов показывается «такого раздела нет».
+    applyDomainsPayload(await api('/api/accounts/domains/'));
     paintChrome();
     paintBody();
   } catch (e) { state.domains = null; }
@@ -4203,35 +4540,11 @@ async function loadDomains() {
 async function loadViewsAnchors() {
   if (DEMO || !LIVE) return;
   try {
-    const a = await api('/api/accounts/views-anchors/');
-    const start = Date.parse(a.window_start);
-    if (!isFinite(start)) { state.vc = null; return; }
-    const m = {};
-    const src = a.metrics || {};
-    Object.keys(src).forEach(function (key) {
-      const p = src[key];
-      if (!p || p.prev === null || p.prev === undefined) return;
-      const growth = Math.max(0, p.growth || 0);
-      m[key] = {
-        prev: p.prev,
-        growth: growth,
-        source: p.source,
-        // Своё зерно на каждый показатель, иначе все пять дёргались бы
-        // одновременно и одинаково — видно, что это одна кривая.
-        cum: vcSteps(growth, vcSeed(a.window_start + ':' + key)),
-      };
-    });
-    if (!Object.keys(m).length) { state.vc = null; return; }
-    state.vc = {
-      start: start,
-      end: Date.parse(a.window_end),
-      // Расхождение часов клиента и сервера: без поправки счётчик покажет
-      // число из другого места суток.
-      skew: a.server_now ? Date.parse(a.server_now) - Date.now() : 0,
-      m: m,
-    };
-    vcStart();
-  } catch (e) { state.vc = null; }
+    applyViewsAnchorsPayload(await api('/api/accounts/views-anchors/'));
+    if (state.vc && state.route === 'tv') vcStart();
+    else if (!state.vc) clearInterval(vcTimer);
+    if (state.route === 'tv') vcPaint();
+  } catch (e) { state.vc = null; clearInterval(vcTimer); }
 }
 /* Число для первой отрисовки: живое, если якоря есть, иначе как в базе. */
 function vcOr(fallback, key) {
@@ -4244,15 +4557,15 @@ function vcTotal(key) {
   if (!v) return null;
   const p = v.m[key || 'views'];
   if (!p) return null;
+  const ticks = v.ticks || VC_TICKS_FALLBACK;
   const k = Math.floor((Date.now() + v.skew - v.start) / VC_TICK_MS);
-  if (k < 0) return null;
-  if (k >= VC_TICKS) return p.prev + p.growth;   // окно кончилось, ждём новых якорей
+  if (k < 0) return p.prev;                 // ещё не 10:00 — стартовое
+  if (k >= ticks) return p.prev + p.growth;  // после 20:00 — заморозка
   return p.prev + p.cum[k];
 }
-/* Обновляем только сами цифры, не пересобирая слой: перерисовка раз в 10
-   секунд сбрасывала бы выделение, фокус и позицию списка. */
+/* Обновляем только сами цифры, не пересобирая слой. */
 function vcPaint() {
-  if (!state.vc) return;
+  if (!state.vc || state.route !== 'tv') return;
   const els = document.querySelectorAll('[data-vc]');
   for (let i = 0; i < els.length; i++) {
     const n = vcTotal(els[i].dataset.vc);
@@ -4264,15 +4577,12 @@ function vcPaint() {
 /* --- одометр -------------------------------------------------------
    Рисунок числа: где цифра, где разделитель. Если он поменялся (число
    выросло на разряд), одометр пересобираем целиком. */
-/* Барабан игрового автомата: разряд не переставляется на соседнюю цифру, а
-   прокручивает целый оборот и тормозит с лёгким проскоком. Впятеро медленнее
-   прежних 600 мс; правые разряды крутятся дольше левых, поэтому останавливаются
-   по очереди слева направо — как барабаны в автомате. Дольше делать нельзя:
-   тик счётчика идёт раз в 10 с, и докрутка должна успевать закончиться. */
-const VC_ROLL_MS = 3000;
-const VC_ROLL_STEP_MS = 250;
+/* Барабан: при тике раз в секунду докрутка должна уложиться в тик —
+   без полного оборота, только переход на соседнюю цифру. */
+const VC_ROLL_MS = 720;
+const VC_ROLL_STEP_MS = 35;
 const VC_ROLL_EASE = 'cubic-bezier(.16, .72, .24, 1.06)';
-const VC_SPIN_TURNS = 1;                 // сколько полных оборотов добавляем
+const VC_SPIN_TURNS = 0;
 function vcReduceMotion() {
   try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
   catch (e) { return false; }
@@ -4284,6 +4594,12 @@ function isDigit(ch) { return ch >= '0' && ch <= '9'; }
 function vcSet(el, s) {
   const nextNum = +s.replace(/\D/g, '');
   const prevNum = +(el.dataset.vcNum === undefined ? NaN : el.dataset.vcNum);
+  if (isFinite(prevNum) && nextNum === prevNum) {
+    const odo = el.firstElementChild;
+    if (odo && odo.classList && odo.classList.contains('odo') && odo.dataset.shape === vcShape(s)) {
+      return; // заморозка / тик +0 — не трогаем барабан
+    }
+  }
   el.dataset.vcNum = nextNum;
   const odo = el.firstElementChild;
   if (!odo || !odo.classList || !odo.classList.contains('odo') || odo.dataset.shape !== vcShape(s)) {
@@ -4389,12 +4705,15 @@ function vcRoll(cell, next, order) {
 }
 function vcStart() {
   clearInterval(vcTimer);
-  if (!state.vc) return;
+  // Барабан только на стене (/efir и /<домен>/efir), не на «Аккаунтах».
+  if (!state.vc || state.route !== 'tv') return;
   vcPaint();
   vcTimer = setInterval(function () {
     const v = state.vc;
-    // Окно доехало до 10:00 — берём новые якоря на следующие сутки.
-    if (v && Date.now() + v.skew >= v.end) { loadViewsAnchors(); return; }
+    // Новые якоря — в следующие 10:00 (не в 20:00: там просто стоим).
+    const reloadAt = v && (v.next || v.end);
+    if (v && reloadAt && Date.now() + v.skew >= reloadAt) { loadViewsAnchors(); return; }
+    if (state.route !== 'tv') { clearInterval(vcTimer); return; }
     vcPaint();
   }, VC_TICK_MS);
 }
@@ -4439,9 +4758,26 @@ async function loadSessionsLive() {
   } catch (e) {}
 }
 
+async function loadScrapeBackend(force) {
+  if (DEMO || !LIVE) return;
+  if (state.scrape && !force) {
+    if (state.route === 'settings') render();
+    return;
+  }
+  try {
+    state.scrape = await api('/api/accounts/scrape-backend/');
+    state.scrapeError = null;
+  } catch (e) {
+    state.scrapeError = String(e.message || e);
+  }
+  if (state.route === 'settings') render();
+}
+
 async function loadAnalytics() {
   if (!LIVE || state.an.loading) return;
   state.an.loading = true;
+  state.an.error = null;
+  if (state.route === 'analytics') paintBody();
   const q = '&platform=' + (state.an.platform === 'all' ? '' : state.an.platform);
   try {
     const [top, ins] = await Promise.all([
@@ -4457,7 +4793,10 @@ async function loadAnalytics() {
     });
     state.an.total = top.total || 0;
     state.an.insights = ins;
-  } catch (e) { state.an.error = String(e.message || e); }
+  } catch (e) {
+    state.an.error = String(e.message || e);
+    state.an.items = [];
+  }
   state.an.loading = false;
   if (state.route === 'analytics') render();
 }
@@ -4562,8 +4901,11 @@ const A = {
       'Тестовое сообщение отправлено', { reload: false });
   },
   saveSchedule: function (cfg) {
-    return run(function () { return apiSend('/api/accounts/schedule/', cfg); },
-      'Расписание сохранено', { reload: false });
+    return run(async function () {
+      const r = await apiSend('/api/accounts/schedule/', cfg);
+      if (r && typeof r === 'object') state.sched = Object.assign({}, state.sched || {}, r);
+      return r;
+    }, 'Расписание сохранено', { reload: false });
   },
   addAccounts: function (lines, extra, fallbackPlatform) {
     // Площадка из формы — запасной вариант для строк без ссылки. Раньше её
@@ -4625,10 +4967,53 @@ const A = {
     }, function (r) { return r && r.message ? r.message : 'Вход запущен на сервере'; }, { reload: false })
       .then(function () { loadSessionsLive(); });
   },
-  exportCsv: function () {
+  exportAccountsCsv: function () {
+    const list = visible();
+    if (!list.length) { toast('Нечего выгружать'); return; }
+    const period = state.period;
+    const head = ['id', 'username', 'platform', 'domain', 'profile', 'owner', 'group', 'country',
+      'followers', 'views', 'likes', 'posts', 'clicks',
+      'd_followers', 'd_views', 'd_likes', 'd_posts', 'd_clicks', 'archived', 'banned'];
+    const lines = [head.join(';')];
+    list.forEach(function (a) {
+      const row = [
+        a.id, a.username, a.platform,
+        a.domainName || '', profileOf(a).name, ownerOf(a).name, groupOf(a).name, countryOf(a).name,
+        a.followers, a.views, a.likes, a.posts, a.clicks,
+        delta(a, 'f'), delta(a, 'v'), delta(a, 'l'), delta(a, 'p'), delta(a, 'c'),
+        a.archived ? 1 : 0, a.banned ? 1 : 0,
+      ].map(function (x) {
+        const s = String(x == null ? '' : x);
+        return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      });
+      lines.push(row.join(';'));
+    });
+    downloadText('accounts-' + period + 'd.csv', '\uFEFF' + lines.join('\n'));
+    toast('Выгружено ' + list.length + ' аккаунтов');
+  },
+  exportSnapshot: function () {
     if (DEMO || !LIVE) { toast('Демо-режим: выгрузка недоступна'); return; }
     window.open(API_BASE + '/api/accounts/export-snapshot/', '_blank');
     toast('Снимок выгружается');
+  },
+  exportCompareCsv: function () {
+    const picked = ACCOUNTS.filter(function (a) { return state.selected.has(a.id); }).slice(0, 5);
+    if (picked.length < 2) { toast('Выберите от двух аккаунтов'); return; }
+    const metrics = [
+      ['followers', 'followers', 'f'],
+      ['views', 'views', 'v'],
+      ['likes', 'likes', 'l'],
+      ['posts', 'posts', 'p'],
+      ['clicks', 'clicks', 'c'],
+    ];
+    const head = ['metric'].concat(picked.map(function (a) { return a.username; }));
+    const lines = [head.join(';')];
+    metrics.forEach(function (m) {
+      lines.push([m[0]].concat(picked.map(function (a) { return a[m[1]]; })).join(';'));
+      lines.push([m[0] + '_delta'].concat(picked.map(function (a) { return delta(a, m[2]); })).join(';'));
+    });
+    downloadText('compare.csv', '\uFEFF' + lines.join('\n'));
+    toast('Сравнение выгружено');
   },
   reloadCatalogs: async function () {
     if (DEMO || !LIVE) return;
@@ -4647,8 +5032,9 @@ const A = {
     const selectInto = cat.selectInto;
     const kind = cat.kind;
     const body = { name: name, color: cat.color || '#6366f1' };
-    const domId = currentDomainIdForCatalog();
-    if (cat.mode === 'create' && domId) body.domain_id = domId;
+    // Всегда шлём domain_id: иначе на /ferma бэкенд сам подставит домен,
+    // а явный «Без домена» нельзя было выбрать.
+    body.domain_id = cat.domainId || null;
     return run(async function () {
       let row;
       if (cat.mode === 'edit' && cat.id) {
@@ -4666,6 +5052,9 @@ const A = {
       if (selectInto === 'add') {
         state.add[meta.addField] = row.id;
         state.modal = 'add';
+      } else if (selectInto === 'edit' && state.edit) {
+        state.edit[meta.addField] = row.id;
+        state.modal = 'edit';
       } else {
         state.modal = null;
         if (selectInto === 'filter' && meta.filterKey) {
@@ -4676,6 +5065,25 @@ const A = {
           state.page = 1;
         }
       }
+      render();
+    });
+  },
+  saveEdit: function (edit) {
+    if (!edit || !edit.id) return null;
+    const body = {
+      ids: [edit.id],
+      domain_id: edit.domainId || null,
+      profile_id: edit.profileId || null,
+      owner_id: edit.ownerId || null,
+      group_id: edit.groupId || null,
+      country_id: edit.countryId || null,
+    };
+    return run(function () {
+      return apiSend('/api/accounts/bulk-update/', body);
+    }, 'Сохранено', { reload: true }).then(function (r) {
+      if (!r) return;
+      state.edit = null;
+      state.modal = null;
       render();
     });
   },
@@ -4691,7 +5099,23 @@ const A = {
       const at = sel.indexOf(sid);
       if (at >= 0) sel.splice(at, 1);
       if (state.add[meta.addField] === id) state.add[meta.addField] = 0;
-    }, 'Удалено', { reload: true });
+      if (state.edit && state.edit[meta.addField] === id) state.edit[meta.addField] = 0;
+      // Локально очистить метку у аккаунтов — без полного reload списка.
+      const field = meta.addField;
+      if (field) {
+        ACCOUNTS.forEach(function (a) {
+          if (a[field] === id) a[field] = 0;
+        });
+      }
+    }, 'Удалено', { reload: false });
+  },
+  saveScrapeBackend: function (patch) {
+    return run(async function () {
+      const r = await apiSend('/api/accounts/scrape-backend/', patch, 'PATCH');
+      state.scrape = r;
+      state.scrapeError = null;
+      return r;
+    }, 'Движок сохранён', { reload: false });
   },
 };
 
@@ -4711,26 +5135,70 @@ function parseAccountLines(text, fallbackPlatform) {
     if (!line) return;
     let platform = fallbackPlatform || 'tiktok';
     let username = line;
-    const m = line.match(/^https?:\/\/([^/]+)(\/.*)?$/i);
-    if (m) {
+    // http(s) необязателен: в буфер часто попадает www.youtube.com/@имя
+    const m = line.match(/^(?:https?:\/\/)?([^/\s]+)(\/[^?\s#]*)?/i);
+    if (m && /[./]/.test(m[1])) {
       const host = m[1].toLowerCase().replace(/^www\./, '');
-      const hit = HOST_PLATFORM.filter(function (h) { return host === h[0] || host.endsWith('.' + h[0]); })[0];
+      const hit = HOST_PLATFORM.filter(function (h) {
+        return host === h[0] || host.endsWith('.' + h[0]);
+      })[0];
       if (hit) platform = hit[1];
-      const parts = (m[2] || '').split('/').filter(Boolean);
-      username = parts.length ? decodeURIComponent(parts[parts.length - 1]) : host;
-      if (parts.length > 1 && /^(channel|c|user|@?[^@]+)$/i.test(parts[0]) && parts[0].charAt(0) === '@') {
-        username = parts[0];
+      const path = m[2] || '';
+      const parts = path.split('/').filter(Boolean).map(function (p) {
+        try { return decodeURIComponent(p); } catch (e) { return p; }
+      });
+      if (platform === 'youtube') {
+        username = youtubeUsernameFromParts(parts, host);
+      } else if (platform === 'facebook') {
+        // regex выше отрезает ?id=… — иначе username стал бы «profile.php»
+        // и upsert не находил уже существующий числовой id в БД.
+        username = facebookUsernameFromLine(line, parts);
+      } else if (parts.length) {
+        username = parts[parts.length - 1];
+        if (parts[0].charAt(0) === '@') username = parts[0];
+        if (parts[0].toLowerCase() === 'r' && parts[1]) username = parts[1];
+      } else {
+        username = host;
       }
     }
-    username = username.replace(/^@/, '').replace(/[?#].*$/, '').trim();
+    username = String(username || '').replace(/^@/, '').replace(/[?#].*$/, '').trim();
     if (username) out.push({ username: username, platform: platform });
   });
   return out;
 }
+/* /@handle, /@handle/videos, /channel/UC…, /c/name, /user/name — не брать
+   последний сегмент вслепую (иначе videos/about затирают кириллический @). */
+function youtubeUsernameFromParts(parts, host) {
+  if (!parts.length) return host || '';
+  const a = parts[0];
+  const al = a.toLowerCase();
+  if (al === 'channel' && parts[1]) return parts[1];
+  if ((al === 'c' || al === 'user') && parts[1]) return parts[1].replace(/^@/, '');
+  if (a.charAt(0) === '@') return a.slice(1);
+  if (/^UC[\w-]{10,}$/i.test(a)) return a;
+  return a.replace(/^@/, '');
+}
+/* Как на бэкенде: profile.php?id=N → цифры; vanity → slug; путь из цифр → id. */
+function facebookUsernameFromLine(line, parts) {
+  const idm = String(line || '').match(/[?&]id=(\d{6,24})\b/i);
+  if (idm) return idm[1];
+  if (!parts || !parts.length) return '';
+  const a = parts[0];
+  const al = String(a || '').toLowerCase();
+  if (al === 'profile.php') return '';
+  if (/^\d{6,24}$/.test(a)) return a;
+  return String(a || '').replace(/^@/, '');
+}
 
-/* Подтверждение для необратимого. */
+/* Подтверждение для необратимого. Только overlay — иначе скролл страницы
+   уезжает наверх ещё до ответа пользователя. */
 let PENDING_CONFIRM = null;
-function askConfirm(o) { PENDING_CONFIRM = o; state.modal = 'confirm'; render(); }
+function askConfirm(o) {
+  PENDING_CONFIRM = o;
+  state.modal = 'confirm';
+  if (document.getElementById('overlay')) paintOverlay();
+  else render();
+}
 function modalConfirm() {
   const c = PENDING_CONFIRM;
   if (!c) return '';
@@ -4742,24 +5210,43 @@ function modalConfirm() {
 }
 
 function applyCatalogRows(profiles, owners, groups, countries) {
+  const domName = function (id) {
+    if (!id || !state.domains || !state.domains.list) return '';
+    const d = state.domains.list.filter(function (x) { return x.id === id; })[0];
+    return d ? d.name : '';
+  };
   PROFILES.length = 0;
   (profiles || []).forEach(function (p) {
+    const domainId = p.domain_id || 0;
     PROFILES.push({
       id: p.id, name: p.name, color: p.color || '#8A857C',
       hidden: !!p.is_hidden, count: p.account_count || 0,
+      domainId: domainId, domainName: domName(domainId),
     });
   });
   OWNERS.length = 0;
   (owners || []).forEach(function (o) {
-    OWNERS.push({ id: o.id, name: o.name, color: o.color || '#6366f1', count: o.account_count || 0 });
+    const domainId = o.domain_id || 0;
+    OWNERS.push({
+      id: o.id, name: o.name, color: o.color || '#6366f1', count: o.account_count || 0,
+      domainId: domainId, domainName: domName(domainId),
+    });
   });
   GROUPS.length = 0;
   (groups || []).forEach(function (g) {
-    GROUPS.push({ id: g.id, name: g.name, color: g.color || '#6366f1', count: g.account_count || 0 });
+    const domainId = g.domain_id || 0;
+    GROUPS.push({
+      id: g.id, name: g.name, color: g.color || '#6366f1', count: g.account_count || 0,
+      domainId: domainId, domainName: domName(domainId),
+    });
   });
   COUNTRIES.length = 0;
   (countries || []).forEach(function (c) {
-    COUNTRIES.push({ id: c.id, name: c.name, color: c.color || '#6366f1', count: c.account_count || 0 });
+    const domainId = c.domain_id || 0;
+    COUNTRIES.push({
+      id: c.id, name: c.name, color: c.color || '#6366f1', count: c.account_count || 0,
+      domainId: domainId, domainName: domName(domainId),
+    });
   });
 }
 
@@ -4771,15 +5258,21 @@ async function bootLive() {
     return;
   }
   try {
-    const [profiles, owners, groups, countries, rows] = await Promise.all([
+    const settled = await Promise.all([
       api('/api/accounts/profiles/?include_hidden_profiles=1'),
       api('/api/accounts/owners/'),
       api('/api/accounts/groups/'),
       api('/api/accounts/countries/'),
       api('/api/accounts/?' + ACC_QS + '&delta_period_days=' + state.period),
+      api('/api/accounts/domains/').catch(function () { return null; }),
+      api('/api/accounts/views-anchors/').catch(function () { return null; }),
     ]);
+    const profiles = settled[0], owners = settled[1], groups = settled[2], countries = settled[3];
+    const rows = settled[4], domainsPayload = settled[5], anchorsPayload = settled[6];
     applyCatalogRows(profiles, owners, groups, countries);
     ACCOUNTS.length = 0;  rows.forEach(function (r) { ACCOUNTS.push(mapAccount(r)); });
+    applyDomainsPayload(domainsPayload);
+    applyViewsAnchorsPayload(anchorsPayload);
 
     deltaLoaded[state.period] = true;
     LIVE = true;
@@ -4787,15 +5280,14 @@ async function bootLive() {
     state.booting = false;
     clearInterval(state.run.timer);      // выключаем имитацию прогона
     state.run.on = false;
-    render();
+    render();                            // vcStart внутри render при route=tv
     pollRun();
     // Опрос статуса заводим один раз: bootLive() зовётся ещё и по «Повторить»
     // после ошибки API, а незапомненный интервал потом не остановить.
     clearInterval(pollTimer);
     pollTimer = setInterval(pollRun, 4000);
     loadSessionsLive();
-    loadViewsAnchors();
-    loadDomains();
+    if (state.route === 'settings') { loadScrapeBackend(); loadSchedule(); }
   } catch (e) {
     LIVE = false;
     state.apiError = String(e.message || e);

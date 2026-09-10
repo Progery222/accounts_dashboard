@@ -8,11 +8,10 @@ This file provides guidance to coding agents working in this repository.
 - **Frontend**: React 18 + TypeScript + Vite + TanStack Query + React Router + Tailwind.
 - **Locale**: Russian (`ru-ru`, `Europe/Moscow`). User-facing strings in API responses should stay in Russian.
 
-## Source of truth and legacy leftovers
+## Source of truth
 
 - The live backend is Django, entered through `backend/manage.py` and `backend/config/`.
-- `backend/app/`, `backend/migrations/` and `backend/alembic.ini` are legacy FastAPI/Alembic leftovers.
-- `docker-compose.yml` and `backend/Dockerfile` still run `uvicorn app.main:app` (legacy path) and are not an accurate source of truth for local Django development.
+- `docker-compose.yml` and `backend/Dockerfile` run Django (gunicorn / `manage.py`), not the old FastAPI path.
 
 ## Run commands
 
@@ -130,9 +129,9 @@ API triggers:
 - For "not found / parse failed" cases in scrapers, raise `ValueError` (mapped to 4xx by views).
 - Let unexpected scraper errors bubble to be reported as server-side failures (5xx path in views).
 - Keep "snapshot before update" behavior intact; serializers compute deltas from latest snapshot with `date < today`.
-- **Playwright / Subs:** съём аудитории из «Подписчиков» вызывает тот же API `POST /api/accounts/{id}/audience/refresh/`, что и дашборд — **один пул** демонов и **те же сохранённые сессии**, что у AccountsStats (`ACCOUNTS_BROWSER_PROFILE_DIR` / `ACCOUNTS_BROWSER_HEADLESS` в `worker_accounts.env`, иначе `BROWSER_PROFILE_DIR` / дефолт из `worker_utils`). Файл **`worker_subs.env`** подключается отдельно только для настроек, не связанных с браузером (см. `worker_subs.env.example`).
+- Browser sessions for Playwright live under `BROWSER_PROFILE_DIR` / `ACCOUNTS_BROWSER_PROFILE_DIR` (see `worker_accounts.env.example`); do not commit profile directories or `*.session` files.
 
 ## Known risks to keep in mind
 
-- Repo currently contains credentials-like defaults in `backend/config/settings.py` for Facebook env vars. Treat as security debt and avoid propagating secrets in commits.
+- Keep Facebook/Apify and other secrets in env only (`FACEBOOK_*`, tokens); never commit real credentials.
 - Docker env wiring does not match Django DB settings (`DATABASE_URL` vs `DB_*`). If touching deployment docs/config, align these explicitly instead of assuming compose works as-is.

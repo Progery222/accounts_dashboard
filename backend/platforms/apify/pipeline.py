@@ -97,8 +97,16 @@ def _build_input(job: ApifyRefreshJob, stage: str) -> dict[str, Any]:
             }
         return {"usernames": [handle]}
     if plat == Platform.YOUTUBE:
+        from platforms.youtube.profile_url import is_youtube_channel_id
+        from urllib.parse import quote
+
+        handle = uname.lstrip("@")
+        if is_youtube_channel_id(handle):
+            yt_url = f"https://www.youtube.com/channel/{quote(handle, safe='')}"
+        else:
+            yt_url = f"https://www.youtube.com/@{quote(handle, safe='')}"
         return {
-            "startUrls": [f"https://www.youtube.com/@{uname.lstrip('@')}"],
+            "startUrls": [yt_url],
             "maxResult": 30,
             "maxResults": 30,
         }

@@ -17,9 +17,8 @@ if _raw_db_url and not _raw_db_url.startswith(("postgres://", "postgresql://", "
     os.environ.pop("DATABASE_URL", None)
     load_dotenv(BASE_DIR / ".env", override=False)
 
-# Отдельные файлы настроек Playwright-воркеров (аккаунты vs Subs) — не обязаны совпадать с backend/.env
+# Отдельный файл настроек Playwright-воркеров (аккаунты) — не обязан совпадать с backend/.env
 load_dotenv(BASE_DIR / "config" / "worker_accounts.env", override=False)
-load_dotenv(BASE_DIR / "config" / "worker_subs.env", override=False)
 
 try:
     from platforms.browser_engine import normalize_browser_engines_env

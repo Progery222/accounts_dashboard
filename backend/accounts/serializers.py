@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.validators import UniqueTogetherValidator
 import re
-from .models import Account, Domain, Platform, Post, Profile, Owner, AccountGroup, Country, AudienceMember, AudienceMemberPost
+from .models import Account, Domain, Platform, Post, Profile, Owner, AccountGroup, Country
 
 
 class ProfileSerializer(serializers.ModelSerializer):
@@ -125,7 +125,6 @@ class AccountSerializer(serializers.ModelSerializer):
     link_click_delta = serializers.SerializerMethodField()
     is_platform_hidden = serializers.SerializerMethodField()
     is_profile_hidden = serializers.SerializerMethodField()
-    audience_members_count = serializers.SerializerMethodField()
     refresh_pipeline = serializers.SerializerMethodField()
     refresh_pipeline_label = serializers.SerializerMethodField()
     apify_job_id = serializers.SerializerMethodField()
@@ -145,8 +144,6 @@ class AccountSerializer(serializers.ModelSerializer):
             "profile_unavailable",
             "is_archived",
             "is_banned",
-            "audience_last_synced_at",
-            "audience_members_count",
             "follower_delta", "like_delta", "view_delta", "post_delta", "link_click_delta",
             "is_platform_hidden", "is_profile_hidden",
             "refresh_pipeline", "refresh_pipeline_label", "apify_job_id",
@@ -156,7 +153,6 @@ class AccountSerializer(serializers.ModelSerializer):
             "id",
             "created_at",
             "updated_at",
-            "audience_last_synced_at",
         ]
 
     def validate_username(self, value):
@@ -224,6 +220,10 @@ class AccountSerializer(serializers.ModelSerializer):
                 attrs["username"] = canonical_facebook_username_for_storage(str(username).strip())
             except ValueError as exc:
                 raise serializers.ValidationError({"username": str(exc)}) from exc
+        if username is not None and platform == Platform.YOUTUBE:
+            from platforms.youtube.profile_url import canonical_youtube_username_for_storage
+
+            attrs["username"] = canonical_youtube_username_for_storage(str(username))
         return attrs
 
     def _baseline_snap(self, obj):
@@ -342,14 +342,6 @@ class AccountSerializer(serializers.ModelSerializer):
         job = self._active_apify_job(obj)
         return job.pk if job else None
 
-    def get_audience_members_count(self, obj):
-        ann = getattr(obj, "audience_members_count", None)
-        if ann is not None:
-            return int(ann)
-        if hasattr(obj, "audience_memberships"):
-            return obj.audience_memberships.count()
-        return 0
-
 
 class PostSerializer(serializers.ModelSerializer):
     view_delta = serializers.SerializerMethodField()
@@ -423,58 +415,6 @@ class PostSerializer(serializers.ModelSerializer):
         if snap:
             return obj.comment_count - snap.comment_count
         return obj.comment_count
-
-
-class AudienceMemberPostSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = AudienceMemberPost
-        fields = [
-            "id",
-            "external_id",
-            "description",
-            "thumbnail_url",
-            "post_url",
-            "view_count",
-            "like_count",
-            "comment_count",
-            "share_count",
-            "posted_at",
-        ]
-        read_only_fields = fields
-
-
-class AudienceMemberListSerializer(serializers.ModelSerializer):
-    follows_tracked_accounts_count = serializers.IntegerField(read_only=True)
-
-    class Meta:
-        model = AudienceMember
-        fields = [
-            "id",
-            "username",
-            "external_id",
-            "display_name",
-            "avatar_url",
-            "bio",
-            "is_private",
-            "follower_count",
-            "following_count",
-            "like_count",
-            "profile_language",
-            "timezone_name",
-            "follower_network",
-            "follows_tracked_accounts_count",
-        ]
-        read_only_fields = fields
-
-
-class AudienceMemberDetailSerializer(serializers.ModelSerializer):
-    follows_tracked_accounts_count = serializers.IntegerField(read_only=True)
-    posts = AudienceMemberPostSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = AudienceMember
-        fields = AudienceMemberListSerializer.Meta.fields + ["posts"]
-        read_only_fields = AudienceMemberListSerializer.Meta.fields + ["posts"]
 
 
 class PlatformSerializer(serializers.Serializer):

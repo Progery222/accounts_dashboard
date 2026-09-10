@@ -1,6 +1,6 @@
 """
-Legacy-копия воркер-утилит для скриптов в backend/accounts/*_worker.py и
-tiktok_app/playwright_worker.py. Единый источник правды — platforms/worker_utils.py;
+Legacy-копия воркер-утилит для скриптов в backend/accounts/*_worker.py.
+Единый источник правды — platforms/worker_utils.py;
 эта копия должна оставаться API-совместимой (см. resolve_headless / launch_context).
 """
 import json

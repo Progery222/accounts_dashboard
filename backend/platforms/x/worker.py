@@ -1,12 +1,8 @@
 """
-Standalone subprocess — fetches X (Twitter) profile data via x.com,
-или список подписчиков (``audience_followers`` → ``/{user}/followers`` и
-``/{user}/verified_followers``).
+Standalone subprocess — fetches X (Twitter) profile data via x.com.
 
 Invoked by platforms/x/scraper.py as:
     python x/worker.py '{"username": "handle"}'
-
-Payload с ``"audience_followers": true`` — см. ``accounts.audience.fetch_audience_payload``.
 
 Uses the shared persistent Chrome profile. Requires an active X session
 (log in once via Settings → «Войти в X»).
@@ -79,29 +75,6 @@ def _load_worker_utils():
 
 
 async def execute_payload(page, _wu, arg: dict) -> dict:
-    if bool(arg.get("audience_followers")):
-        from platforms.x.audience_scrape import scrape_x_audience_followers
-
-        u = (arg.get("username") or "").lstrip("@").strip()
-        lim = int(arg.get("limit") or 100)
-        _mpp = arg.get("max_posts_per_follower")
-        mpp = int(_mpp) if _mpp is not None else 0
-        if not u:
-            return {"error": "Не указан username для съёма подписчиков."}
-        _raw_aid = arg.get("audience_account_id")
-        audience_account_id = int(_raw_aid) if _raw_aid is not None else None
-        return await scrape_x_audience_followers(
-            page,
-            _wu,
-            u,
-            lim,
-            max_posts_per_follower=mpp,
-            skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
-            audience_account_id=audience_account_id,
-            list_only=bool(arg.get("list_only")),
-            enrich_only=bool(arg.get("enrich_only")),
-            enrich_usernames=arg.get("enrich_usernames"),
-        )
     username = str(arg.get("username", "")).lstrip("@")
     if not username:
         return {"error": "Не указан username."}

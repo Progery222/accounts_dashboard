@@ -1,8 +1,7 @@
 .env
 # Локальные overrides Playwright-воркеров (см. *.example в том же каталоге)
 backend/config/worker_accounts.env
-backend/config/worker_subs.env
-# Профили Chromium для subs-воркеров (по умолчанию под backend/var/)
+# Профили Chromium для воркеров (по умолчанию под backend/var/)
 backend/var/
 # Логи Docker/Django на хосте (volume var/log/dashboard)
 var/log/
@@ -26,6 +25,10 @@ response*.html
 resp*.html
 *.session
 tiktok_state.json
+# Локальные профили Chromium / сессии (не коммитить куки)
+backend/.browser-profile/
+**/.browser-profile/
+.venv-scrapegraph/
 
 # Временные артефакты агентов / отладки
 TELEGRAM_AUTO_REFRESH_PLAN.txt

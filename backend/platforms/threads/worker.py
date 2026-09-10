@@ -1,11 +1,8 @@
 """
-Standalone subprocess — fetches Threads profile data via threads.net,
-или список подписчиков (клик по надписи «N follower(s)» / «N подписчиков» → модалка; отдельный URL ``/followers`` не открывается).
+Standalone subprocess — fetches Threads profile data via threads.net.
 
 Invoked by platforms/threads/scraper.py as:
     python threads/worker.py '{"username": "handle"}'
-
-Payload с ``"audience_followers": true`` — см. ``accounts.audience.fetch_audience_payload``.
 
 Uses the shared persistent Chrome profile. Requires an active Threads session
 (log in once via Settings → «Войти в Threads»).
@@ -28,7 +25,7 @@ from platforms.profile_unavailable import PROFILE_UNAVAILABLE_MARK
 
 
 def threads_nav_timeout_ms() -> int:
-    """Таймаут page.goto на профиль Threads (мс). По умолчанию 60 с, как в audience_scrape."""
+    """Таймаут page.goto на профиль Threads (мс). По умолчанию 60 с."""
     raw = os.getenv("THREADS_NAV_TIMEOUT_MS")
     if raw is None or not str(raw).strip():
         return 60_000
@@ -909,29 +906,6 @@ async def run_once(arg: dict):
 
 
 async def execute_payload(page, _wu, arg: dict) -> dict:
-    if bool(arg.get("audience_followers")):
-        from platforms.threads.audience_scrape import scrape_threads_audience_followers
-
-        u = (arg.get("username") or "").lstrip("@").strip()
-        lim = int(arg.get("limit") or 100)
-        _mpp = arg.get("max_posts_per_follower")
-        mpp = int(_mpp) if _mpp is not None else 0
-        if not u:
-            return {"error": "Не указан username для съёма подписчиков."}
-        _raw_aid = arg.get("audience_account_id")
-        audience_account_id = int(_raw_aid) if _raw_aid is not None else None
-        return await scrape_threads_audience_followers(
-            page,
-            _wu,
-            u,
-            lim,
-            max_posts_per_follower=mpp,
-            skip_existing_member_profiles=bool(arg.get("skip_existing_member_profiles")),
-            audience_account_id=audience_account_id,
-            list_only=bool(arg.get("list_only")),
-            enrich_only=bool(arg.get("enrich_only")),
-            enrich_usernames=arg.get("enrich_usernames"),
-        )
     username = str(arg.get("username", "")).lstrip("@")
     if not username:
         return {"error": "Не указан username."}

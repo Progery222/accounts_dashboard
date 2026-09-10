@@ -1,8 +1,6 @@
 from django.db import models
 from django.utils import timezone
 
-from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT
-
 #: Путь, показывающий эфир сразу по всем доменам. Это не арендатор: своих
 #: аккаунтов у него нет, поэтому в таблице Domain строки для него не заводим —
 #: слово зарезервировано и разбирается при определении домена.
@@ -232,13 +230,6 @@ class RefreshScheduleConfig(models.Model):
         default=1,
         help_text="За сколько календарных дней назад брать опорный снимок для дельт в списке аккаунтов (1, 7 или 30).",
     )
-    max_audience_followers_per_account = models.PositiveSmallIntegerField(
-        default=MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT,
-        help_text=(
-            "Не более стольких подписчиков на один отслеживаемый аккаунт "
-            f"(не больше {MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT}; съём аудитории TikTok/Instagram)."
-        ),
-    )
     times = models.JSONField(default=list)  # e.g. ["09:00", "21:00"]
 
     class Meta:
@@ -269,7 +260,6 @@ class RefreshScheduleConfig(models.Model):
                 "auto_refresh_group_ids": [],
                 "auto_refresh_country_ids": [],
                 "account_delta_period_days": 1,
-                "max_audience_followers_per_account": MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT,
                 "times": ["06:00", "12:00", "18:00", "00:00"],
             },
         )
@@ -619,11 +609,6 @@ class Account(models.Model):
         verbose_name="В бане",
         help_text="Забаненные аккаунты скрыты из основного списка и не участвуют в автообновлении.",
     )
-    audience_last_synced_at = models.DateTimeField(
-        null=True,
-        blank=True,
-        help_text="Последний успешный съём списка подписчиков (TikTok/Instagram).",
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -751,83 +736,3 @@ class AutoRefreshPoint(models.Model):
         indexes = [
             models.Index(fields=["local_date", "measured_at"]),
         ]
-
-
-class AudienceMember(models.Model):
-    """Подписчик отслеживаемого аккаунта (внешний профиль на площадке)."""
-
-    platform = models.CharField(max_length=20, choices=Platform.choices, db_index=True)
-    username = models.CharField(max_length=255, db_index=True)
-    external_id = models.CharField(max_length=160, blank=True, default="")
-    display_name = models.CharField(max_length=255, blank=True)
-    avatar_url = models.URLField(max_length=2048, blank=True)
-    bio = models.TextField(blank=True)
-    is_private = models.BooleanField(default=False)
-    follower_count = models.BigIntegerField(default=0)
-    following_count = models.BigIntegerField(default=0)
-    like_count = models.BigIntegerField(default=0)
-    profile_language = models.CharField(
-        max_length=32,
-        blank=True,
-        default="",
-        help_text="Язык/локаль профиля с площадки (если отдаётся), например en, ru.",
-    )
-    timezone_name = models.CharField(
-        max_length=64,
-        blank=True,
-        default="",
-        help_text="Часовой пояс с площадки (если отдаётся), например Europe/Moscow.",
-    )
-    follower_network = models.JSONField(
-        default=list,
-        blank=True,
-        help_text="Срез подписчиков этого подписчика (TikTok), до 100 записей с полями username, bio, счётчики.",
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["platform", "username"],
-                name="audience_member_unique_platform_username",
-            ),
-        ]
-        ordering = ["username"]
-
-    def __str__(self):
-        return f"{self.platform}/@{self.username}"
-
-
-class AccountAudienceMembership(models.Model):
-    """Связь «наш Account» ↔ подписчик."""
-
-    account = models.ForeignKey(Account, on_delete=models.CASCADE, related_name="audience_memberships")
-    member = models.ForeignKey(AudienceMember, on_delete=models.CASCADE, related_name="memberships")
-    first_seen_at = models.DateTimeField(auto_now_add=True)
-    last_synced_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = [("account", "member")]
-        ordering = ["-last_synced_at"]
-
-
-class AudienceMemberPost(models.Model):
-    """Посты профиля подписчика."""
-
-    member = models.ForeignKey(AudienceMember, on_delete=models.CASCADE, related_name="audience_posts")
-    external_id = models.CharField(max_length=255)
-    description = models.TextField(blank=True)
-    thumbnail_url = models.URLField(max_length=2048, blank=True)
-    post_url = models.URLField(max_length=2048, blank=True)
-    view_count = models.BigIntegerField(default=0)
-    like_count = models.BigIntegerField(default=0)
-    comment_count = models.BigIntegerField(default=0)
-    share_count = models.BigIntegerField(default=0)
-    posted_at = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = [("member", "external_id")]
-        ordering = ["-posted_at", "-id"]

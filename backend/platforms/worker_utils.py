@@ -1214,7 +1214,7 @@ async def warm_playwright_page_home(page, platform: str) -> None:
             await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
         await page.wait_for_timeout(500)
     except Exception as exc:
-        print(f"[audience] warm {plat} home: {exc}", file=sys.stderr)
+        print(f"[worker] warm {plat} home: {exc}", file=sys.stderr)
 
 
 async def daemon_idle_keep_browser_open(

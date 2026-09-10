@@ -36,13 +36,11 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import api_view, action
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
-from .constants import MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT, NEW_ACCOUNT_UPDATED_AT
-from .audience import AUDIENCE_SYNC_SUPPORTED_PLATFORMS
+from .constants import NEW_ACCOUNT_UPDATED_AT
 from . import domains
 from .models import (
     Account,
     Domain,
-    AccountAudienceMembership,
     Platform,
     Post,
     Profile,
@@ -59,8 +57,6 @@ from .models import (
 )
 from .serializers import (
     AccountSerializer,
-    AudienceMemberDetailSerializer,
-    AudienceMemberListSerializer,
     PostSerializer,
     ProfileSerializer,
     OwnerSerializer,
@@ -961,8 +957,8 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                 # сами же собираемся их поднимать. Без этого каждый аккаунт,
                 # которому нужен браузер, получал «Остановлено пользователем» без
                 # единой попытки: 22 из 25 в одном прогоне, 18 из 22 в другом, при
-                # нуле настоящих отказов. Так же поступает interrupt_audience_
-                # scrape_for_account_refresh в своём finally.
+                # нуле настоящих отказов. Так же поступает
+                # interrupt_competing_playwright_for_account_refresh в своём finally.
                 clear_playwright_refresh_force_stop()
             except Exception:
                 pass
@@ -2620,6 +2616,9 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             # Some scrapers return extra fields (e.g. following_count) that are
             # not stored in Account model; skip them without breaking refresh.
             continue
+        # Username — ключ уникальности; скрапер не должен подменять @кириллица на UC….
+        if field == "username":
+            continue
         # _partial у Instagram ставится, когда собрали меньше постов, чем заявлено в
         # профиле (191 пост, собрано 36). Это утверждение про список постов, а не
         # про всю статистику: подписчики берутся со страницы профиля и к постам
@@ -2897,9 +2896,6 @@ class AccountViewSet(viewsets.ModelViewSet):
             "destroy",
             "refresh",
             "posts",
-            "audience_list",
-            "audience_member_detail",
-            "audience_refresh",
         }
         include_hidden = force_include_hidden_for_detail or _coerce_bool(
             self.request.query_params.get("include_hidden"),
@@ -2960,7 +2956,6 @@ class AccountViewSet(viewsets.ModelViewSet):
                 default=F("_raw_view_delta"),
                 output_field=IntegerField(),
             ),
-            audience_members_count=Count("audience_memberships", distinct=True),
         )
         platform = self.request.query_params.get("platform")
         if platform:
@@ -3454,139 +3449,17 @@ class AccountViewSet(viewsets.ModelViewSet):
         post.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=True, methods=["get"], url_path="audience")
-    def audience_list(self, request, pk=None):
-        account = self.get_object()
-        if account.platform not in AUDIENCE_SYNC_SUPPORTED_PLATFORMS:
-            return Response(
-                {"detail": "Аудитория доступна только для TikTok, Instagram, X и Threads."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        from .audience import audience_members_queryset_for_account
-
-        qs = audience_members_queryset_for_account(account)
-        search = (request.query_params.get("search") or "").strip()
-        if search:
-            qs = qs.filter(
-                Q(username__icontains=search)
-                | Q(display_name__icontains=search),
-            )
-        try:
-            page = max(1, int(request.query_params.get("page") or 1))
-            ps = min(100, max(1, int(request.query_params.get("page_size") or 50)))
-        except (TypeError, ValueError):
-            page, ps = 1, 50
-        total = qs.count()
-        start = (page - 1) * ps
-        slice_qs = qs[start : start + ps]
-        data = AudienceMemberListSerializer(slice_qs, many=True).data
-        return Response({
-            "count": total,
-            "page": page,
-            "page_size": ps,
-            "results": data,
-        })
-
-    @action(
-        detail=True,
-        methods=["get", "delete"],
-        url_path=r"audience/(?P<audience_member_id>\d+)",
-    )
-    def audience_member_detail(self, request, pk=None, audience_member_id=None):
-        account = self.get_object()
-        if account.platform not in AUDIENCE_SYNC_SUPPORTED_PLATFORMS:
-            return Response(
-                {"detail": "Аудитория доступна только для TikTok, Instagram, X и Threads."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        from .audience import audience_members_queryset_for_account
-
-        if request.method == "DELETE":
-            try:
-                mid = int(audience_member_id)
-            except (TypeError, ValueError):
-                return Response(
-                    {"detail": "Некорректный идентификатор подписчика."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            membership = (
-                AccountAudienceMembership.objects.filter(account=account, member_id=mid)
-                .select_related("member")
-                .first()
-            )
-            if membership is None:
-                return Response(
-                    {"detail": "Этого подписчика нет в снятой базе для данного аккаунта."},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            member = membership.member
-            membership.delete()
-            if not member.memberships.exists():
-                member.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-
-        base = audience_members_queryset_for_account(account)
-        member = get_object_or_404(
-            base.prefetch_related("audience_posts"),
-            pk=int(audience_member_id),
-        )
-        return Response(AudienceMemberDetailSerializer(member).data)
-
-    @action(detail=True, methods=["post"], url_path="audience/refresh")
-    def audience_refresh(self, request, pk=None):
-        account = self.get_object()
-        if account.platform not in AUDIENCE_SYNC_SUPPORTED_PLATFORMS:
-            return Response(
-                {"detail": "Съём аудитории поддерживается только для TikTok, Instagram, X и Threads."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        from .refresh_priority import PRIORITY_BLOCK_MESSAGE, account_refresh_priority_active
-
-        if account_refresh_priority_active():
-            return Response(
-                {"detail": PRIORITY_BLOCK_MESSAGE},
-                status=status.HTTP_409_CONFLICT,
-            )
-        from .audience import normalize_audience_mode, refresh_audience_for_account
-
-        from .audience import _normalize_enrich_usernames
-
-        skip = False
-        mode = "full"
-        enrich_usernames = None
-        body = getattr(request, "data", None)
-        if isinstance(body, dict):
-            skip = bool(body.get("skip_existing_member_profiles"))
-            if body.get("audience_mode") is not None:
-                mode = normalize_audience_mode(body.get("audience_mode"))
-            if body.get("enrich_usernames") is not None:
-                enrich_usernames = _normalize_enrich_usernames(body.get("enrich_usernames"))
-
-        try:
-            result = refresh_audience_for_account(
-                account,
-                audience_mode=mode,
-                skip_existing_member_profiles=skip,
-                enrich_usernames=enrich_usernames,
-            )
-        except ValueError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as exc:
-            logger.exception("audience_refresh failed", extra={"account_id": account.id})
-            return Response(
-                {"detail": f"Ошибка съёма аудитории: {exc}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
-        return Response(result)
-
 
 class _DomainScopedCreateMixin:
-    """При создании в /reiz без явного domain_id — сразу в текущий домен."""
+    """Если domain_id не передали, а адрес — /reiz, кладём в текущий домен.
+
+    Явный ``domain_id: null`` («Без домена» в модалке) уважаем: не подменяем.
+    """
 
     def perform_create(self, serializer):
         scope = domains.resolve(self.request)
         extra = {}
-        if serializer.validated_data.get("domain") is None and scope.scoped:
+        if "domain" not in serializer.validated_data and scope.scoped:
             extra["domain"] = scope.domain
         serializer.save(**extra)
 
@@ -3875,16 +3748,6 @@ def _schedule_db_error_response(exc: BaseException) -> Response:
     )
 
 
-def _clamp_max_audience_followers_saved(raw) -> int:
-    """1 … MAX — лимит подписчиков на один отслеживаемый Account (хранится в БД)."""
-    cap = MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT
-    try:
-        v = int(raw)
-    except (TypeError, ValueError):
-        return cap
-    return max(1, min(cap, v))
-
-
 def _telegram_bot_configured() -> bool:
     from .telegram_report import telegram_bot_configured
 
@@ -3975,13 +3838,6 @@ def _schedule_to_dict(config) -> dict:
         ),
         "account_delta_period_days": (
             d if (d := int(getattr(config, "account_delta_period_days", 1) or 1)) in (1, 7, 30) else 1
-        ),
-        "max_audience_followers_per_account": _clamp_max_audience_followers_saved(
-            getattr(
-                config,
-                "max_audience_followers_per_account",
-                MAX_AUDIENCE_FOLLOWERS_PER_TRACKED_ACCOUNT,
-            ),
         ),
         "times": config.times,
     }
@@ -4200,10 +4056,6 @@ def refresh_schedule(request):
         if "account_delta_period_days" in data:
             raw = int(data["account_delta_period_days"])
             config.account_delta_period_days = raw if raw in (1, 7, 30) else 1
-        if "max_audience_followers_per_account" in data:
-            config.max_audience_followers_per_account = _clamp_max_audience_followers_saved(
-                data["max_audience_followers_per_account"],
-            )
         config.save()
 
         sched = get_scheduler()
@@ -4255,8 +4107,11 @@ def auto_refresh_telegram_test(request):
         )
 
 
-#: Час по местному времени (Europe/Moscow), на котором режутся сутки счётчика.
+#: Час по местному времени (Europe/Moscow), на котором режется «день» счётчика.
+#: С 10:00 до 20:00 фронт растягивает прирост prev→now; после 20:00 цифра
+#: заморожена до следующих 10:00.
 VIEWS_ANCHOR_HOUR = 10
+VIEWS_GROWTH_END_HOUR = 20
 
 
 @api_view(["GET"])
@@ -4355,14 +4210,15 @@ def _views_total_at(moment):
 def views_anchors(request):
     """Опорные точки для «живых» счётчиков на фронте — по каждому показателю.
 
-    Сутки счётчика идут с 10:00 до 10:00 по Москве. Внутри текущих суток фронт
-    ведёт число от ``prev`` (прошлые сутки) к ``now`` (эти сутки) — то есть
-    показывает измеренный прирост, растянутый по времени. Поэтому видимое число
-    отстаёт от базы примерно на сутки и никогда её не обгоняет.
+    Окно роста: 10:00–20:00 по Москве. Фронт ведёт число от ``prev``
+    (значение на прошлые 10:00) к ``now`` (на сегодняшние 10:00) — измеренный
+    прирост, растянутый по этим 10 часам. С 20:00 до следующих 10:00 цифра
+    стоит на ``now``. Видимое число отстаёт от «живой» базы примерно на сутки
+    и никогда её не обгоняет.
 
     ``growth`` может быть нулём — значит, за прошлые сутки прогонов не было и
-    показатель не менялся. Тогда счётчик честно стоит на месте: дорисовывать
-    движение, которого не было, значит показывать выдуманные цифры.
+    показатель не менялся. Тогда счётчик честно стоит: дорисовывать движение,
+    которого не было, значит показывать выдуманные цифры.
 
     Точность источников разная, и это видно в ``source`` каждого показателя:
 
@@ -4374,9 +4230,12 @@ def views_anchors(request):
     now = timezone.localtime()
     window_start = now.replace(hour=VIEWS_ANCHOR_HOUR, minute=0, second=0, microsecond=0)
     if now < window_start:
-        # До 10:00 идут ещё вчерашние сутки счётчика.
+        # До 10:00 ещё идёт вчерашнее окно (рост уже закончен в 20:00 — заморозка).
         window_start -= datetime.timedelta(days=1)
-    window_end = window_start + datetime.timedelta(days=1)
+    window_end = window_start.replace(
+        hour=VIEWS_GROWTH_END_HOUR, minute=0, second=0, microsecond=0,
+    )
+    next_window_start = window_start + datetime.timedelta(days=1)
     prev_start = window_start - datetime.timedelta(days=1)
 
     def pair(now_val, prev_val, source):
@@ -4418,11 +4277,14 @@ def views_anchors(request):
         {
             "tz": str(timezone.get_current_timezone()),
             "anchor_hour": VIEWS_ANCHOR_HOUR,
+            "growth_end_hour": VIEWS_GROWTH_END_HOUR,
             # Чтобы фронт поправил свои часы: при сбитых локальных часах он
             # иначе покажет число из другого места суток.
             "server_now": now.isoformat(),
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
+            # Новые якоря (и новый рост) начинаются в следующие 10:00 — не в 20:00.
+            "next_window_start": next_window_start.isoformat(),
             "metrics": metrics,
             "snapshot_days": {"now": str(day_now), "prev": str(day_prev),
                               "accounts_now": n_now, "accounts_prev": n_prev},
@@ -4812,25 +4674,6 @@ def refresh_all_stop(request):
         return Response({"stopped": True})
     except (ProgrammingError, OperationalError) as exc:
         return _schedule_db_error_response(exc)
-
-
-@api_view(["POST"])
-def audience_scrape_stop(_request):
-    """
-    Прервать текущий съём аудитории Playwright (одиночный POST audience/refresh или запрос из subs).
-    Закрывает демоны worker и Chromium профиля AccountsStats.
-    """
-    try:
-        from platforms.worker_pool import shutdown_playwright_pool_aggressive
-
-        shutdown_playwright_pool_aggressive()
-        return Response({"stopped": True})
-    except Exception as exc:
-        logger.exception("audience_scrape_stop failed")
-        return Response(
-            {"detail": f"Не удалось остановить съём аудитории: {exc}"},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
 
 
 @api_view(["GET"])

@@ -1,5 +1,5 @@
 """
-Удалить данные дашборда (аккаунты, посты, снимки, профили, аудитория, точки графиков).
+Удалить данные дашборда (аккаунты, посты, снимки, профили, точки графиков).
 Не трогает: пользователей Django, расписание (RefreshScheduleConfig), видимость платформ.
 
   python manage.py clear_dashboard_data --dry-run
@@ -9,14 +9,10 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
-from django.db.models import Count
 
 from accounts.models import (
     Account,
-    AccountAudienceMembership,
     AccountSnapshot,
-    AudienceMember,
-    AudienceMemberPost,
     AutoRefreshPoint,
     AutoRefreshState,
     Post,
@@ -27,7 +23,7 @@ from accounts.models import (
 
 
 class Command(BaseCommand):
-    help = "Очистить аккаунты, профили, посты, снимки и аудиторию для чистого импорта."
+    help = "Очистить аккаунты, профили, посты и снимки для чистого импорта."
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -49,9 +45,6 @@ class Command(BaseCommand):
             "post_snapshots": PostSnapshot.objects.count(),
             "posts": Post.objects.count(),
             "account_snapshots": AccountSnapshot.objects.count(),
-            "audience_memberships": AccountAudienceMembership.objects.count(),
-            "audience_member_posts": AudienceMemberPost.objects.count(),
-            "audience_members": AudienceMember.objects.count(),
             "accounts": Account.objects.count(),
             "profiles": Profile.objects.count(),
             "auto_refresh_points": AutoRefreshPoint.objects.count(),
@@ -70,9 +63,6 @@ class Command(BaseCommand):
             PostSnapshot.objects.all().delete()
             Post.objects.all().delete()
             AccountSnapshot.objects.all().delete()
-            AccountAudienceMembership.objects.all().delete()
-            AudienceMemberPost.objects.all().delete()
-            AudienceMember.objects.all().delete()
             Account.objects.all().delete()
             AutoRefreshPoint.objects.all().delete()
             if not keep_profiles:
