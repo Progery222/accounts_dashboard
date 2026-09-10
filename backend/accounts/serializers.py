@@ -9,10 +9,16 @@ from .models import Account, Domain, Platform, Post, Profile, Owner, AccountGrou
 
 class ProfileSerializer(serializers.ModelSerializer):
     account_count = serializers.SerializerMethodField()
+    domain_id = serializers.PrimaryKeyRelatedField(
+        queryset=Domain.objects.all(), source="domain", allow_null=True, required=False,
+    )
 
     class Meta:
         model = Profile
-        fields = ["id", "name", "color", "is_hidden", "account_count", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "color", "is_hidden", "domain_id",
+            "account_count", "created_at", "updated_at",
+        ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def get_account_count(self, obj):
@@ -24,10 +30,16 @@ class ProfileSerializer(serializers.ModelSerializer):
 
 class OwnerSerializer(serializers.ModelSerializer):
     account_count = serializers.SerializerMethodField()
+    domain_id = serializers.PrimaryKeyRelatedField(
+        queryset=Domain.objects.all(), source="domain", allow_null=True, required=False,
+    )
 
     class Meta:
         model = Owner
-        fields = ["id", "name", "color", "account_count", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "color", "domain_id",
+            "account_count", "created_at", "updated_at",
+        ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def get_account_count(self, obj):
@@ -39,10 +51,16 @@ class OwnerSerializer(serializers.ModelSerializer):
 
 class AccountGroupSerializer(serializers.ModelSerializer):
     account_count = serializers.SerializerMethodField()
+    domain_id = serializers.PrimaryKeyRelatedField(
+        queryset=Domain.objects.all(), source="domain", allow_null=True, required=False,
+    )
 
     class Meta:
         model = AccountGroup
-        fields = ["id", "name", "color", "account_count", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "color", "domain_id",
+            "account_count", "created_at", "updated_at",
+        ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def get_account_count(self, obj):
@@ -54,10 +72,16 @@ class AccountGroupSerializer(serializers.ModelSerializer):
 
 class CountrySerializer(serializers.ModelSerializer):
     account_count = serializers.SerializerMethodField()
+    domain_id = serializers.PrimaryKeyRelatedField(
+        queryset=Domain.objects.all(), source="domain", allow_null=True, required=False,
+    )
 
     class Meta:
         model = Country
-        fields = ["id", "name", "color", "account_count", "created_at", "updated_at"]
+        fields = [
+            "id", "name", "color", "domain_id",
+            "account_count", "created_at", "updated_at",
+        ]
         read_only_fields = ["id", "created_at", "updated_at"]
 
     def get_account_count(self, obj):

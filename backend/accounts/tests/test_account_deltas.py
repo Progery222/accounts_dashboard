@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.test import TestCase
 
 from accounts.constants import NEW_ACCOUNT_UPDATED_AT
-from accounts.models import Account, AccountGroup, AccountSnapshot, Country, Platform, Profile
+from accounts.models import Account, AccountGroup, AccountSnapshot, Country, Domain, Platform, Profile
 from accounts.serializers import AccountSerializer
 
 
@@ -166,6 +166,34 @@ class AccountDeltaSerializerTests(TestCase):
             Account.objects.get(username="move_user", platform=Platform.TIKTOK).view_count,
             999,
         )
+
+    def test_import_create_updates_domain_only(self):
+        """Повторное добавление с domain_id должно переносить аккаунт в домен."""
+        from rest_framework.test import APIRequestFactory
+
+        ferma = Domain.objects.create(name="Ферма", slug="ferma", color="#22c55e")
+        Account.objects.create(
+            username="baraka_domain",
+            platform=Platform.TIKTOK,
+            domain=None,
+            view_count=42,
+        )
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/accounts/",
+            {"username": "baraka_domain", "platform": "tiktok", "domain_id": ferma.id},
+            format="json",
+        )
+        view = __import__(
+            "accounts.views", fromlist=["AccountViewSet"]
+        ).AccountViewSet.as_view({"post": "create"})
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.get("import_action"), "assignment_updated")
+        self.assertIn("domain", response.data.get("changed_fields", []))
+        acc = Account.objects.get(username="baraka_domain", platform=Platform.TIKTOK)
+        self.assertEqual(acc.domain_id, ferma.id)
+        self.assertEqual(acc.view_count, 42)
 
     def test_import_create_updates_profile_only(self):
         from rest_framework.test import APIRequestFactory

@@ -284,7 +284,11 @@ svg { flex-shrink: 0; }
   display: inline-flex; align-items: center; gap: 5px;
   height: 18px; padding: 0 7px; border-radius: 5px;
   font-size: 10px; font-weight: 600; white-space: nowrap;
+  border: none; cursor: default; font-family: inherit; line-height: 1;
 }
+button.pill { cursor: pointer; }
+button.pill:hover { filter: brightness(1.12); }
+button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, transparent); }
 .pmark {
   width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0;
   font-size: 9px; font-weight: 700; letter-spacing: .02em;
@@ -847,12 +851,12 @@ const PROFILES = [
   { id:5, name:'Бизнес',    color:'#B0342A' },
   { id:6, name:'Тесты',     color:'#8A857C' },
 ];
-const OWNERS   = [{id:1,name:'А. Ким'},{id:2,name:'М. Орлова'},{id:3,name:'Д. Соколов'},
-                  {id:4,name:'И. Петров'},{id:5,name:'Е. Лебедева'},{id:6,name:'С. Волков'}];
-const GROUPS   = [{id:1,name:'Ядро'},{id:2,name:'Регионы'},{id:3,name:'Эксперименты'},
-                  {id:4,name:'Партнёры'},{id:5,name:'Сезонные'}];
-const COUNTRIES= [{id:1,name:'Россия'},{id:2,name:'Беларусь'},{id:3,name:'Казахстан'},
-                  {id:4,name:'Узбекистан'},{id:5,name:'Армения'}];
+const OWNERS   = [{id:1,name:'А. Ким',color:'#6366f1'},{id:2,name:'М. Орлова',color:'#ec4899'},{id:3,name:'Д. Соколов',color:'#0F7080'},
+                  {id:4,name:'И. Петров',color:'#A15C00'},{id:5,name:'Е. Лебедева',color:'#1B7F53'},{id:6,name:'С. Волков',color:'#B0342A'}];
+const GROUPS   = [{id:1,name:'Ядро',color:'#4B38B8'},{id:2,name:'Регионы',color:'#0F7080'},{id:3,name:'Эксперименты',color:'#A15C00'},
+                  {id:4,name:'Партнёры',color:'#1B7F53'},{id:5,name:'Сезонные',color:'#ec4899'}];
+const COUNTRIES= [{id:1,name:'Россия',color:'#6366f1'},{id:2,name:'Беларусь',color:'#1B7F53'},{id:3,name:'Казахстан',color:'#A15C00'},
+                  {id:4,name:'Узбекистан',color:'#0F7080'},{id:5,name:'Армения',color:'#B0342A'}];
 
 const SEED = [
   ['mobilefarm.ru','Mobile Farm','tiktok',1,1],       ['kuhnya_doma','Кухня дома','tiktok',3,3],
@@ -1086,6 +1090,7 @@ const state = {
   // списке пересобирает слой модалки и стирает набранное.
   add: { text: '', platform: '', domainId: 0, profileId: 0, ownerId: 0, groupId: 0, countryId: 0 },
   cookiesFor: '', cookiesText: '',   // окно импорта куков в настройках
+  catalog: null,   // форма создания/правки профиля, владельца, группы, страны
 };
 function isNarrow() { return window.matchMedia('(max-width: 760px)').matches; }
 function effView() { return isNarrow() ? 'cards' : state.view; }
@@ -1157,6 +1162,61 @@ function ago(min) {
 function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]; }); }
 const NO_PROFILE = { id: 0, name: 'Без профиля', color: '#8A857C' };
 const NO_OWNER   = { id: 0, name: '—' };
+const NO_GROUP   = { id: 0, name: '—' };
+const NO_COUNTRY = { id: 0, name: '—' };
+
+/* Профили / владельцы / группы / страны — один CRUD-слой для модалки,
+   рельса и настроек. */
+const CATALOG = {
+  profile: { key: 'profile', list: function () { return PROFILES; },
+    path: '/api/accounts/profiles/', one: 'профиль', many: 'Профили',
+    gen: 'профиля', addField: 'profileId', filterKey: 'profileId',
+    empty: 'Без профиля', hasHidden: true },
+  owner: { key: 'owner', list: function () { return OWNERS; },
+    path: '/api/accounts/owners/', one: 'владелец', many: 'Владельцы',
+    gen: 'владельца', addField: 'ownerId', filterKey: 'ownerId',
+    empty: 'Без владельца' },
+  group: { key: 'group', list: function () { return GROUPS; },
+    path: '/api/accounts/groups/', one: 'группа', many: 'Группы',
+    gen: 'группы', addField: 'groupId', filterKey: 'groupId',
+    empty: 'Без группы' },
+  country: { key: 'country', list: function () { return COUNTRIES; },
+    path: '/api/accounts/countries/', one: 'страна', many: 'Страны',
+    gen: 'страны', addField: 'countryId', filterKey: 'countryId',
+    empty: 'Без страны' },
+};
+const CATALOG_COLORS = ['#6366f1', '#4B38B8', '#0F7080', '#A15C00', '#1B7F53',
+  '#B0342A', '#ec4899', '#26a5e4', '#f59e0b', '#8A857C'];
+function catalogOf(kind) { return CATALOG[kind] || null; }
+function catalogFind(kind, id) {
+  const c = catalogOf(kind);
+  if (!c) return null;
+  return c.list().filter(function (x) { return String(x.id) === String(id); })[0] || null;
+}
+function currentDomainIdForCatalog() {
+  /* Из формы «Добавить» — выбранный там домен; иначе домен из адреса. */
+  if (state.catalog && state.catalog.selectInto === 'add' && state.add && state.add.domainId) {
+    return state.add.domainId;
+  }
+  const d = state.domains && state.domains.current;
+  return d ? d.id : null;
+}
+function openCatalogModal(kind, mode, id, selectInto) {
+  const meta = catalogOf(kind);
+  if (!meta) return;
+  const row = id ? catalogFind(kind, id) : null;
+  state.catalog = {
+    kind: kind,
+    mode: mode || 'create',
+    id: row ? row.id : null,
+    name: row ? row.name : '',
+    color: (row && row.color) || CATALOG_COLORS[Math.floor(Math.random() * CATALOG_COLORS.length)],
+    selectInto: selectInto || null,   // 'add' | 'filter' | null
+  };
+  state.menu = null;
+  state.modal = 'catalog';
+}
+
 function profileOf(a) { return PROFILES.find(function (p) { return p.id === a.profileId; }) || NO_PROFILE; }
 function ownerOf(a)   { return OWNERS.find(function (o) { return o.id === a.ownerId; })   || NO_OWNER; }
 function groupOf(a)   { return GROUPS.find(function (g) { return g.id === a.groupId; })   || { name: '—' }; }
@@ -1372,24 +1432,32 @@ function totals(list) {
 /* ============================================================
    6. ШАПКА, ЛЕНТА, РЕЛЬС
    ============================================================ */
-/* Метка домена в шапке: без неё три одинаковых экрана на разных адресах
-   не отличить, и легко решить, что часть аккаунтов пропала. */
+/* Метка домена в шапке: на главной — All, на /product — Product и т.д.
+   Клик открывает список доменов для перехода. */
 function domainPill() {
-  if (!DOMAIN) return '';
-  const d = state.domains && state.domains.current;
-  if (DOMAIN === DOMAIN_AGGREGATE) {
-    return '<span class="pill" title="Сводный эфир: показаны все домены сразу" ' +
-      'style="background:var(--m2s);color:var(--m2)">все домены</span>';
+  const open = state.menu === 'domain-switch';
+  let label, color, bg, title;
+  if (!DOMAIN) {
+    label = 'All'; color = 'var(--accent)'; bg = 'var(--accent-soft)';
+    title = 'Все домены сразу — включая аккаунты без домена';
+  } else if (DOMAIN === DOMAIN_AGGREGATE) {
+    label = 'All'; color = 'var(--accent)'; bg = 'var(--accent-soft)';
+    title = 'Все домены сразу — включая аккаунты без домена';
+  } else if (state.domains && state.domains.unknown) {
+    label = 'домен не найден'; color = 'var(--warn)'; bg = 'var(--warn-soft,var(--m3s))';
+    title = 'Домена «' + state.domains.unknown + '» нет в базе';
+  } else {
+    const d = state.domains && state.domains.current;
+    label = (d && d.name) || DOMAIN;
+    color = (d && d.color) || 'var(--accent)';
+    bg = 'var(--accent-soft)';
+    title = 'Домен: показаны только его аккаунты и метки';
   }
-  if (state.domains && state.domains.unknown) {
-    return '<span class="pill" title="Домена «' + esc(state.domains.unknown) +
-      '» нет в базе — показаны все данные" style="background:var(--warn-soft,var(--m3s));color:var(--warn)">' +
-      'домен не найден</span>';
-  }
-  const name = (d && d.name) || DOMAIN;
-  const color = (d && d.color) || 'var(--accent)';
-  return '<span class="pill" title="Домен: показаны только его аккаунты и справочники" ' +
-    'style="background:var(--accent-soft);color:' + esc(color) + '">' + esc(name) + '</span>';
+  return '<button type="button" class="pill' + (open ? ' open' : '') + '" data-act="menu" data-v="domain-switch" ' +
+    'title="' + esc(title) + '" aria-label="Домен: ' + esc(label) + '. Открыть список" ' +
+    'aria-haspopup="listbox" aria-expanded="' + open + '" ' +
+    'style="background:' + bg + ';color:' + esc(color) + '">' +
+    '<span class="trunc">' + esc(label) + '</span>' + ic('cdown', 10) + '</button>';
 }
 function appbar() {
   return '<div class="appbar">' +
@@ -1493,10 +1561,6 @@ function rail() {
                      ? '<button class="rail-item" data-act="f-clear" data-v="' + c.k + '" style="color:var(--accent)">' +
                          '<span class="grow" style="text-align:left">Снять выбор</span></button>'
                      : '') +
-                   (c.k !== 'status' && c.k !== 'platform'
-                     ? '<button class="rail-item" data-act="nav" data-v="settings" style="color:var(--ink-3)">' +
-                         '<span class="grow" style="text-align:left">Править в настройках</span></button>'
-                     : '') +
                    '</div>'
                  : '');
       }).join('') +
@@ -1567,13 +1631,16 @@ function screenAccounts() {
     '</div>' +
 
     '<div class="kpis">' +
-      // Все пять — полным числом, а не «19 млн»: в сжатом виде прибавка за
-      // тик не видна, и живой счётчик теряет смысл.
-      kpiCard('Подписчики', fmt(vcOr(t.f, 'followers')), t.fd, fs, false, t.f, 1, 'users', 'followers') +
-      kpiCard('Просмотры', fmt(vcOr(t.v, 'views')), t.vd, null, true, t.v, 2, 'eye', 'views') +
-      kpiCard('Лайки', fmt(vcOr(t.l, 'likes')), t.ld, null, true, t.l, 3, 'heart', 'likes') +
-      kpiCard('Посты', fmt(vcOr(t.p, 'posts')), t.pd, null, false, t.p, 4, 'rows', 'posts') +
-      kpiCard('Клики по ссылке', fmt(vcOr(t.c, 'clicks')), t.cd, null, false, t.c, 5, 'link', 'clicks') +
+      // Без фильтра — живой сетевой счётчик (vc). С фильтром — сумма только
+      // по видимым: иначе KPI остаются от всей базы, а список уже сужен.
+      (function () {
+        const live = !anyFilter;
+        return kpiCard('Подписчики', fmt(live ? vcOr(t.f, 'followers') : t.f), t.fd, fs, false, t.f, 1, 'users', live ? 'followers' : null) +
+          kpiCard('Просмотры', fmt(live ? vcOr(t.v, 'views') : t.v), t.vd, null, true, t.v, 2, 'eye', live ? 'views' : null) +
+          kpiCard('Лайки', fmt(live ? vcOr(t.l, 'likes') : t.l), t.ld, null, true, t.l, 3, 'heart', live ? 'likes' : null) +
+          kpiCard('Посты', fmt(live ? vcOr(t.p, 'posts') : t.p), t.pd, null, false, t.p, 4, 'rows', live ? 'posts' : null) +
+          kpiCard('Клики по ссылке', fmt(live ? vcOr(t.c, 'clicks') : t.c), t.cd, null, false, t.c, 5, 'link', live ? 'clicks' : null);
+      })() +
     '</div>' +
 
     '<div class="filters">' +
@@ -1802,31 +1869,41 @@ function menuDef(key) {
     title: 'Профиль', cur: String(state.add.profileId || 0),
     items: [{ v: '0', l: 'Без профиля' }].concat(PROFILES.map(function (p) {
       return { v: String(p.id), l: p.name, dot: p.color };
-    })),
+    })).concat([{ v: '__new__', l: 'Добавить профиль…', create: true }]),
   };
   if (kind === 'add-owner') return {
     title: 'Владелец', cur: String(state.add.ownerId || 0),
     items: [{ v: '0', l: 'Без владельца' }].concat(OWNERS.map(function (o) {
-      return { v: String(o.id), l: o.name };
-    })),
+      return { v: String(o.id), l: o.name, dot: o.color };
+    })).concat([{ v: '__new__', l: 'Добавить владельца…', create: true }]),
   };
   if (kind === 'add-group') return {
     title: 'Группа', cur: String(state.add.groupId || 0),
     items: [{ v: '0', l: 'Без группы' }].concat(GROUPS.map(function (g) {
-      return { v: String(g.id), l: g.name };
-    })),
+      return { v: String(g.id), l: g.name, dot: g.color };
+    })).concat([{ v: '__new__', l: 'Добавить группу…', create: true }]),
   };
   if (kind === 'add-country') return {
     title: 'Страна', cur: String(state.add.countryId || 0),
     items: [{ v: '0', l: 'Без страны' }].concat(COUNTRIES.map(function (c) {
-      return { v: String(c.id), l: c.name };
-    })),
+      return { v: String(c.id), l: c.name, dot: c.color };
+    })).concat([{ v: '__new__', l: 'Добавить страну…', create: true }]),
   };
   switch (key) {
     case 'theme': return {
       title: 'Тема', cur: state.theme,
       items: THEMES.map(function (x) { return { v: x.v, l: x.l }; }),
     };
+    case 'domain-switch': {
+      const list = (state.domains && state.domains.list) || [];
+      // All = вся сеть: все домены и аккаунты без домена. Отдельный пункт
+      // «все домены» (/efir) убран — это то же самое по данным, только эфир.
+      const items = [{ v: '', l: 'All', muted: false }].concat(list.map(function (d) {
+        return { v: d.slug, l: d.name, dot: d.color };
+      }));
+      const cur = (!DOMAIN || DOMAIN === DOMAIN_AGGREGATE) ? '' : DOMAIN;
+      return { title: 'Домен', cur: cur, items: items };
+    }
     case 'sort': return {
       title: 'Сортировка', cur: state.sort.key,
       items: SORT_OPTIONS.map(function (o) { return { v: o[0], l: o[1] }; }),
@@ -1927,6 +2004,12 @@ function applyMenu(key, v) {
   if (kind.indexOf('add-') === 0) {
     const el = document.getElementById('addlist');
     if (el) state.add.text = el.value;
+    if (v === '__new__') {
+      const map = { 'add-profile': 'profile', 'add-owner': 'owner',
+                    'add-group': 'group', 'add-country': 'country' };
+      openCatalogModal(map[kind], 'create', null, 'add');
+      return;
+    }
     if (kind === 'add-platform') state.add.platform = v;
     else if (kind === 'add-domain')  state.add.domainId  = +v || 0;
     else if (kind === 'add-profile') state.add.profileId = +v || 0;
@@ -1937,6 +2020,7 @@ function applyMenu(key, v) {
   }
   switch (key) {
     case 'theme':       setTheme(v); break;
+    case 'domain-switch': goDomain(v); return;
     case 'sort':        state.sort = { key: v, dir: v === 'name' ? 'asc' : 'desc' }; break;
     case 'size':        state.pageSize = +v; state.page = 1; break;
     case 'an-platform': state.an.platform = v; state.an.items = null; loadAnalytics(); break;
@@ -1979,14 +2063,16 @@ function menuLayer() {
       // У команд отметка «выбрано» ни при чём: галочку ставим только там,
       // где меню выбирает одно значение из списка.
       const cmd = !!ACTION_MENUS[menuKind(state.menu)];
-      const on = cmd ? !!i.on : i.v === d.cur;
+      const on = cmd ? !!i.on : (!i.create && i.v === d.cur);
       return '<button role="option" aria-selected="' + on + '" class="' + (on ? 'on' : '') + '" ' +
-        (i.danger ? 'style="color:var(--neg)" ' : (i.muted ? 'style="color:var(--ink-3)" ' : '')) +
+        (i.create ? 'style="color:var(--accent);border-top:1px solid var(--line-soft)" ' :
+          (i.danger ? 'style="color:var(--neg)" ' : (i.muted ? 'style="color:var(--ink-3)" ' : ''))) +
         'data-act="mi" data-v="' + state.menu + '|' + i.v + '">' +
-        (i.dot ? '<span class="dot" style="background:' + i.dot + '"></span>' : '') +
+        (i.create ? '<span style="display:flex">' + ic('plus', 13) + '</span>' :
+          (i.dot ? '<span class="dot" style="background:' + i.dot + '"></span>' : '')) +
         (i.mark ? pmark(i.mark) : '') +
         '<span class="trunc">' + esc(i.l) + '</span>' +
-        (cmd && !i.on ? '' : '<span class="mi-check">' + ic('check', 13) + '</span>') + '</button>';
+        (i.create || (cmd && !i.on) ? '' : '<span class="mi-check">' + ic('check', 13) + '</span>') + '</button>';
     }).join('') + '</div>';
 }
 function positionMenu() {
@@ -2642,20 +2728,42 @@ function screenSettings() {
           '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Все метрики и дельты за выбранный период, с учётом фильтров на экране «Аккаунты»</div></div>' +
           '<button class="btn" data-act="export-csv">' + ic('down', 13) + 'Выгрузить</button></div>' +
         '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Полный снимок базы</div>' +
-          '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Аккаунты и справочники одним файлом — для переноса или бэкапа</div></div>' +
+          '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Аккаунты, профили и метки одним файлом — для переноса или бэкапа</div></div>' +
           '<button class="btn" data-act="toast" data-v="Снимок базы подготовлен">' + ic('down', 13) + 'Выгрузить</button></div>' +
       '</div></div>' +
 
-    '<div class="sect"><div class="hd">' + ic('cols', 17) + '<h2>Справочники</h2></div>' +
+    '<div class="sect"><div class="hd">' + ic('cols', 17) + '<h2>Профили и метки</h2></div>' +
+      '<div style="font-size:13px;color:var(--ink-3);margin:-4px 0 12px;line-height:1.45">' +
+        'Профили, владельцы, группы и страны — ими размечают аккаунты при добавлении и в фильтрах.' +
+      '</div>' +
       '<div class="ins">' +
-        [['Профили', PROFILES.map(function (p) { return p.name; })],
-         ['Владельцы', OWNERS.map(function (o) { return o.name; })],
-         ['Группы', GROUPS.map(function (g) { return g.name; })],
-         ['Страны', COUNTRIES.map(function (c) { return c.name; })]].map(function (c) {
-          return '<div class="card" style="padding:14px">' +
-            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="lbl">' + c[0] + '</span>' +
-            '<div class="grow"></div><button class="btn ico ghost" style="width:24px;height:24px" data-act="toast" data-v="Добавление в справочник">' + ic('plus', 13) + '</button></div>' +
-            '<div class="tags">' + c[1].map(function (n) { return '<span class="tag">' + n + '</span>'; }).join('') + '</div></div>';
+        ['profile', 'owner', 'group', 'country'].map(function (kind) {
+          const meta = catalogOf(kind);
+          const rows = meta.list();
+          return '<div class="card" style="padding:0;overflow:hidden">' +
+            '<div style="display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line-soft)">' +
+              '<span class="lbl">' + meta.many + '</span>' +
+              '<span class="mono" style="font-size:11px;color:var(--ink-3)">' + rows.length + '</span>' +
+              '<div class="grow"></div>' +
+              '<button class="btn sm" data-act="cat-new" data-v="' + kind + '">' + ic('plus', 12) + 'Добавить</button>' +
+            '</div>' +
+            (rows.length
+              ? rows.map(function (r) {
+                  return '<div class="srow" style="gap:10px">' +
+                    '<span class="dot" style="background:' + esc(r.color || '#8A857C') + '"></span>' +
+                    '<div class="grow trunc" style="font-size:13px;font-weight:500">' + esc(r.name) +
+                      (r.hidden ? ' <span class="pill" style="background:var(--chip);color:var(--ink-3)">скрыт</span>' : '') +
+                    '</div>' +
+                    '<span class="mono" style="font-size:11px;color:var(--ink-3)" title="Аккаунтов">' +
+                      fmt(r.count || 0) + '</span>' +
+                    '<button class="btn ico ghost" style="width:28px;height:28px" title="Изменить" ' +
+                      'data-act="cat-edit" data-v="' + kind + '|' + r.id + '">' + ic('gear', 13) + '</button>' +
+                    '<button class="btn ico ghost" style="width:28px;height:28px;color:var(--neg)" title="Удалить" ' +
+                      'data-act="cat-del" data-v="' + kind + '|' + r.id + '">' + ic('trash', 13) + '</button>' +
+                  '</div>';
+                }).join('')
+              : '<div style="padding:16px 14px;font-size:12px;color:var(--ink-3)">Пока пусто — добавьте первый.</div>') +
+          '</div>';
         }).join('') +
       '</div></div>' +
   '</div>';
@@ -2973,7 +3081,8 @@ function modalAdd() {
       esc(a.text) + '</textarea></div>' +
     '<div class="frow"><span class="lb">Куда добавить</span>' + dd('add-domain') +
       '<span style="font-size:12px;color:var(--ink-3)">' +
-        (a.domainId ? 'аккаунты появятся в этом домене' : 'без домена — видно только на главной') +
+        (a.domainId ? 'аккаунты появятся в этом домене'
+          : 'без домена — видны в All вместе со всеми доменами') +
       '</span></div>' +
     '<div class="frow"><span class="lb">Площадка</span>' + dd('add-platform') +
       '<span style="font-size:12px;color:var(--ink-3)">по ссылке определяется сама</span></div>' +
@@ -2982,10 +3091,37 @@ function modalAdd() {
     '<div class="frow"><span class="lb">Группа и страна</span>' +
       dd('add-group') + dd('add-country') + '</div>' +
     '<div style="font-size:12px;color:var(--ink-3)">Уже существующий аккаунт не задваивается: у него обновятся ' +
-      'заполненные здесь поля, а архив или бан снимутся.</div>';
+      'заполненные здесь поля (домен, профиль, владелец, группа, страна), а архив или бан снимутся. ' +
+      'Пустые поля («Без …») не трогают текущие значения.</div>';
   const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
     '<button class="btn pri" data-act="add-save">Добавить</button>';
   return modalShell('Добавить аккаунты', body, ft);
+}
+
+function modalCatalog() {
+  const c = state.catalog;
+  if (!c) return '';
+  const meta = catalogOf(c.kind);
+  if (!meta) return '';
+  const title = (c.mode === 'edit' ? 'Изменить ' : 'Новый ') + meta.one;
+  const body =
+    '<div><div class="lbl" style="margin-bottom:8px">Название</div>' +
+      '<input id="catname" type="text" value="' + esc(c.name) + '" placeholder="Например, Миньёны" ' +
+      'autofocus style="width:100%;padding:11px 12px;border:1px solid var(--line-2);border-radius:8px;' +
+      'background:var(--surface);color:var(--ink);font:inherit;font-size:13px;outline:none"></div>' +
+    '<div><div class="lbl" style="margin-bottom:8px">Цвет</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+        CATALOG_COLORS.map(function (col) {
+          const on = c.color === col;
+          return '<button type="button" data-act="cat-color" data-v="' + col + '" title="' + col + '" ' +
+            'style="width:28px;height:28px;border-radius:999px;border:2px solid ' +
+            (on ? 'var(--ink)' : 'transparent') + ';background:' + col + ';padding:0;cursor:pointer"></button>';
+        }).join('') +
+      '</div></div>';
+  const ft = '<div class="grow"></div><button class="btn" data-act="catalog-cancel">Отмена</button>' +
+    '<button class="btn pri" data-act="catalog-save">' +
+      (c.mode === 'edit' ? 'Сохранить' : 'Создать') + '</button>';
+  return modalShell(title, body, ft);
 }
 
 /* Импорт кук — рабочий способ восстановить сессию из веб-интерфейса.
@@ -3168,6 +3304,7 @@ function modalsHtml() {
     (state.modal === 'compare'  ? modalCompare()  : '') +
     (state.modal === 'cols'     ? modalCols()     : '') +
     (state.modal === 'confirm'  ? modalConfirm()  : '') +
+    (state.modal === 'catalog'  ? modalCatalog()  : '') +
     (state.modal === 'palette'  ? modalPalette()  : '') +
     (state.modal === 'cookies'  ? modalCookies()  : '');
 }
@@ -3210,6 +3347,7 @@ function restoreFocus(id, at) {
     if (el) { el.focus(); try { el.setSelectionRange(at, at); } catch (e) {} return; }
   }
   if (state.modal === 'palette') { const el = document.getElementById('pal'); if (el) el.focus(); }
+  else if (state.modal === 'catalog') { const el = document.getElementById('catname'); if (el) el.focus(); }
   else if (state.modal === 'saveview') { const el = document.getElementById('viewname'); if (el) el.focus(); }
 }
 
@@ -3499,8 +3637,52 @@ document.addEventListener('click', function (e) {
       if (c && c.run) c.run();
       return;
     }
-    case 'close':     state.modal = null; state.runError = false; PENDING_CONFIRM = null; break;
-    case 'scrim':     state.modal = null; state.runError = false; break;
+    case 'cat-new':
+      if (!v) break;
+      openCatalogModal(v, 'create', null, state.route === 'settings' ? null : 'filter');
+      break;
+    case 'cat-edit': {
+      const cut = v.indexOf('|');
+      openCatalogModal(v.slice(0, cut), 'edit', +v.slice(cut + 1), null);
+      break;
+    }
+    case 'cat-del': {
+      const cut = v.indexOf('|');
+      const kind = v.slice(0, cut), id = +v.slice(cut + 1);
+      const meta = catalogOf(kind);
+      const row = catalogFind(kind, id);
+      if (!meta || !row) break;
+      askConfirm({
+        title: 'Удалить ' + meta.one + '?',
+        text: '«' + esc(row.name) + '» будет удалён' +
+          (row.count ? '. У ' + row.count + ' ' + plural(row.count, ['аккаунта', 'аккаунтов', 'аккаунтов']) +
+            ' поле очистится' : '') + '.',
+        ok: 'Удалить', danger: true,
+        run: function () { A.deleteCatalog(kind, id); },
+      });
+      break;
+    }
+    case 'cat-color':
+      if (state.catalog) state.catalog.color = v;
+      break;
+    case 'catalog-cancel': {
+      const backAdd = state.catalog && state.catalog.selectInto === 'add';
+      state.catalog = null;
+      state.modal = backAdd ? 'add' : null;
+      break;
+    }
+    case 'catalog-save': {
+      const el = document.getElementById('catname');
+      if (el && state.catalog) state.catalog.name = el.value;
+      const cat = state.catalog;
+      if (!cat) break;
+      const name = String(cat.name || '').trim();
+      if (!name) { toast('Введите название'); return; }
+      A.saveCatalog(cat);
+      return;
+    }
+    case 'close':     state.modal = null; state.runError = false; PENDING_CONFIRM = null; state.catalog = null; break;
+    case 'scrim':     state.modal = null; state.runError = false; state.catalog = null; break;
     case 'palette':   state.modal = 'palette'; state.paletteQ = ''; state.paletteI = 0; break;
     case 'pal-go': {
       const it = PALETTE_ITEMS[+v];
@@ -3535,6 +3717,7 @@ document.addEventListener('click', function (e) {
 const OVERLAY_ACTS = new Set([
   'menu', 'modal', 'close', 'scrim', 'run-tab', 'start-all', 'palette',
   'sched-bool', 'sched-int', 'sched-skip', 'sched-plat', 'sched-mode', 'sched-time',
+  'cat-new', 'cat-edit', 'cat-color', 'catalog-cancel',
 ]);
 /* Действия, меняющие список и рельс, но не шапку */
 const MAIN_ACTS = new Set([
@@ -3553,6 +3736,10 @@ document.addEventListener('input', function (e) {
     return;
   }
   if (e.target.id === 'addlist') { state.add.text = e.target.value; return; }
+  if (e.target.id === 'catname') {
+    if (state.catalog) state.catalog.name = e.target.value;
+    return;
+  }
   if (e.target.id === 'cookiestext') { state.cookiesText = e.target.value; return; }
   if (e.target.id === 'pal')  { state.paletteQ = e.target.value; state.paletteI = 0; render(); }
   if (e.target.id === 'audq') { state.audQ = e.target.value; state.audPage = 1; render(); }
@@ -3595,8 +3782,20 @@ document.addEventListener('keydown', function (e) {
   }
   if (e.key === 'Escape') {
     if (state.menu) { state.menu = null; render(); }
-    else if (state.modal) { state.modal = null; render(); }
+    else if (state.modal === 'catalog') {
+      const backAdd = state.catalog && state.catalog.selectInto === 'add';
+      state.catalog = null;
+      state.modal = backAdd ? 'add' : null;
+      render();
+    }
+    else if (state.modal) { state.modal = null; state.catalog = null; render(); }
     else if (state.selected.size) { state.selected.clear(); render(); }
+    return;
+  }
+  if (state.modal === 'catalog' && e.key === 'Enter' && act && act.id === 'catname') {
+    e.preventDefault();
+    if (state.catalog) state.catalog.name = act.value;
+    A.saveCatalog(state.catalog);
     return;
   }
   if (state.modal === 'palette') {
@@ -3694,6 +3893,39 @@ function routeUrl(route) {
     });
   } catch (e) {}
   return path + (keep.length ? '?' + keep.join('&') : '');
+}
+/* Полный переход на другой домен с сохранением текущего экрана
+   (/analytics, /settings, эфир). DOMAIN — константа из pathname, поэтому
+   history.pushState недостаточно: нужен reload по новому адресу. */
+function goDomain(slug) {
+  const want = String(slug || '');
+  // All и /efir — одна «вся сеть»; не гоняем лишний reload между ними
+  // при выборе All, если уже смотрим сводку (кроме смены экрана ниже).
+  const hereAll = !DOMAIN || DOMAIN === DOMAIN_AGGREGATE;
+  if (!want && hereAll && state.route !== 'tv') return;
+  if (want && want === DOMAIN) return;
+  const route = state.route === 'detail' ? 'accounts' : state.route;
+  const screen = SEG_BY_ROUTE[route] || '';
+  let path;
+  if (!want) {
+    // All: аккаунты всей сети (не /efir — тот открывает эфир через нав).
+    path = screen && screen !== DOMAIN_AGGREGATE ? '/' + screen : '/';
+  } else if (want === DOMAIN_AGGREGATE || screen === DOMAIN_AGGREGATE) {
+    path = want === DOMAIN_AGGREGATE
+      ? '/' + DOMAIN_AGGREGATE
+      : '/' + want + '/' + DOMAIN_AGGREGATE;
+  } else if (screen) {
+    path = '/' + want + '/' + screen;
+  } else {
+    path = '/' + want;
+  }
+  const keep = [];
+  try {
+    new URLSearchParams(location.search).forEach(function (val, key) {
+      if (KEEP_PARAMS[key]) keep.push(key + '=' + encodeURIComponent(val));
+    });
+  } catch (e) {}
+  location.assign(path + (keep.length ? '?' + keep.join('&') : ''));
 }
 function syncUrl(replace) {
   // Карточку аккаунта своим адресом не отмечаем: у неё нет собственного
@@ -4339,18 +4571,33 @@ const A = {
     const items = parseAccountLines(lines, fallbackPlatform);
     if (!items.length) { toast('Не разобрал ни одной строки'); return null; }
     return run(async function () {
-      let ok = 0; const errs = [];
+      let created = 0, updated = 0, same = 0, restored = 0;
+      const errs = [];
       for (const it of items) {
         try {
-          await apiSend('/api/accounts/', Object.assign({ username: it.username, platform: it.platform }, extra || {}));
-          ok++;
+          const r = await apiSend('/api/accounts/', Object.assign({
+            username: it.username, platform: it.platform,
+          }, extra || {}));
+          const act = r && r.import_action;
+          if (act === 'created') created++;
+          else if (act === 'assignment_updated') updated++;
+          else if (act === 'unchanged') same++;
+          else if (act === 'unarchived' || act === 'unbanned' || act === 'restored') restored++;
+          else created++; // старый ответ без import_action
         } catch (e) { errs.push(it.username + ': ' + e.message); }
       }
-      return { ok: ok, errs: errs };
+      return { created: created, updated: updated, same: same, restored: restored, errs: errs };
     }, function (r) {
+      const parts = [];
+      if (r.created) parts.push('добавлено ' + r.created);
+      if (r.updated) parts.push('обновлено ' + r.updated);
+      if (r.restored) parts.push('возвращено ' + r.restored);
+      if (r.same && !r.created && !r.updated && !r.restored) parts.push('без изменений ' + r.same);
+      else if (r.same) parts.push('без изменений ' + r.same);
+      const head = parts.length ? parts.join(', ') : 'готово';
       return r.errs.length
-        ? 'Добавлено ' + r.ok + ', с ошибкой ' + r.errs.length + ' (' + r.errs[0] + ')'
-        : 'Добавлено ' + r.ok;
+        ? head + '; с ошибкой ' + r.errs.length + ' (' + r.errs[0] + ')'
+        : head.charAt(0).toUpperCase() + head.slice(1);
     });
   },
   /* Сброс сессии площадки. Необратимо: куки удаляются, и без повторного
@@ -4382,6 +4629,69 @@ const A = {
     if (DEMO || !LIVE) { toast('Демо-режим: выгрузка недоступна'); return; }
     window.open(API_BASE + '/api/accounts/export-snapshot/', '_blank');
     toast('Снимок выгружается');
+  },
+  reloadCatalogs: async function () {
+    if (DEMO || !LIVE) return;
+    const [profiles, owners, groups, countries] = await Promise.all([
+      api('/api/accounts/profiles/?include_hidden_profiles=1'),
+      api('/api/accounts/owners/'),
+      api('/api/accounts/groups/'),
+      api('/api/accounts/countries/'),
+    ]);
+    applyCatalogRows(profiles, owners, groups, countries);
+  },
+  saveCatalog: function (cat) {
+    const meta = catalogOf(cat.kind);
+    if (!meta) return null;
+    const name = String(cat.name || '').trim();
+    const selectInto = cat.selectInto;
+    const kind = cat.kind;
+    const body = { name: name, color: cat.color || '#6366f1' };
+    const domId = currentDomainIdForCatalog();
+    if (cat.mode === 'create' && domId) body.domain_id = domId;
+    return run(async function () {
+      let row;
+      if (cat.mode === 'edit' && cat.id) {
+        row = await apiSend(meta.path + cat.id + '/', body, 'PATCH');
+      } else {
+        row = await apiSend(meta.path, body);
+      }
+      await A.reloadCatalogs();
+      return row;
+    }, function (row) {
+      return cat.mode === 'edit' ? 'Сохранено' : 'Создано: ' + (row && row.name ? row.name : name);
+    }, { reload: false }).then(function (row) {
+      if (!row) return;
+      state.catalog = null;
+      if (selectInto === 'add') {
+        state.add[meta.addField] = row.id;
+        state.modal = 'add';
+      } else {
+        state.modal = null;
+        if (selectInto === 'filter' && meta.filterKey) {
+          const sel = state.f[meta.filterKey];
+          const sid = String(row.id);
+          if (sel.indexOf(sid) < 0) sel.push(sid);
+          if (state.railOpen.indexOf(meta.filterKey) < 0) state.railOpen.push(meta.filterKey);
+          state.page = 1;
+        }
+      }
+      render();
+    });
+  },
+  deleteCatalog: function (kind, id) {
+    const meta = catalogOf(kind);
+    if (!meta) return null;
+    return run(async function () {
+      await apiSend(meta.path + id + '/', undefined, 'DELETE');
+      await A.reloadCatalogs();
+      // Снять с фильтров и формы добавления, если удалили выбранное.
+      const sid = String(id);
+      const sel = state.f[meta.filterKey] || [];
+      const at = sel.indexOf(sid);
+      if (at >= 0) sel.splice(at, 1);
+      if (state.add[meta.addField] === id) state.add[meta.addField] = 0;
+    }, 'Удалено', { reload: true });
   },
 };
 
@@ -4431,6 +4741,28 @@ function modalConfirm() {
   return modalShell(c.title, body, ft);
 }
 
+function applyCatalogRows(profiles, owners, groups, countries) {
+  PROFILES.length = 0;
+  (profiles || []).forEach(function (p) {
+    PROFILES.push({
+      id: p.id, name: p.name, color: p.color || '#8A857C',
+      hidden: !!p.is_hidden, count: p.account_count || 0,
+    });
+  });
+  OWNERS.length = 0;
+  (owners || []).forEach(function (o) {
+    OWNERS.push({ id: o.id, name: o.name, color: o.color || '#6366f1', count: o.account_count || 0 });
+  });
+  GROUPS.length = 0;
+  (groups || []).forEach(function (g) {
+    GROUPS.push({ id: g.id, name: g.name, color: g.color || '#6366f1', count: g.account_count || 0 });
+  });
+  COUNTRIES.length = 0;
+  (countries || []).forEach(function (c) {
+    COUNTRIES.push({ id: c.id, name: c.name, color: c.color || '#6366f1', count: c.account_count || 0 });
+  });
+}
+
 async function bootLive() {
   if (DEMO) {
     // Данные-заглушки уже в памяти, имитация прогона запущена в startRun()
@@ -4446,11 +4778,7 @@ async function bootLive() {
       api('/api/accounts/countries/'),
       api('/api/accounts/?' + ACC_QS + '&delta_period_days=' + state.period),
     ]);
-    PROFILES.length = 0;
-    profiles.forEach(function (p) { PROFILES.push({ id: p.id, name: p.name, color: p.color || '#8A857C', hidden: !!p.is_hidden }); });
-    OWNERS.length = 0;    owners.forEach(function (o) { OWNERS.push({ id: o.id, name: o.name }); });
-    GROUPS.length = 0;    groups.forEach(function (g) { GROUPS.push({ id: g.id, name: g.name }); });
-    COUNTRIES.length = 0; countries.forEach(function (c) { COUNTRIES.push({ id: c.id, name: c.name }); });
+    applyCatalogRows(profiles, owners, groups, countries);
     ACCOUNTS.length = 0;  rows.forEach(function (r) { ACCOUNTS.push(mapAccount(r)); });
 
     deltaLoaded[state.period] = true;

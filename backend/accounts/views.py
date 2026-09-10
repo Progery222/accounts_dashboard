@@ -466,8 +466,9 @@ def _assignment_fk_id(obj) -> int | None:
 
 
 def _existing_account_assignment_unchanged(existing: Account, validated: dict) -> bool:
-    """Совпадают ли переданные в POST поля профиля/владельца/группы/страны с аккаунтом."""
+    """Совпадают ли переданные в POST поля домена/профиля/владельца/группы/страны с аккаунтом."""
     for key, fk_attr in (
+        ("domain", "domain_id"),
         ("profile", "profile_id"),
         ("owner", "owner_id"),
         ("group", "group_id"),
@@ -504,12 +505,13 @@ def _unban_account_on_import(account: Account) -> bool:
 
 def _apply_existing_account_assignment(existing: Account, validated: dict) -> list[str]:
     """
-    Только смена профиля/владельца/группы/страны — без scrape и без сдвига «Обновлён».
+    Только смена домена/профиля/владельца/группы/страны — без scrape и без сдвига «Обновлён».
     Возвращает список изменённых полей (для API) или [].
     """
     assignment: dict = {}
     changed_labels: list[str] = []
     for key, fk_attr in (
+        ("domain", "domain_id"),
         ("profile", "profile_id"),
         ("owner", "owner_id"),
         ("group", "group_id"),
@@ -3578,7 +3580,18 @@ class AccountViewSet(viewsets.ModelViewSet):
         return Response(result)
 
 
-class OwnerViewSet(viewsets.ModelViewSet):
+class _DomainScopedCreateMixin:
+    """При создании в /reiz без явного domain_id — сразу в текущий домен."""
+
+    def perform_create(self, serializer):
+        scope = domains.resolve(self.request)
+        extra = {}
+        if serializer.validated_data.get("domain") is None and scope.scoped:
+            extra["domain"] = scope.domain
+        serializer.save(**extra)
+
+
+class OwnerViewSet(_DomainScopedCreateMixin, viewsets.ModelViewSet):
     serializer_class = OwnerSerializer
 
     def get_queryset(self):
@@ -3598,7 +3611,7 @@ class OwnerViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class AccountGroupViewSet(viewsets.ModelViewSet):
+class AccountGroupViewSet(_DomainScopedCreateMixin, viewsets.ModelViewSet):
     serializer_class = AccountGroupSerializer
 
     def get_queryset(self):
@@ -3618,7 +3631,7 @@ class AccountGroupViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class CountryViewSet(viewsets.ModelViewSet):
+class CountryViewSet(_DomainScopedCreateMixin, viewsets.ModelViewSet):
     serializer_class = CountrySerializer
 
     def get_queryset(self):
@@ -3638,7 +3651,7 @@ class CountryViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class ProfileViewSet(viewsets.ModelViewSet):
+class ProfileViewSet(_DomainScopedCreateMixin, viewsets.ModelViewSet):
     serializer_class = ProfileSerializer
 
     def get_queryset(self):
