@@ -106,6 +106,53 @@ class RefreshScheduleApiTests(APITestCase):
         )
         self.assertEqual(ids, {"tt1", "ig1"})
 
+    def test_schedule_times_only_four_slots(self):
+        RefreshScheduleConfig.objects.update_or_create(
+            pk=1,
+            defaults={"enabled": False, "mode": "times", "times": ["09:00", "18:00"]},
+        )
+        r = self.client.get("/api/accounts/schedule/")
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["times"], ["18:00"])
+
+        r2 = self.client.post(
+            "/api/accounts/schedule/",
+            {"times": ["00:00", "03:00", "06:00", "12:00", "18:00", "bad"]},
+            format="json",
+        )
+        self.assertEqual(r2.status_code, status.HTTP_200_OK)
+        self.assertEqual(r2.data["times"], ["00:00", "06:00", "12:00", "18:00"])
+
+    def test_auto_refresh_domain_and_group_scope(self):
+        from accounts.models import AccountGroup, Domain
+
+        dom_a = Domain.objects.create(name="A", slug="a", color="#111111")
+        dom_b = Domain.objects.create(name="B", slug="b", color="#222222")
+        grp = AccountGroup.objects.create(name="G1", color="#fff")
+        Account.objects.create(username="a1", platform=Platform.TIKTOK, domain=dom_a, group=grp)
+        Account.objects.create(username="b1", platform=Platform.TIKTOK, domain=dom_b)
+        Account.objects.create(username="n1", platform=Platform.TIKTOK)
+
+        r = self.client.post(
+            "/api/accounts/schedule/",
+            {
+                "auto_refresh_domain_ids": [dom_a.id, "none"],
+                "auto_refresh_group_ids": [grp.id],
+            },
+            format="json",
+        )
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertEqual(r.data["auto_refresh_domain_ids"], [dom_a.id, "none"])
+        self.assertEqual(r.data["auto_refresh_group_ids"], [grp.id])
+
+        from accounts.auto_refresh_scope import apply_auto_refresh_scope
+
+        cfg = RefreshScheduleConfig.get()
+        ids = set(
+            apply_auto_refresh_scope(Account.objects.all(), cfg).values_list("username", flat=True),
+        )
+        self.assertEqual(ids, {"a1"})
+
     def test_refresh_warm_enabled_toggle(self):
         RefreshScheduleConfig.objects.update_or_create(
             pk=1,

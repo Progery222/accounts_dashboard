@@ -512,6 +512,7 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                 "auto_refresh_owner_ids",
                 "auto_refresh_group_ids",
                 "auto_refresh_country_ids",
+                "auto_refresh_domain_ids",
             ],
         )
     except Exception:

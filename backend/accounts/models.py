@@ -226,6 +226,11 @@ class RefreshScheduleConfig(models.Model):
         blank=True,
         help_text="Пусто — все страны; иначе id стран и/или «none» (без страны).",
     )
+    auto_refresh_domain_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Пусто — все домены; иначе id доменов и/или «none» (без домена).",
+    )
     account_delta_period_days = models.PositiveSmallIntegerField(
         default=1,
         help_text="За сколько календарных дней назад брать опорный снимок для дельт в списке аккаунтов (1, 7 или 30).",
@@ -259,8 +264,9 @@ class RefreshScheduleConfig(models.Model):
                 "auto_refresh_owner_ids": [],
                 "auto_refresh_group_ids": [],
                 "auto_refresh_country_ids": [],
+                "auto_refresh_domain_ids": [],
                 "account_delta_period_days": 1,
-                "times": ["06:00", "12:00", "18:00", "00:00"],
+                "times": ["00:00", "06:00", "12:00", "18:00"],
             },
         )
         return obj
@@ -736,3 +742,48 @@ class AutoRefreshPoint(models.Model):
         indexes = [
             models.Index(fields=["local_date", "measured_at"]),
         ]
+
+
+class ExternalApiKeyScope(models.TextChoices):
+    READ = "read", "Чтение"
+    WRITE = "write", "Запись аккаунтов"
+    REFRESH = "refresh", "Обновление статистики"
+    EXPORT = "export", "Экспорт"
+
+
+class ExternalApiKey(models.Model):
+    """Ключ для внешних сервисов: Authorization: Bearer <token>.
+
+    В БД хранится только SHA-256 хеш; сырой токен показывается один раз при создании.
+    """
+
+    name = models.CharField(max_length=128, help_text="Кто пользуется ключом (сервис / интеграция).")
+    key_prefix = models.CharField(max_length=16, db_index=True, help_text="Префикс для поиска в админке.")
+    key_hash = models.CharField(max_length=64, unique=True)
+    scopes = models.JSONField(
+        default=list,
+        help_text='Список: "read", "write", "refresh", "export".',
+    )
+    domain = models.ForeignKey(
+        Domain,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="api_keys",
+        help_text="Если задан — все запросы ключа ограничены этим доменом (как X-Domain).",
+    )
+    is_active = models.BooleanField(default=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Внешний API-ключ"
+        verbose_name_plural = "Внешние API-ключи"
+
+    def __str__(self):
+        return f"{self.name} ({self.key_prefix}…)"
+
+    def has_scope(self, scope: str) -> bool:
+        return scope in (self.scopes or [])

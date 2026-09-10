@@ -34,6 +34,7 @@ urlpatterns = [
     path("healthz/ready/", healthz_ready),
     path("admin/", admin.site.urls),
     path("api/internal/apify/webhook/", apify_webhook),
+    path("api/v1/", include("accounts.api_v1_urls")),
     path("api/accounts/", include("accounts.urls")),
     path("api/tiktok/", include("tiktok_app.urls")),
     # Avatar proxy (bypasses CDN expiry / hotlink issues)

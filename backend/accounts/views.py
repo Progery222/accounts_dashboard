@@ -3634,14 +3634,14 @@ def _aggregate_prev_snapshot_pair_deltas(account_ids: list[int], today) -> tuple
     return (d_follow, d_like, d_view, d_post)
 
 
-@api_view(["GET"])
-def summary(request):
-    """Aggregate stats + deltas across all accounts, grouped by platform."""
+def compute_summary(request) -> dict:
+    """Aggregate stats + deltas across accounts (учитывает X-Domain / domain scope)."""
     today = timezone.localdate()
     include_hidden = _coerce_bool(request.query_params.get("include_hidden"))
     include_hidden_platforms = include_hidden or _coerce_bool(request.query_params.get("include_hidden_platforms"))
     include_hidden_profiles = include_hidden or _coerce_bool(request.query_params.get("include_hidden_profiles"))
     qs = Account.objects.prefetch_related("snapshots").all()
+    qs = domains.narrow(qs, domains.resolve(request))
     qs = _apply_archived_filter(qs, request.query_params.get("archived"))
     qs = _apply_banned_filter(qs, request.query_params.get("banned"))
     qs = _apply_visibility_filters(
@@ -3715,7 +3715,7 @@ def summary(request):
     if y_follow is None:
         y_follow, y_like, y_view, y_post = _aggregate_prev_snapshot_pair_deltas(account_ids, today)
 
-    return Response({
+    return {
         "account_count": len(accounts),
         "follower_count": total["follower_count"],
         "like_count": total["like_count"],
@@ -3732,7 +3732,13 @@ def summary(request):
         "yesterday_view_delta": y_view,
         "yesterday_post_delta": y_post,
         "by_platform": list(by_platform.values()),
-    })
+    }
+
+
+@api_view(["GET"])
+def summary(request):
+    """Aggregate stats + deltas across accounts, grouped by platform."""
+    return Response(compute_summary(request))
 
 
 def _schedule_db_error_response(exc: BaseException) -> Response:
@@ -3788,6 +3794,8 @@ def _schedule_to_dict(config) -> dict:
         normalize_auto_refresh_owner_ids,
         normalize_auto_refresh_group_ids,
         normalize_auto_refresh_country_ids,
+        normalize_auto_refresh_domain_ids,
+        normalize_schedule_times,
     )
 
     return {
@@ -3810,6 +3818,9 @@ def _schedule_to_dict(config) -> dict:
         ),
         "auto_refresh_country_ids": normalize_auto_refresh_country_ids(
             getattr(config, "auto_refresh_country_ids", None),
+        ),
+        "auto_refresh_domain_ids": normalize_auto_refresh_domain_ids(
+            getattr(config, "auto_refresh_domain_ids", None),
         ),
         "auto_refresh_csv_report": True,
         "auto_refresh_telegram_enabled": bool(
@@ -3839,7 +3850,7 @@ def _schedule_to_dict(config) -> dict:
         "account_delta_period_days": (
             d if (d := int(getattr(config, "account_delta_period_days", 1) or 1)) in (1, 7, 30) else 1
         ),
-        "times": config.times,
+        "times": normalize_schedule_times(config.times),
     }
 
 
@@ -4043,16 +4054,16 @@ def refresh_schedule(request):
             config.auto_refresh_country_ids = normalize_auto_refresh_country_ids(
                 data["auto_refresh_country_ids"],
             )
+        if "auto_refresh_domain_ids" in data:
+            from .auto_refresh_scope import normalize_auto_refresh_domain_ids
+
+            config.auto_refresh_domain_ids = normalize_auto_refresh_domain_ids(
+                data["auto_refresh_domain_ids"],
+            )
         if "times" in data and isinstance(data["times"], list):
-            valid = []
-            for t in data["times"]:
-                try:
-                    h, m = map(int, str(t).split(":"))
-                    assert 0 <= h <= 23 and 0 <= m <= 59
-                    valid.append(f"{h:02d}:{m:02d}")
-                except Exception:
-                    pass
-            config.times = valid
+            from .auto_refresh_scope import normalize_schedule_times
+
+            config.times = normalize_schedule_times(data["times"])
         if "account_delta_period_days" in data:
             raw = int(data["account_delta_period_days"])
             config.account_delta_period_days = raw if raw in (1, 7, 30) else 1

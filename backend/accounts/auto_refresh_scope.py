@@ -1,10 +1,31 @@
-"""Фильтры охвата автообновления: платформы, профили, владельцы, группы и страны."""
+"""Фильтры охвата автообновления: платформы, профили, владельцы, группы, страны, домены."""
 
 from __future__ import annotations
 
 from django.db.models import Q
 
 from accounts.models import Platform
+
+# Разрешённые слоты «по времени» (МСК) — совпадают с UI.
+SCHEDULE_TIME_SLOTS = ("00:00", "06:00", "12:00", "18:00")
+
+
+def normalize_schedule_times(raw) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    allowed = set(SCHEDULE_TIME_SLOTS)
+    out: list[str] = []
+    for t in raw:
+        try:
+            h, m = map(int, str(t).split(":"))
+            assert 0 <= h <= 23 and 0 <= m <= 59
+            hhmm = f"{h:02d}:{m:02d}"
+        except Exception:
+            continue
+        if hhmm in allowed and hhmm not in out:
+            out.append(hhmm)
+    out.sort()
+    return out
 
 
 def normalize_auto_refresh_platforms(raw) -> list[str]:
@@ -19,8 +40,8 @@ def normalize_auto_refresh_platforms(raw) -> list[str]:
     return out
 
 
-def normalize_auto_refresh_profile_ids(raw) -> list:
-    """Список int id профилей и/или строки ``none`` (аккаунты без профиля)."""
+def _normalize_id_list(raw) -> list:
+    """Список int id и/или строки ``none``."""
     if not isinstance(raw, list):
         return []
     out: list = []
@@ -36,63 +57,45 @@ def normalize_auto_refresh_profile_ids(raw) -> list:
         if n not in out:
             out.append(n)
     return out
+
+
+def normalize_auto_refresh_profile_ids(raw) -> list:
+    """Список int id профилей и/или строки ``none`` (аккаунты без профиля)."""
+    return _normalize_id_list(raw)
 
 
 def normalize_auto_refresh_group_ids(raw) -> list:
     """Список int id групп и/или строки ``none`` (аккаунты без группы)."""
-    if not isinstance(raw, list):
-        return []
-    out: list = []
-    for item in raw:
-        if str(item).strip().lower() == "none":
-            if "none" not in out:
-                out.append("none")
-            continue
-        try:
-            n = int(item)
-        except (TypeError, ValueError):
-            continue
-        if n not in out:
-            out.append(n)
-    return out
+    return _normalize_id_list(raw)
 
 
 def normalize_auto_refresh_country_ids(raw) -> list:
     """Список int id стран и/или строки ``none`` (аккаунты без страны)."""
-    if not isinstance(raw, list):
-        return []
-    out: list = []
-    for item in raw:
-        if str(item).strip().lower() == "none":
-            if "none" not in out:
-                out.append("none")
-            continue
-        try:
-            n = int(item)
-        except (TypeError, ValueError):
-            continue
-        if n not in out:
-            out.append(n)
-    return out
+    return _normalize_id_list(raw)
 
 
 def normalize_auto_refresh_owner_ids(raw) -> list:
     """Список int id владельцев и/или строки ``none`` (аккаунты без владельца)."""
-    if not isinstance(raw, list):
-        return []
-    out: list = []
-    for item in raw:
-        if str(item).strip().lower() == "none":
-            if "none" not in out:
-                out.append("none")
-            continue
-        try:
-            n = int(item)
-        except (TypeError, ValueError):
-            continue
-        if n not in out:
-            out.append(n)
-    return out
+    return _normalize_id_list(raw)
+
+
+def normalize_auto_refresh_domain_ids(raw) -> list:
+    """Список int id доменов и/или строки ``none`` (аккаунты без домена)."""
+    return _normalize_id_list(raw)
+
+
+def _apply_id_scope(qs, ids, field: str):
+    if not ids:
+        return qs
+    clause = Q()
+    int_ids = [x for x in ids if isinstance(x, int)]
+    if int_ids:
+        clause |= Q(**{f"{field}__in": int_ids})
+    if "none" in ids:
+        clause |= Q(**{f"{field}__isnull": True})
+    if clause:
+        qs = qs.filter(clause)
+    return qs
 
 
 def apply_auto_refresh_scope(qs, cfg):
@@ -106,55 +109,29 @@ def apply_auto_refresh_scope(qs, cfg):
     if platforms:
         qs = qs.filter(platform__in=platforms)
 
-    profile_ids = normalize_auto_refresh_profile_ids(
-        getattr(cfg, "auto_refresh_profile_ids", None) or [],
+    qs = _apply_id_scope(
+        qs,
+        normalize_auto_refresh_profile_ids(getattr(cfg, "auto_refresh_profile_ids", None) or []),
+        "profile_id",
     )
-    if profile_ids:
-        clause = Q()
-        int_ids = [x for x in profile_ids if isinstance(x, int)]
-        if int_ids:
-            clause |= Q(profile_id__in=int_ids)
-        if "none" in profile_ids:
-            clause |= Q(profile__isnull=True)
-        if clause:
-            qs = qs.filter(clause)
-
-    owner_ids = normalize_auto_refresh_owner_ids(
-        getattr(cfg, "auto_refresh_owner_ids", None) or [],
+    qs = _apply_id_scope(
+        qs,
+        normalize_auto_refresh_owner_ids(getattr(cfg, "auto_refresh_owner_ids", None) or []),
+        "owner_id",
     )
-    if owner_ids:
-        clause = Q()
-        int_ids = [x for x in owner_ids if isinstance(x, int)]
-        if int_ids:
-            clause |= Q(owner_id__in=int_ids)
-        if "none" in owner_ids:
-            clause |= Q(owner__isnull=True)
-        if clause:
-            qs = qs.filter(clause)
-
-    group_ids = normalize_auto_refresh_group_ids(
-        getattr(cfg, "auto_refresh_group_ids", None) or [],
+    qs = _apply_id_scope(
+        qs,
+        normalize_auto_refresh_group_ids(getattr(cfg, "auto_refresh_group_ids", None) or []),
+        "group_id",
     )
-    if group_ids:
-        clause = Q()
-        int_ids = [x for x in group_ids if isinstance(x, int)]
-        if int_ids:
-            clause |= Q(group_id__in=int_ids)
-        if "none" in group_ids:
-            clause |= Q(group__isnull=True)
-        if clause:
-            qs = qs.filter(clause)
-
-    country_ids = normalize_auto_refresh_country_ids(
-        getattr(cfg, "auto_refresh_country_ids", None) or [],
+    qs = _apply_id_scope(
+        qs,
+        normalize_auto_refresh_country_ids(getattr(cfg, "auto_refresh_country_ids", None) or []),
+        "country_id",
     )
-    if country_ids:
-        clause = Q()
-        int_ids = [x for x in country_ids if isinstance(x, int)]
-        if int_ids:
-            clause |= Q(country_id__in=int_ids)
-        if "none" in country_ids:
-            clause |= Q(country__isnull=True)
-        if clause:
-            qs = qs.filter(clause)
+    qs = _apply_id_scope(
+        qs,
+        normalize_auto_refresh_domain_ids(getattr(cfg, "auto_refresh_domain_ids", None) or []),
+        "domain_id",
+    )
     return qs

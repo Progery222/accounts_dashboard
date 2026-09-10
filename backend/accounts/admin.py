@@ -11,6 +11,7 @@ from .models import (
     Country,
     ScrapeBackendConfig,
     ApifyRefreshJob,
+    ExternalApiKey,
 )
 
 
@@ -163,3 +164,12 @@ class ApifyRefreshJobAdmin(admin.ModelAdmin):
     search_fields = ["username_snapshot", "apify_run_id"]
     raw_id_fields = ["account"]
     readonly_fields = ["created_at", "updated_at"]
+
+
+@admin.register(ExternalApiKey)
+class ExternalApiKeyAdmin(admin.ModelAdmin):
+    list_display = ["name", "key_prefix", "domain", "is_active", "last_used_at", "created_at"]
+    list_filter = ["is_active", "domain"]
+    search_fields = ["name", "key_prefix"]
+    readonly_fields = ["key_prefix", "key_hash", "last_used_at", "created_at", "updated_at"]
+    raw_id_fields = ["domain"]

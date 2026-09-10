@@ -78,6 +78,8 @@ MIDDLEWARE = [
     # Django ответит 400 DisallowedHost.
     "config.health.HealthcheckMiddleware",
     "corsheaders.middleware.CorsMiddleware",
+    # UI API (/api/accounts|settings|…) — только Origin из allowlist; /api/v1/ не трогаем.
+    "config.cors_ui.UiApiOriginGateMiddleware",
     "django.middleware.security.SecurityMiddleware",
     # WhiteNoise отдаёт статику в проде (Django admin) без отдельного nginx.
     "whitenoise.middleware.WhiteNoiseMiddleware",
@@ -235,23 +237,34 @@ _ar_prewarm = _optional_env_bool("ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT")
 ACCOUNTS_AUTOREFRESH_PREWARM_PLAYWRIGHT = True if _ar_prewarm is None else _ar_prewarm
 
 # CORS / CSRF
+# UI API доступен браузеру только с Origin из allowlist (+ middleware UiApiOriginGate).
+# Внешним сервисам — /api/v1/ с Bearer (Origin не обязателен).
 _extra_origins = [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:5174",
+    "http://127.0.0.1:5173",
     "http://127.0.0.1:5174",
     "http://localhost:5180",
     "http://127.0.0.1:5180",
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    # Прод SPA (same-origin через nginx тоже шлёт Origin)
+    "https://dashboard-new.atom-farm.com",
 ] + _extra_origins
-CORS_ALLOW_ALL_ORIGINS = DEBUG
-# При DEBUG=False список выше не покрывает эфемерные Quick Tunnel. Если фронт и API
-# на разных *.trycloudflare.com (или localStorage new_frontend_api_base на другой
-# origin), без regex браузер режет CORS. Один туннель с path /api → :8000 — same-origin, regex не мешает.
+# Даже при DEBUG не открываем всем origin'ам — иначе любой сайт может бить в UI API.
+CORS_ALLOW_ALL_ORIGINS = False
+# Эфемерные туннели — только явно (CORS_ALLOW_EPHEMERAL_TUNNELS=1).
 CORS_ALLOWED_ORIGIN_REGEXES = [
-    r"^https://[a-z0-9-]+\.trycloudflare\.com$",
-    r"^https://[a-z0-9-]+\.loca\.lt$",
+    r"^https://[a-z0-9-]+\.atom-farm\.com$",
 ]
+if os.getenv("CORS_ALLOW_EPHEMERAL_TUNNELS", "").strip().lower() in ("1", "true", "yes", "on"):
+    CORS_ALLOWED_ORIGIN_REGEXES.extend(
+        [
+            r"^https://[a-z0-9-]+\.trycloudflare\.com$",
+            r"^https://[a-z0-9-]+\.loca\.lt$",
+        ]
+    )
 # Фронт шлёт домен-арендатора заголовком. Он нестандартный, поэтому без явного
 # разрешения браузер зарубит preflight, и с dev-статики (:5174) не пройдёт
 # ни один запрос.
