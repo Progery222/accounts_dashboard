@@ -4050,20 +4050,29 @@ function vcShape(s) { return s.replace(/\d/g, '#'); }
 function isDigit(ch) { return ch >= '0' && ch <= '9'; }
 
 function vcSet(el, s) {
+  const nextNum = +s.replace(/\D/g, '');
+  const prevNum = +(el.dataset.vcNum === undefined ? NaN : el.dataset.vcNum);
+  el.dataset.vcNum = nextNum;
   const odo = el.firstElementChild;
   if (!odo || !odo.classList || !odo.classList.contains('odo') || odo.dataset.shape !== vcShape(s)) {
     vcBuild(el, s);
     return;
   }
-  const cells = odo.children;
-  // Если меняется сразу много разрядов — это не тик счётчика, а скачок
-  // (первая подмена числа из базы на живое). Крутить всё разом некрасиво:
-  // проще переставить без анимации.
-  let changed = 0;
-  for (let i = 0; i < s.length; i++) {
-    if (isDigit(s[i]) && (+cells[i].dataset.i) % 10 !== +s[i]) changed++;
+  // Скачок — это не тик счётчика, а подмена числа: первая замена значения из
+  // базы на живое или новые якоря в 10:00. Крутить его незачем.
+  //
+  // Раньше скачок узнавали по числу изменившихся разрядов (> 3). Мерка
+  // оказалась негодной: у просмотров обычный шаг тика — это и есть 4–5
+  // разрядов (20 161 479 -> 20 174 658), поэтому просмотры пересобирались
+  // на каждом тике и не крутились вообще, а лайки с их «+1» крутились
+  // нормально. Считаем не разряды, а величину: тик прибавляет малую долю
+  // числа, подмена меняет его заметно или вовсе уводит вниз.
+  const step = nextNum - prevNum;
+  if (!(isFinite(prevNum) && step >= 0 && step <= Math.max(1000, prevNum * 0.01))) {
+    vcBuild(el, s);
+    return;
   }
-  if (changed > 3) { vcBuild(el, s); return; }
+  const cells = odo.children;
   let order = 0;
   for (let i = 0; i < s.length; i++) {
     if (!isDigit(s[i])) continue;
