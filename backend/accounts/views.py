@@ -367,7 +367,9 @@ def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> N
     prev_views = int(stats_before.get("view_count", 0) or 0)
     if account.platform == Platform.FACEBOOK:
         account.view_count = max(prev_views, new_views)
-    elif account.platform == Platform.RUMBLE:
+    elif account.platform in (Platform.RUMBLE, Platform.YOUTUBE):
+        # YouTube/Rumble: в шапке канала есть полный viewCount; сумма последних
+        # постов из RSS/плейлиста его занижает — берём максимум из трёх.
         scraped_views = int(account.view_count or 0)
         account.view_count = max(prev_views, new_views, scraped_views)
     elif account.platform in (Platform.INSTAGRAM, Platform.THREADS):

@@ -31,7 +31,11 @@ def _youtube_profile_url(username: str) -> str:
 def _parse_count(text: str) -> int:
     if not text:
         return 0
-    text = re.split(r'\s+(?:subscriber|member|follower|video|post|подписч)', text, flags=re.I)[0].strip()
+    text = re.split(
+        r'\s+(?:subscriber|member|follower|video|post|view|подписч|просмотр)',
+        text,
+        flags=re.I,
+    )[0].strip()
     m = re.match(r'^([\d]+(?:[.,][\d]+)?)\s*([KMBT])', text.replace(' ', '').upper())
     if m:
         try:
@@ -98,6 +102,8 @@ def _fetch_youtube_api(username: str, api_key: str) -> dict:
         )
         follower_count = int(stats.get("subscriberCount", 0))
         video_count = int(stats.get("videoCount", 0))
+        # Итог канала (statistics.viewCount), не сумма последних роликов из плейлиста.
+        view_count = int(stats.get("viewCount", 0) or 0)
 
         # 2. Fetch recent videos from the uploads playlist
         uploads_playlist = "UU" + channel_id[2:]  # UC… → UU…
@@ -110,6 +116,7 @@ def _fetch_youtube_api(username: str, api_key: str) -> dict:
         "follower_count": follower_count,
         "following_count": 0,
         "like_count": 0,
+        "view_count": view_count,
         "post_count": video_count or len(videos),
         "_posts": videos,
     }
@@ -186,21 +193,40 @@ def _fetch_youtube_scrape(username: str) -> dict:
             raise ValueError(f"YouTube @{username} не найден")
         r.raise_for_status()
         html = r.text
+        # Полные просмотры канала и иногда подписчики живут на /about,
+        # а не на главной вкладке канала.
+        about_html = ""
+        try:
+            ra = client.get(url.rstrip("/") + "/about")
+            if ra.status_code == 200:
+                about_html = ra.text or ""
+        except Exception:
+            about_html = ""
 
     title_m = re.search(r'<meta property="og:title" content="([^"]+)"', html)
     display_name = title_m.group(1).strip() if title_m else username
 
+    blob = html + "\n" + about_html
     sub_m = (
-        re.search(r'"content"\s*:\s*"([\d.,]+[KkMmBbTt]?)\s+subscribers?"', html) or
-        re.search(r'"subscriberCountText":\{.*?"simpleText":"([^"]+)"', html, re.DOTALL) or
-        re.search(r'"subscriberCountText":\{.*?"text":"([\d][^"]*)"', html, re.DOTALL)
+        re.search(r'"content"\s*:\s*"([\d.,]+[KkMmBbTt]?)\s+subscribers?"', blob) or
+        re.search(r'"subscriberCountText"\s*:\s*"([^"]+)"', blob) or
+        re.search(r'"subscriberCountText":\{.*?"simpleText":"([^"]+)"', blob, re.DOTALL) or
+        re.search(r'"subscriberCountText":\{.*?"text":"([\d][^"]*)"', blob, re.DOTALL)
     )
     follower_count = _parse_count(sub_m.group(1)) if sub_m else 0
 
+    # Полные просмотры канала (About / header), а не сумма последних видео из RSS.
+    view_m = (
+        re.search(r'"viewCountText"\s*:\s*"([^"]+)"', blob) or
+        re.search(r'"viewCountText"\s*:\s*\{.*?"simpleText"\s*:\s*"([^"]+)"', blob, re.DOTALL) or
+        re.search(r'"viewCountText"\s*:\s*\{.*?"content"\s*:\s*"([^"]+)"', blob, re.DOTALL)
+    )
+    view_count = _parse_count(view_m.group(1)) if view_m else 0
+
     vid_m = (
-        re.search(r'"content"\s*:\s*"(\d[\d,]*)\s+videos?"', html) or
-        re.search(r'"videosCountText":\{.*?"simpleText":"([^"]+)"', html, re.DOTALL) or
-        re.search(r'"videoCountText":\{.*?"runs":\[.*?\{"text":"(\d[^"]*)"', html, re.DOTALL)
+        re.search(r'"content"\s*:\s*"(\d[\d,]*)\s+videos?"', blob) or
+        re.search(r'"videosCountText":\{.*?"simpleText":"([^"]+)"', blob, re.DOTALL) or
+        re.search(r'"videoCountText":\{.*?"runs":\[.*?\{"text":"(\d[^"]*)"', blob, re.DOTALL)
     )
     explicit_video_count = _parse_count(vid_m.group(1)) if vid_m else 0
 
@@ -216,11 +242,11 @@ def _fetch_youtube_scrape(username: str) -> dict:
     bio = bio_m.group(1).strip() if bio_m else ""
 
     cid_m = (
-        re.search(r'"channelId":"(UC[^"]+)"', html) or
-        re.search(r'"externalChannelId":"(UC[^"]+)"', html) or
-        re.search(r'"browse_id","value":"(UC[^"]+)"', html) or
-        re.search(r'"browseId":"(UC[^"]+)"', html) or
-        re.search(r'/channel/(UC[a-zA-Z0-9_-]{22})', html)
+        re.search(r'"channelId":"(UC[^"]+)"', blob) or
+        re.search(r'"externalChannelId":"(UC[^"]+)"', blob) or
+        re.search(r'"browse_id","value":"(UC[^"]+)"', blob) or
+        re.search(r'"browseId":"(UC[^"]+)"', blob) or
+        re.search(r'/channel/(UC[a-zA-Z0-9_-]{22})', blob)
     )
     channel_id = cid_m.group(1) if cid_m else None
     videos = _fetch_youtube_rss(channel_id) if channel_id else []
@@ -232,6 +258,7 @@ def _fetch_youtube_scrape(username: str) -> dict:
         "follower_count": follower_count,
         "following_count": 0,
         "like_count": 0,
+        "view_count": view_count,
         "post_count": explicit_video_count or len(videos),
         "_posts": videos,
     }
