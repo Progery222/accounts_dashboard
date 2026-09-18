@@ -1266,14 +1266,14 @@ doc = ["sphinx"]
 
 [[package]]
 name = "tiktok-captcha-solver"
-version = "0.8.6"
+version = "0.8.9"
 description = "This package integrates with Selenium or Playwright to solve any TikTok captcha in one line of code."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "tiktok_captcha_solver-0.8.6-py3-none-any.whl", hash = "sha256:11bb7d93d71c3a7957ecd939a97f5740fbc56113e269b07e0a13a1f14c0d0732"},
-    {file = "tiktok_captcha_solver-0.8.6.tar.gz", hash = "sha256:9c8cf8ac059b5190ceedd13beea3596b10d5ff7788e381017fd2cf6dcf378658"},
+    {file = "tiktok_captcha_solver-0.8.9-py3-none-any.whl", hash = "sha256:dbd68f352bc6910f7625fb7fa2336bc6d8f1234d4c65f82caaeaa4a7dac70b20"},
+    {file = "tiktok_captcha_solver-0.8.9.tar.gz", hash = "sha256:f1aa48b2d62779bb86b7f891eb8cb2da009389272d6f9f803b95bbd014593e26"},
 ]
 
 [package.dependencies]
@@ -1662,4 +1662,4 @@ h11 = ">=0.16.0,<1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "da342ad56e0599e335e83eee9574d0a10296f8a610226934bcab47fefc1887b0"
+content-hash = "34a05b59e13ff3be549fc7a42edad0eaba4863b198042fe56cfd6195c9db025d"

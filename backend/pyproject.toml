@@ -19,7 +19,7 @@ apscheduler = ">=3.10"
 gunicorn = ">=22.0"
 dj-database-url = ">=2.2"
 whitenoise = ">=6.7"
-tiktok-captcha-solver = "^0.8.6"
+tiktok-captcha-solver = "^0.8.9"
 patchright = "^1.62.3"
 curl-cffi = "^0.16.3"
 
