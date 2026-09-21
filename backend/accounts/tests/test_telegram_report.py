@@ -4,10 +4,10 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from accounts.models import Account, AccountSnapshot, Owner, Platform, Profile
+from accounts.models import Account, AccountSnapshot, Domain, Platform
 from accounts.telegram_report import (
     build_auto_refresh_telegram_text,
-    collect_profile_owner_stats,
+    collect_domain_stats,
     should_send_auto_refresh_telegram,
 )
 
@@ -27,8 +27,7 @@ class TelegramTextTests(SimpleTestCase):
             started_at=started,
             finished_at=finished,
             total_accounts=4,
-            profile_stats=[],
-            owner_stats=[],
+            domain_stats=[],
         )
         self.assertIn("Успешно (данные изменились): <b>1</b>", text)
         self.assertIn("Успешно (без изменений): <b>1</b>", text)
@@ -41,18 +40,17 @@ class TelegramTextTests(SimpleTestCase):
             started_at=timezone.now(),
             finished_at=timezone.now(),
             total_accounts=0,
-            profile_stats=[],
-            owner_stats=[],
+            domain_stats=[],
         )
         self.assertIn("Нет аккаунтов для обновления", text)
 
-    def test_profile_owner_blocks_alphabet_and_metrics(self):
+    def test_domain_blocks_alphabet_and_metrics(self):
         text = build_auto_refresh_telegram_text(
             rows=[],
             started_at=timezone.now(),
             finished_at=timezone.now(),
             total_accounts=1,
-            profile_stats=[
+            domain_stats=[
                 ("Music", {
                     "views": 1000, "likes": 10, "followers": 5, "posts": 2,
                     "views_d": 100, "likes_d": 1, "followers_d": 0, "posts_d": 1,
@@ -62,19 +60,10 @@ class TelegramTextTests(SimpleTestCase):
                     "views_d": 50, "likes_d": 2, "followers_d": 1, "posts_d": 0,
                 }),
             ],
-            owner_stats=[
-                ("Александр", {
-                    "views": 500, "likes": 5, "followers": 2, "posts": 1,
-                    "views_d": 10, "likes_d": 0, "followers_d": 0, "posts_d": 0,
-                }),
-                ("Без пользователя", {
-                    "views": 100, "likes": 1, "followers": 1, "posts": 1,
-                    "views_d": 0, "likes_d": 0, "followers_d": 0, "posts_d": 0,
-                }),
-            ],
         )
-        self.assertIn("📁 <b>Профили</b>", text)
-        self.assertIn("👤 <b>Пользователи</b>", text)
+        self.assertIn("🏷️ <b>Домены</b>", text)
+        self.assertNotIn("📁 <b>Профили</b>", text)
+        self.assertNotIn("👤 <b>Пользователи</b>", text)
         self.assertIn("• <b>Music</b>", text)
         self.assertIn("• <b>Отдел трафика</b>", text)
         self.assertIn("👁 Просмотры: <b>1 000</b>  <i>прирост +100</i>", text)
@@ -82,7 +71,6 @@ class TelegramTextTests(SimpleTestCase):
         self.assertIn("👥 Подписчики: <b>5</b>  <i>прирост 0</i>", text)
         self.assertIn("📝 Публикации: <b>2</b>  <i>прирост +1</i>", text)
         self.assertLess(text.index("• <b>Music</b>"), text.index("• <b>Отдел трафика</b>"))
-        self.assertLess(text.index("• <b>Александр</b>"), text.index("• <b>Без пользователя</b>"))
 
     def test_should_not_send_on_cancel(self):
         self.assertFalse(
@@ -114,14 +102,12 @@ class TelegramTextTests(SimpleTestCase):
 
 class TelegramStatsCollectTests(TestCase):
     def test_collect_sorted_with_deltas(self):
-        music = Profile.objects.create(name="Music")
-        traffic = Profile.objects.create(name="Отдел трафика")
-        alex = Owner.objects.create(name="Александр")
+        music = Domain.objects.create(slug="music", name="Music")
+        traffic = Domain.objects.create(slug="traffic", name="Отдел трафика")
         a1 = Account.objects.create(
             username="u1",
             platform=Platform.TIKTOK,
-            profile=music,
-            owner=alex,
+            domain=music,
             view_count=1100,
             like_count=11,
             follower_count=6,
@@ -130,9 +116,17 @@ class TelegramStatsCollectTests(TestCase):
         Account.objects.create(
             username="u2",
             platform=Platform.TIKTOK,
-            profile=traffic,
+            domain=traffic,
             view_count=200,
             like_count=2,
+            follower_count=1,
+            post_count=1,
+        )
+        Account.objects.create(
+            username="u3",
+            platform=Platform.TIKTOK,
+            view_count=50,
+            like_count=1,
             follower_count=1,
             post_count=1,
         )
@@ -145,16 +139,13 @@ class TelegramStatsCollectTests(TestCase):
             follower_count=5,
             post_count=2,
         )
-        profiles, owners = collect_profile_owner_stats()
-        names = [n for n, _ in profiles]
-        self.assertEqual(names, ["Music", "Отдел трафика"])
-        music_st = dict(profiles)["Music"]
+        domains = collect_domain_stats()
+        names = [n for n, _ in domains]
+        self.assertEqual(names, ["Music", "Без домена", "Отдел трафика"])
+        music_st = dict(domains)["Music"]
         self.assertEqual(music_st["views"], 1100)
         self.assertEqual(music_st["views_d"], 100)
-        owner_names = [n for n, _ in owners]
-        self.assertIn("Александр", owner_names)
-        self.assertIn("Без пользователя", owner_names)
-        self.assertLess(owner_names.index("Александр"), owner_names.index("Без пользователя"))
+        self.assertIn("Без домена", names)
 
 
 class TelegramApiTests(TestCase):
@@ -173,36 +164,38 @@ class TelegramApiTests(TestCase):
             )
         self.assertEqual(r.status_code, 400)
 
+    @patch("accounts.telegram_report.send_telegram_document")
     @patch("accounts.telegram_report.send_telegram_message")
-    def test_send_report(self, mock_msg):
+    def test_send_report_text_only_no_csv(self, mock_msg, mock_doc):
         from accounts.telegram_report import send_auto_refresh_telegram_report
 
         cfg = MagicMock(
             auto_refresh_telegram_chat_ids=["99"],
             auto_refresh_telegram_chat_id="99",
         )
-        with patch("accounts.telegram_report.send_telegram_document"):
-            send_auto_refresh_telegram_report(
-                config=cfg,
-                text="hi",
-                csv_body="a;b\n1;2",
-                filename="t.csv",
-            )
+        send_auto_refresh_telegram_report(
+            config=cfg,
+            text="hi",
+            csv_body="a;b\n1;2",
+            filename="t.csv",
+        )
         mock_msg.assert_called_once()
+        mock_doc.assert_not_called()
 
+    @patch("accounts.telegram_report.send_telegram_document")
     @patch("accounts.telegram_report.send_telegram_message")
-    def test_send_report_multiple_chats(self, mock_msg):
+    def test_send_report_multiple_chats(self, mock_msg, mock_doc):
         from accounts.telegram_report import send_auto_refresh_telegram_report
 
         cfg = MagicMock(
             auto_refresh_telegram_chat_ids=["11", "22"],
             auto_refresh_telegram_chat_id="11",
         )
-        with patch("accounts.telegram_report.send_telegram_document"):
-            send_auto_refresh_telegram_report(
-                config=cfg,
-                text="hi",
-                csv_body="a;b\n1;2",
-                filename="t.csv",
-            )
+        send_auto_refresh_telegram_report(
+            config=cfg,
+            text="hi",
+            csv_body="a;b\n1;2",
+            filename="t.csv",
+        )
         self.assertEqual(mock_msg.call_count, 2)
+        mock_doc.assert_not_called()

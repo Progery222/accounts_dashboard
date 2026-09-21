@@ -1603,9 +1603,8 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
             except Exception as e:
                 print(f"[scheduled_refresh] CSV report build/save failed: {e}", file=sys.stderr)
 
-            if cfg.auto_refresh_telegram_enabled and csv_body:
+            if cfg.auto_refresh_telegram_enabled:
                 from .telegram_report import (
-                    auto_refresh_report_filename,
                     build_auto_refresh_telegram_text,
                     send_auto_refresh_telegram_report,
                     should_send_auto_refresh_telegram,
@@ -1630,8 +1629,6 @@ def _scheduled_refresh(*, source: str = "scheduler", fast_start: bool = False):
                         send_auto_refresh_telegram_report(
                             config=cfg,
                             text=text,
-                            csv_body=csv_body,
-                            filename=auto_refresh_report_filename(finished_at=finished),
                         )
                         state.last_telegram_error = ""
                         state.last_telegram_sent_at = finished

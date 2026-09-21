@@ -27,8 +27,7 @@ _CANCEL_MARKERS = (
     "остановка до обработки",
 )
 _FILENAME_SAFE = re.compile(r"[^\w.\-]+", re.UNICODE)
-_NO_PROFILE = "Без профиля"
-_NO_OWNER = "Без пользователя"
+_NO_DOMAIN = "Без домена"
 _METRIC_LABELS = (
     ("views", "👁", "Просмотры"),
     ("likes", "❤️", "Лайки"),
@@ -113,7 +112,7 @@ def _accounts_qs_for_telegram_stats(config=None):
     from .models import Account, AccountSnapshot
     from .views import _apply_visibility_filters
 
-    qs = Account.objects.select_related("profile", "owner")
+    qs = Account.objects.select_related("domain")
     include_archived = bool(getattr(config, "include_archived_accounts", False)) if config else False
     if not include_archived:
         qs = qs.filter(is_archived=False)
@@ -159,19 +158,17 @@ def _accounts_qs_for_telegram_stats(config=None):
     )
 
 
-def collect_profile_owner_stats(config=None) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]]:
+def collect_domain_stats(config=None) -> list[tuple[str, dict]]:
     """
-    Агрегаты «всего / прирост» по профилям и владельцам.
+    Агрегаты «всего / прирост» по доменам.
     Прирост — как на дашборде (опорный снимок за account_delta_period_days).
     """
     empty = {"views": 0, "likes": 0, "followers": 0, "posts": 0,
              "views_d": 0, "likes_d": 0, "followers_d": 0, "posts_d": 0}
-    by_profile: dict[str, dict] = defaultdict(lambda: dict(empty))
-    by_owner: dict[str, dict] = defaultdict(lambda: dict(empty))
+    by_domain: dict[str, dict] = defaultdict(lambda: dict(empty))
 
     for a in _accounts_qs_for_telegram_stats(config).iterator(chunk_size=500):
-        pname = (a.profile.name if a.profile_id else _NO_PROFILE).strip() or _NO_PROFILE
-        oname = (a.owner.name if a.owner_id else _NO_OWNER).strip() or _NO_OWNER
+        dname = (a.domain.name if a.domain_id else _NO_DOMAIN).strip() or _NO_DOMAIN
         cur = {
             "views": int(a.view_count or 0),
             "likes": int(a.like_count or 0),
@@ -184,15 +181,17 @@ def collect_profile_owner_stats(config=None) -> tuple[list[tuple[str, dict]], li
             "followers": int(getattr(a, "_prev_follower_count", 0) or 0),
             "posts": int(getattr(a, "_prev_post_count", 0) or 0),
         }
-        for bucket_name, bucket in ((pname, by_profile), (oname, by_owner)):
-            b = bucket[bucket_name]
-            for k, v in cur.items():
-                b[k] += v
-                b[f"{k}_d"] += v - prev[k]
+        b = by_domain[dname]
+        for k, v in cur.items():
+            b[k] += v
+            b[f"{k}_d"] += v - prev[k]
 
-    profiles = sorted(by_profile.items(), key=lambda x: x[0].casefold())
-    owners = sorted(by_owner.items(), key=lambda x: x[0].casefold())
-    return profiles, owners
+    return sorted(by_domain.items(), key=lambda x: x[0].casefold())
+
+
+def collect_profile_owner_stats(config=None) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]]:
+    """Устарело: оставлено для совместимости импортов/тестов. Используйте collect_domain_stats."""
+    return [], []
 
 
 def _format_group_stats_block(title: str, emoji: str, groups: list[tuple[str, dict]]) -> list[str]:
@@ -219,6 +218,7 @@ def build_auto_refresh_telegram_text(
     finished_at,
     total_accounts: int,
     config=None,
+    domain_stats: list[tuple[str, dict]] | None = None,
     profile_stats: list[tuple[str, dict]] | None = None,
     owner_stats: list[tuple[str, dict]] | None = None,
 ) -> str:
@@ -252,20 +252,18 @@ def build_auto_refresh_telegram_text(
         ]
     )
 
-    if profile_stats is None or owner_stats is None:
+    # profile_stats / owner_stats больше не используются в тексте; оставлены в сигнатуре
+    # только чтобы старые вызовы не падали.
+    _ = profile_stats
+    _ = owner_stats
+    if domain_stats is None:
         try:
-            collected_profiles, collected_owners = collect_profile_owner_stats(config)
-            if profile_stats is None:
-                profile_stats = collected_profiles
-            if owner_stats is None:
-                owner_stats = collected_owners
+            domain_stats = collect_domain_stats(config)
         except Exception:
-            logger.exception("telegram_report.collect_profile_owner_stats_failed")
-            profile_stats = profile_stats or []
-            owner_stats = owner_stats or []
+            logger.exception("telegram_report.collect_domain_stats_failed")
+            domain_stats = []
 
-    lines.extend(_format_group_stats_block("Профили", "📁", profile_stats or []))
-    lines.extend(_format_group_stats_block("Пользователи", "👤", owner_stats or []))
+    lines.extend(_format_group_stats_block("Домены", "🏷️", domain_stats or []))
     return "\n".join(lines)
 
 
@@ -364,9 +362,10 @@ def send_auto_refresh_telegram_report(
     *,
     config,
     text: str,
-    csv_body: str,
-    filename: str,
+    csv_body: str = "",
+    filename: str = "",
 ) -> None:
+    """Шлёт только текстовый отчёт. CSV больше не прикрепляем."""
     token = resolve_telegram_bot_token()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в окружении")
@@ -376,16 +375,13 @@ def send_auto_refresh_telegram_report(
             "Chat ID не задан (добавьте получателей в настройках расписания "
             "или TELEGRAM_AUTO_REFRESH_CHAT_ID в .env)",
         )
+    # csv_body / filename оставлены в сигнатуре для совместимости вызовов.
+    _ = csv_body
+    _ = filename
     errors: list[str] = []
     for chat_id in chat_ids:
         try:
             send_telegram_message(token=token, chat_id=chat_id, text=text)
-            send_telegram_document(
-                token=token,
-                chat_id=chat_id,
-                filename=filename,
-                content=csv_body,
-            )
         except Exception as exc:
             errors.append(f"{chat_id}: {exc}")
     if errors:
