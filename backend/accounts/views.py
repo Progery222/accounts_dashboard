@@ -73,8 +73,8 @@ logger = logging.getLogger(__name__)
 
 
 def _is_refresh_stats_rejection(exc: BaseException) -> bool:
-    """╨Ю╤В╨║╨░╨╖ ╤Б╨╛╤Е╤А╨░╨╜╨╕╤В╤М ╨┐╨╛╨┤╨╛╨╖╤А╨╕╤В╨╡╨╗╤М╨╜╤Л╨╡ ╨╜╤Г╨╗╨╕ тАФ ╨╜╨╡ ╨┐╤Г╤В╨░╤В╤М ╤Б ╤Г╨┤╨░╨╗╤С╨╜╨╜╤Л╨╝ ╨┐╤А╨╛╤Д╨╕╨╗╨╡╨╝ ╨╜╨░ ╨┐╨╗╨╛╤Й╨░╨┤╨║╨╡."""
-    return "╨Ю╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨╜╨╡ ╨┐╤А╨╕╨╝╨╡╨╜╨╡╨╜╨╛" in str(exc or "")
+    """Отказ сохранить подозрительные нули — не путать с удалённым профилем на площадке."""
+    return "Обновление не применено" in str(exc or "")
 
 
 def _mark_profile_unavailable_if_applicable(account: Account, exc: BaseException) -> None:
@@ -113,7 +113,7 @@ def _extract_hashtags(text: str) -> list[str]:
 
 
 def _account_delta_period_days() -> int:
-    """╨Ф╨╡╨╗╤М╤В╤Л ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓: ╨╛╨┐╨╛╤А╨╜╤Л╨╣ ╤Б╨╜╨╕╨╝╨╛╨║ тАФ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╕╨╣ ╤Б ╨┤╨░╤В╨╛╨╣ тЙд ╤Б╨╡╨│╨╛╨┤╨╜╤П тИТ N ╨┤╨╜╨╡╨╣ (1, 7 ╨╕╨╗╨╕ 30)."""
+    """Дельты аккаунтов: опорный снимок — последний с датой ≤ сегодня − N дней (1, 7 или 30)."""
     try:
         cfg = RefreshScheduleConfig.get()
         d = int(getattr(cfg, "account_delta_period_days", 1) or 1)
@@ -124,8 +124,8 @@ def _account_delta_period_days() -> int:
 
 def _effective_account_delta_period_days(request) -> int:
     """
-    ╨Ф╨╗╤П GET: ╨╝╨╛╨╢╨╜╨╛ ╨┐╨╡╤А╨╡╨┤╨░╤В╤М delta_period_days=1|7|30 тАФ ╨╜╨╡ ╨┐╨╕╤И╨╡╤В ╨▓ ╨С╨Ф, ╤Г╨┤╨╛╨▒╨╜╨╛ ╨┤╨╗╤П ╨┐╤А╨╡╤Д╨╡╤В╤З╨░ UI.
-    ╨Ф╨╗╤П ╨╛╤Б╤В╨░╨╗╤М╨╜╤Л╤Е ╨╝╨╡╤В╨╛╨┤╨╛╨▓ ╨╕ ╨┐╤А╨╕ ╨╛╤В╤Б╤Г╤В╤Б╤В╨▓╨╕╨╕/╨╜╨╡╨▓╨░╨╗╨╕╨┤╨╜╨╛╨╝ ╨┐╨░╤А╨░╨╝╨╡╤В╤А╨╡ тАФ ╨╖╨╜╨░╤З╨╡╨╜╨╕╨╡ ╨╕╨╖ RefreshScheduleConfig.
+    Для GET: можно передать delta_period_days=1|7|30 — не пишет в БД, удобно для префетча UI.
+    Для остальных методов и при отсутствии/невалидном параметре — значение из RefreshScheduleConfig.
     """
     if getattr(request, "method", "") != "GET":
         return _account_delta_period_days()
@@ -143,7 +143,7 @@ def _scrape(account: Account) -> dict:
     """Fetch fresh data for any platform. Returns account fields + '_posts' list."""
     from .refresh_cancel import RefreshCancelledError, raise_if_refresh_cancel_requested
 
-    # ╨Э╨╡ ╨┤╨╡╤А╨╢╨╕╨╝ ╤Б╨╛╨╡╨┤╨╕╨╜╨╡╨╜╨╕╨╡ ╤Б ╨С╨Ф ╨╛╤В╨║╤А╤Л╤В╤Л╨╝ ╨▓╨╛ ╨▓╤А╨╡╨╝╤П Playwright/HTTP (╨╝╨╕╨╜╤Г╤В╤Л).
+    # Не держим соединение с БД открытым во время Playwright/HTTP (минуты).
     release_db_for_long_task()
     raise_if_refresh_cancel_requested()
     username = account.username
@@ -153,8 +153,8 @@ def _scrape(account: Account) -> dict:
 
     if use_apify_for_platform(platform):
         raise ValueError(
-            f"╨Ф╨╗╤П {platform} ╨▓ ╨╜╨░╤Б╤В╤А╨╛╨╣╨║╨░╤Е ╨▓╤Л╨▒╤А╨░╨╜ Apify тАФ ╨╕╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╣╤В╨╡ ╤Б╨▒╨╛╤А ╤З╨╡╤А╨╡╨╖ Apify, "
-            "╨░ ╨╜╨╡ Playwright/HTTP"
+            f"Для {platform} в настройках выбран Apify — используйте сбор через Apify, "
+            "а не Playwright/HTTP"
         )
 
     if platform == Platform.TIKTOK:
@@ -186,11 +186,11 @@ def _scrape(account: Account) -> dict:
             "like_count": raw["like_count"],
             "post_count": raw["video_count"],
             "_posts": posts,
-            # ╨Я╤А╨╛╨▒╤А╨░╤Б╤Л╨▓╨░╨╡╨╝ ╤Д╨╗╨░╨│ ╨░╨▓╤В╨╛╤А╨╕╤В╨╡╤В╨╜╨╛╤Б╤В╨╕ ╤Б╨┐╨╕╤Б╨║╨░ ╨┐╨╛╤Б╤В╨╛╨▓ ╨╕╨╖ service.py.
-            # ╨Ф╨╗╤П TikTok ╨┐╤Г╤Б╤В╨╛╨╣ `videos` ╨┐╨╛╤З╤В╨╕ ╨▓╤Б╨╡╨│╨┤╨░ тАФ ╨░╨╜╤В╨╕╨▒╨╛╤В/╨▓╤А╨╡╨╝╨╡╨╜╨╜╨░╤П ╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨║╨░
-            # API, ╨░ ╨╜╨╡ ╤А╨╡╨░╨╗╤М╨╜╨╛╨╡ ╤Г╨┤╨░╨╗╨╡╨╜╨╕╨╡ ╨▓╤Б╨╡╤Е ╨┐╨╛╤Б╤В╨╛╨▓ ╨┐╤А╨╛╤Д╨╕╨╗╤П. ╨Т ╤Н╤В╨╛╨╝ ╤Б╨╗╤Г╤З╨░╨╡
-            # service.py ╨▓╤Л╤Б╤В╨░╨▓╨╗╤П╨╡╤В _posts_authoritative=False, ╨╕ _apply_refresh
-            # ╤Б╨╛╤Е╤А╨░╨╜╤П╨╡╤В ╤Г╨╢╨╡ ╤Б╨╛╤Е╤А╨░╨╜╤С╨╜╨╜╤Л╨╡ ╨▓ ╨С╨Ф ╨┐╨╛╤Б╤В╤Л ╨▓╨╝╨╡╤Б╤В╨╛ ╨╕╤Е ╤Г╨┤╨░╨╗╨╡╨╜╨╕╤П.
+            # Пробрасываем флаг авторитетности списка постов из service.py.
+            # Для TikTok пустой `videos` почти всегда — антибот/временная блокировка
+            # API, а не реальное удаление всех постов профиля. В этом случае
+            # service.py выставляет _posts_authoritative=False, и _apply_refresh
+            # сохраняет уже сохранённые в БД посты вместо их удаления.
             "_posts_authoritative": raw.get("_posts_authoritative", bool(posts)),
         }
         if raw.get("_partial"):
@@ -229,11 +229,11 @@ def _scrape(account: Account) -> dict:
         from platforms.reddit.scraper import fetch_reddit_subreddit
         return fetch_reddit_subreddit(username)
 
-    raise ValueError(f"╨Ю╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨┤╨╗╤П ┬л{platform}┬╗ ╨╜╨╡ ╨┐╨╛╨┤╨┤╨╡╤А╨╢╨╕╨▓╨░╨╡╤В╤Б╤П.")
+    raise ValueError(f"Обновление для «{platform}» не поддерживается.")
 
 
 def _mark_unseen_posts_missing(account: Account, seen_external_ids: set[str]) -> None:
-    """╨Я╨╛╨╝╨╡╤В╨╕╤В╤М ╨┐╨╛╤Б╤В╤Л, ╨╛╤В╤Б╤Г╤В╤Б╤В╨▓╤Г╤О╤Й╨╕╨╡ ╨▓ ╤Г╤Б╨┐╨╡╤И╨╜╨╛╨╝ ╤Б╤К╤С╨╝╨╡ (╨╛╤А╨░╨╜╨╢╨╡╨▓╨░╤П ╨╗╨░╨╝╨┐╨╛╤З╨║╨░ ╨▓ UI)."""
+    """Пометить посты, отсутствующие в успешном съёме (оранжевая лампочка в UI)."""
     now = timezone.now()
     account.posts.exclude(external_id__in=seen_external_ids).filter(
         missing_from_scrape_at__isnull=True,
@@ -287,23 +287,23 @@ def _sync_posts(
                 setattr(post, field, pd[field])
         # Update numeric fields with resilient coercion + fallback aliases
         parsed_views = _to_int(pd.get("view_count", pd.get("play_count", 0)))
-        # Threads / Instagram: 0 ╤Б╨╛ ╤Б╨║╤А╨░╨┐╨░ ╤З╨░╤Б╤В╨╛ ┬л╨╜╨╡╤В ╨▓ DOM / ╨╜╨╡ ╤Г╤Б╨┐╨╡╨╗╨╕┬╗, ╨░ ╨╜╨╡ ╤А╨╡╨░╨╗╤М╨╜╤Л╨╡ 0 ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨╛╨▓.
-        # ╨Э╨╡ ╨╖╨░╤В╨╕╤А╨░╨╡╨╝ ╤Б╨╛╤Е╤А╨░╨╜╤С╨╜╨╜╤Л╨╡ ╨╖╨╜╨░╤З╨╡╨╜╨╕╤П тАФ ╨╕╨╜╨░╤З╨╡ ╤Б╤Г╨╝╨╝╨░ ╨┐╨╛ ╨┐╨╛╤Б╤В╨░╨╝ ╨╕ ╨┤╨╡╨╗╤М╤В╤Л ╨▓ UI ╨┐╨░╨┤╨░╤О╤В ╨▓ ╨╝╨╕╨╜╤Г╤Б.
+        # Threads / Instagram: 0 со скрапа часто «нет в DOM / не успели», а не реальные 0 просмотров.
+        # Не затираем сохранённые значения — иначе сумма по постам и дельты в UI падают в минус.
         if is_threads or is_instagram or is_rumble:
             if parsed_views > 0:
                 prev_v = int(post.view_count or 0)
                 post.view_count = max(prev_v, parsed_views)
-            # parsed_views == 0 тАФ ╨╜╨╡ ╤В╤А╨╛╨│╨░╨╡╨╝ post.view_count
+            # parsed_views == 0 — не трогаем post.view_count
         else:
             post.view_count = parsed_views
         parsed_like_count = _to_int(pd.get("like_count", pd.get("digg_count", 0)))
-        # Instagram: 0 ╤Б╨╛ ╤Б╨║╤А╨░╨┐╨░ = ┬л╨┤╨░╨╜╨╜╤Л╤Е ╨╜╨╡╤В┬╗, ╨╜╨╡ ╤Г╨╝╨╡╨╜╤М╤И╨░╨╡╨╝ ╤Б╨╛╤Е╤А╨░╨╜╤С╨╜╨╜╤Л╨╡ ╨╗╨░╨╣╨║╨╕.
-        # ╨Я╨╛╨╗╨╛╨╢╨╕╤В╨╡╨╗╤М╨╜╨╛╨╡ ╨╖╨╜╨░╤З╨╡╨╜╨╕╨╡ ╤Б╤З╨╕╤В╨░╨╡╨╝ ╨▓╨░╨╗╨╕╨┤╨╜╤Л╨╝ ╨╕ ╨┐╤А╨╕╨╝╨╡╨╜╤П╨╡╨╝ ╤В╨╛╨╗╤М╨║╨╛ ╨╜╨╡ ╨╜╨╕╨╢╨╡ ╤Г╨╢╨╡ ╤Б╨╛╤Е╤А╨░╨╜╤С╨╜╨╜╨╛╨│╨╛.
+        # Instagram: 0 со скрапа = «данных нет», не уменьшаем сохранённые лайки.
+        # Положительное значение считаем валидным и применяем только не ниже уже сохранённого.
         if is_instagram:
             if parsed_like_count > 0:
                 prev_likes = int(post.like_count or 0)
                 post.like_count = max(prev_likes, parsed_like_count)
-        # Facebook: 0 ╨▒╨╡╨╖ ╨┐╨╛╨┤╤В╨▓╨╡╤А╨╢╨┤╨╡╨╜╨╕╤П тАФ ┬л╨┤╨░╨╜╨╜╤Л╤Е ╨╜╨╡╤В┬╗; confirmed ╨┐╨╛╤Б╨╗╨╡ detail (╨║╨╜╨╛╨┐╨║╨░ ╨▓ viewport) тАФ ╨┐╨╕╤И╨╡╨╝ 0.
+        # Facebook: 0 без подтверждения — «данных нет»; confirmed после detail (кнопка в viewport) — пишем 0.
         elif is_facebook:
             if pd.get("like_count_confirmed"):
                 post.like_count = parsed_like_count
@@ -326,7 +326,7 @@ def _sync_posts(
             scrape_included_thumbnail=scrape_included_thumbnail,
             scraped_thumbnail_url=scraped_thumbnail_url,
         )
-        # Keep today's post snapshot current тАФ correct baseline for tomorrow's delta.
+        # Keep today's post snapshot current — correct baseline for tomorrow's delta.
         # Also fixes zero snapshots left over from before the first real scrape.
         post.snapshots.filter(date=today).update(
             view_count=post.view_count,
@@ -340,7 +340,7 @@ def _sync_posts(
         )
 
     if seen_external_ids:
-        # ╨Я╨╛╤Б╤В ╤Б╨╜╨╛╨▓╨░ ╨▓ ╤Б╤К╤С╨╝╨╡ тАФ ╤Б╨╜╨╕╨╝╨░╨╡╨╝ ┬л╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜┬╗ (╨╗╨░╨╝╨┐╨╛╤З╨║╨░ ╨▓ UI ╨┐╤А╨╛╨┐╨░╨┤╨░╨╡╤В).
+        # Пост снова в съёме — снимаем «не найден» (лампочка в UI пропадает).
         account.posts.filter(external_id__in=seen_external_ids).update(
             missing_from_scrape_at=None,
         )
@@ -350,14 +350,14 @@ def _sync_posts(
 
 
 def _posts_for_account_stats(account: Account):
-    """╨Я╨╛╤Б╤В╤Л, ╤Г╤З╨░╤Б╤В╨▓╤Г╤О╤Й╨╕╨╡ ╨▓ ╤Б╤Г╨╝╨╝╨░╤Е ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨╛╨▓/╨╗╨░╨╣╨║╨╛╨▓ ╨╕ ╨▓ ╤Б╤З╤С╤В╤З╨╕╨║╨╡ ╨┐╤Г╨▒╨╗╨╕╨║╨░╤Ж╨╕╨╣."""
+    """Посты, участвующие в суммах просмотров/лайков и в счётчике публикаций."""
     return account.posts.filter(missing_from_scrape_at__isnull=True)
 
 
 def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> None:
     """
-    ╨Я╨╡╤А╨╡╤Б╤З╤С╤В view_count / like_count / post_count ╨┐╨╛ ╨┐╨╛╤Б╤В╨░╨╝ ╨▒╨╡╨╖ ┬л╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜ ╨┐╤А╨╕ ╤Б╨║╤А╨░╨┐╨╡┬╗.
-    ╨Ш╤В╨╛╨│╨╛╨▓╤Л╨╡ ╨╖╨╜╨░╤З╨╡╨╜╨╕╤П ╨╜╨╡ ╤Г╨╝╨╡╨╜╤М╤И╨░╨╡╨╝ ╨╛╤В╨╜╨╛╤Б╨╕╤В╨╡╨╗╤М╨╜╨╛ stats_before (╨┐╨╛╨╝╨╡╤З╨╡╨╜╨╜╤Л╨╡ ╨┐╨╛╤Б╤В╤Л ╨╜╨╡ ┬л╤А╨╛╨╜╤П╤О╤В┬╗ ╨╝╨╡╤В╤А╨╕╨║╨╕).
+    Пересчёт view_count / like_count / post_count по постам без «не найден при скрапе».
+    Итоговые значения не уменьшаем относительно stats_before (помеченные посты не «роняют» метрики).
     """
     agg = _posts_for_account_stats(account).aggregate(
         total_views=Sum("view_count"),
@@ -368,8 +368,8 @@ def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> N
     if account.platform == Platform.FACEBOOK:
         account.view_count = max(prev_views, new_views)
     elif account.platform in (Platform.RUMBLE, Platform.YOUTUBE):
-        # YouTube/Rumble: ╨▓ ╤И╨░╨┐╨║╨╡ ╨║╨░╨╜╨░╨╗╨░ ╨╡╤Б╤В╤М ╨┐╨╛╨╗╨╜╤Л╨╣ viewCount; ╤Б╤Г╨╝╨╝╨░ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╕╤Е
-        # ╨┐╨╛╤Б╤В╨╛╨▓ ╨╕╨╖ RSS/╨┐╨╗╨╡╨╣╨╗╨╕╤Б╤В╨░ ╨╡╨│╨╛ ╨╖╨░╨╜╨╕╨╢╨░╨╡╤В тАФ ╨▒╨╡╤А╤С╨╝ ╨╝╨░╨║╤Б╨╕╨╝╤Г╨╝ ╨╕╨╖ ╤В╤А╤С╤Е.
+        # YouTube/Rumble: в шапке канала есть полный viewCount; сумма последних
+        # постов из RSS/плейлиста его занижает — берём максимум из трёх.
         scraped_views = int(account.view_count or 0)
         account.view_count = max(prev_views, new_views, scraped_views)
     elif account.platform in (Platform.INSTAGRAM, Platform.THREADS):
@@ -393,7 +393,7 @@ def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> N
     scraped_post_count = int(account.post_count or 0)
     if account.platform == Platform.TIKTOK:
         if active_post_count == 0:
-            # ╨Э╨╡╤В ╨┐╨╛╤Б╤В╨╛╨▓ ╨▓ ╨С╨Ф тАФ ╨╜╨╡ ╨┤╨╡╤А╨╢╨╕╨╝ ╤Г╤Б╤В╨░╤А╨╡╨▓╤И╨╕╨╣ videoCount ╨╕╨╖ ╤И╨░╨┐╨║╨╕.
+            # Нет постов в БД — не держим устаревший videoCount из шапки.
             account.post_count = 0
         else:
             if scraped_post_count > active_post_count:
@@ -406,9 +406,9 @@ def _apply_post_aggregates_to_account(account: Account, stats_before: dict) -> N
 _STAT_FIELDS = frozenset(
     ("follower_count", "like_count", "view_count", "post_count")
 )
-#: ╨Я╨╛╨║╨░╨╖╨░╤В╨╡╨╗╨╕, ╨║╨╛╤В╨╛╤А╤Л╨╡ ╤Б╤З╨╕╤В╨░╤О╤В╤Б╤П ╨┐╨╛ ╤Б╨┐╨╕╤Б╨║╤Г ╨┐╨╛╤Б╤В╨╛╨▓. ╨в╨╛╨╗╤М╨║╨╛ ╨╕╤Е ╨╕╨╝╨╡╨╡╤В ╤Б╨╝╤Л╤Б╨╗
-#: ╨┐╤А╨╕╨┤╨╡╤А╨╢╨░╤В╤М, ╨║╨╛╨│╨┤╨░ ╤Б╨┐╨╕╤Б╨╛╨║ ╤Б╨╛╨▒╤А╨░╨╗╤Б╤П ╨╜╨╡ ╤Ж╨╡╨╗╨╕╨║╨╛╨╝. ╨Я╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╕ ╨╕╨╖ ╨┐╨╛╤Б╤В╨╛╨▓ ╨╜╨╡
-#: ╨▓╤Л╨▓╨╛╨┤╤П╤В╤Б╤П ╨▓╨╛╨╛╨▒╤Й╨╡ тАФ ╨╛╨╜╨╕ ╨▒╨╡╤А╤Г╤В╤Б╤П ╤Б╨╛ ╤Б╤В╤А╨░╨╜╨╕╤Ж╤Л ╨┐╤А╨╛╤Д╨╕╨╗╤П.
+#: Показатели, которые считаются по списку постов. Только их имеет смысл
+#: придержать, когда список собрался не целиком. Подписчики из постов не
+#: выводятся вообще — они берутся со страницы профиля.
 _POST_DERIVED_STAT_FIELDS = frozenset(("like_count", "view_count", "post_count"))
 
 _ACCOUNT_REFRESH_SAVE_FIELDS = (
@@ -424,8 +424,8 @@ _ACCOUNT_REFRESH_SAVE_FIELDS = (
     "updated_at",
 )
 _ACCOUNT_ASSIGNMENT_FIELDS = frozenset({
-    # ╨б╨╝╨╡╨╜╨░ ╨┤╨╛╨╝╨╡╨╜╨░ тАФ ╤В╨░╨║╨╛╨╡ ╨╢╨╡ ╨╜╨░╨╖╨╜╨░╤З╨╡╨╜╨╕╨╡, ╨║╨░╨║ ╨┐╤А╨╛╤Д╨╕╨╗╤М: ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗ ╨╛╨╜╨░ ╨┤╨▓╨╕╨│╨░╤В╤М
-    # ╨╜╨╡ ╨┤╨╛╨╗╨╢╨╜╨░, ╤Н╤В╨╛ ╨╜╨╡ ╤Б╨▒╨╛╤А ╤Б╤В╨░╤В╨╕╤Б╤В╨╕╨║╨╕.
+    # Смена домена — такое же назначение, как профиль: «Обновлён» она двигать
+    # не должна, это не сбор статистики.
     "domain", "profile", "owner", "group", "country", "profile_unavailable",
     "is_archived", "is_banned",
 })
@@ -438,7 +438,7 @@ def _account_assignment_only_validated(validated_data: dict) -> bool:
 
 
 def _account_assignment_update_fields(validated_data: dict) -> list[str]:
-    """╨Ш╨╝╨╡╨╜╨░ ╨║╨╛╨╗╨╛╨╜╨╛╨║ ╨┤╨╗╤П update_fields (FK тАФ *_id, ╨╜╨╡ source-╨╕╨╝╨╡╨╜╨░ serializer)."""
+    """Имена колонок для update_fields (FK — *_id, не source-имена serializer)."""
     out: list[str] = []
     if "domain" in validated_data:
         out.append("domain_id")
@@ -464,7 +464,7 @@ def _assignment_fk_id(obj) -> int | None:
 
 
 def _existing_account_assignment_unchanged(existing: Account, validated: dict) -> bool:
-    """╨б╨╛╨▓╨┐╨░╨┤╨░╤О╤В ╨╗╨╕ ╨┐╨╡╤А╨╡╨┤╨░╨╜╨╜╤Л╨╡ ╨▓ POST ╨┐╨╛╨╗╤П ╨┤╨╛╨╝╨╡╨╜╨░/╨┐╤А╨╛╤Д╨╕╨╗╤П/╨▓╨╗╨░╨┤╨╡╨╗╤М╤Ж╨░/╨│╤А╤Г╨┐╨┐╤Л/╤Б╤В╤А╨░╨╜╤Л ╤Б ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨╝."""
+    """Совпадают ли переданные в POST поля домена/профиля/владельца/группы/страны с аккаунтом."""
     for key, fk_attr in (
         ("domain", "domain_id"),
         ("profile", "profile_id"),
@@ -480,7 +480,7 @@ def _existing_account_assignment_unchanged(existing: Account, validated: dict) -
 
 
 def _unarchive_account_on_import(account: Account) -> bool:
-    """╨Я╨╛╨▓╤В╨╛╤А╨╜╤Л╨╣ ╨╕╨╝╨┐╨╛╤А╤В/╨┤╨╛╨▒╨░╨▓╨╗╨╡╨╜╨╕╨╡ ╨▓╨╛╨╖╨▓╤А╨░╤Й╨░╨╡╤В ╨░╨║╨║╨░╤Г╨╜╤В ╨▓ ╨░╨║╤В╤Г╨░╨╗╤М╨╜╤Л╨╡ ╨▒╨╡╨╖ ╤Б╨┤╨▓╨╕╨│╨░ ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗."""
+    """Повторный импорт/добавление возвращает аккаунт в актуальные без сдвига «Обновлён»."""
     if not account.is_archived:
         return False
     preserved = account.updated_at
@@ -491,7 +491,7 @@ def _unarchive_account_on_import(account: Account) -> bool:
 
 
 def _unban_account_on_import(account: Account) -> bool:
-    """╨Я╨╛╨▓╤В╨╛╤А╨╜╤Л╨╣ ╨╕╨╝╨┐╨╛╤А╤В/╨┤╨╛╨▒╨░╨▓╨╗╨╡╨╜╨╕╨╡ ╤Б╨╜╨╕╨╝╨░╨╡╤В ╨▒╨░╨╜ ╨▒╨╡╨╖ ╤Б╨┤╨▓╨╕╨│╨░ ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗."""
+    """Повторный импорт/добавление снимает бан без сдвига «Обновлён»."""
     if not account.is_banned:
         return False
     preserved = account.updated_at
@@ -503,8 +503,8 @@ def _unban_account_on_import(account: Account) -> bool:
 
 def _apply_existing_account_assignment(existing: Account, validated: dict) -> list[str]:
     """
-    ╨в╨╛╨╗╤М╨║╨╛ ╤Б╨╝╨╡╨╜╨░ ╨┤╨╛╨╝╨╡╨╜╨░/╨┐╤А╨╛╤Д╨╕╨╗╤П/╨▓╨╗╨░╨┤╨╡╨╗╤М╤Ж╨░/╨│╤А╤Г╨┐╨┐╤Л/╤Б╤В╤А╨░╨╜╤Л тАФ ╨▒╨╡╨╖ scrape ╨╕ ╨▒╨╡╨╖ ╤Б╨┤╨▓╨╕╨│╨░ ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗.
-    ╨Т╨╛╨╖╨▓╤А╨░╤Й╨░╨╡╤В ╤Б╨┐╨╕╤Б╨╛╨║ ╨╕╨╖╨╝╨╡╨╜╤С╨╜╨╜╤Л╤Е ╨┐╨╛╨╗╨╡╨╣ (╨┤╨╗╤П API) ╨╕╨╗╨╕ [].
+    Только смена домена/профиля/владельца/группы/страны — без scrape и без сдвига «Обновлён».
+    Возвращает список изменённых полей (для API) или [].
     """
     assignment: dict = {}
     changed_labels: list[str] = []
@@ -533,14 +533,14 @@ def _apply_existing_account_assignment(existing: Account, validated: dict) -> li
 
 
 def _restore_account_updated_at(account_id: int, preserved) -> None:
-    """╨Я╨╛╤Б╨╗╨╡ ╨╜╨╡╤Г╤Б╨┐╨╡╤И╨╜╨╛╨│╨╛ refresh ╨╜╨╡ ╤В╤А╨╛╨│╨░╨╡╨╝ ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗ ╨▓ UI (auto_now / ╤З╨░╤Б╤В╨╕╤З╨╜╤Л╨╣ save)."""
+    """После неуспешного refresh не трогаем «Обновлён» в UI (auto_now / частичный save)."""
     if preserved is None:
         return
     Account.objects.filter(pk=account_id).update(updated_at=preserved)
 
 
 def _stamp_new_account_updated_at(account_id: int) -> None:
-    """╨Э╨╛╨▓╤Л╨╣ ╨░╨║╨║╨░╤Г╨╜╤В: ╤Д╨╕╨║╤Б╨╕╤А╨╛╨▓╨░╨╜╨╜╨░╤П ╨┤╨░╤В╨░ ╨▓╨╝╨╡╤Б╤В╨╛ now, ╤З╤В╨╛╨▒╤Л ╨▓╤Л╨┤╨╡╨╗╤П╤В╤М ┬л╨╡╤Й╤С ╨╜╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╤П╨╗╨╕╤Б╤М┬╗."""
+    """Новый аккаунт: фиксированная дата вместо now, чтобы выделять «ещё не обновлялись»."""
     Account.objects.filter(pk=account_id).update(updated_at=NEW_ACCOUNT_UPDATED_AT)
 
 
@@ -557,29 +557,29 @@ def _restore_account_refresh_baseline(account_id: int, baseline: dict | None) ->
 
 
 def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -> bool:
-    """╨г╤Б╨┐╨╡╤И╨╜╨╛╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨┤╨╗╤П UI ┬л╨╛╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗: ╨╜╨╡ ╨╜╨╡╨┤╨╛╤Б╤В╤Г╨┐╨╜╤Л╨╣ ╨┐╤А╨╛╤Д╨╕╨╗╤М ╨╕ ╨╜╨╡ ┬л╨╛╨▒╨╜╤Г╨╗╨╡╨╜╨╕╨╡┬╗ ╨┐╤А╨╕ ╨╜╨╡╨╜╤Г╨╗╨╡╨▓╨╛╨╣ ╨▒╨░╨╖╨╡."""
+    """Успешное обновление для UI «обновлён»: не недоступный профиль и не «обнуление» при ненулевой базе."""
     if bool(getattr(account, "profile_unavailable", False)):
         return False
     fields = ["follower_count", "like_count", "view_count", "post_count"]
-    # Threads: ╨╝╨╡╤В╤А╨╕╨║╨╕ ╤Г╤А╨╛╨▓╨╜╤П ╨┐╤А╨╛╤Д╨╕╨╗╤П ╨╕ ╨░╨│╤А╨╡╨│╨░╤В╤Л ╨┐╨╛ ╨┐╨╛╤Б╤В╨░╨╝ ╨╜╨╡╤Б╤В╨░╨▒╨╕╨╗╤М╨╜╤Л (DOM, meta, ╨┐╤Г╤Б╤В╤Л╨╡ ╨╗╨░╨╣╨║╨╕).
-    # ╨Ы╨╛╨╢╨╜╨╛╨╡ ┬л╨╛╨▒╨╜╤Г╨╗╨╡╨╜╨╕╨╡┬╗ ╨┐╨╛ follower/like/post ╨╗╨╛╨╝╨░╨╗╨╛ ╤Б╨╛╤Е╤А╨░╨╜╨╡╨╜╨╕╨╡ ╨╕ ╨╖╨░╨╗╨╕╨┐╨░╨╗ profile_unavailable.
-    # ╨Ю╤Б╤В╨░╨▓╨╗╤П╨╡╨╝ ╤В╨╛╨╗╤М╨║╨╛ ╨╖╨░╤Й╨╕╤В╤Г ╨┐╨╛ view_count (╨┤╨╗╤П Threads ╨╛╨╜ ╨╡╤Й╤С ╨╕ max ╤Б ╨┐╤А╨╡╨┤╤Л╨┤╤Г╤Й╨╕╨╝ ╨▓ ╨┐╨░╨╣╨┐╨╗╨░╨╣╨╜╨╡).
+    # Threads: метрики уровня профиля и агрегаты по постам нестабильны (DOM, meta, пустые лайки).
+    # Ложное «обнуление» по follower/like/post ломало сохранение и залипал profile_unavailable.
+    # Оставляем только защиту по view_count (для Threads он ещё и max с предыдущим в пайплайне).
     if account.platform == Platform.THREADS:
         fields = ["view_count"]
     elif account.platform == Platform.INSTAGRAM:
-        # ╨Я╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╕ ╨╕ ╨╗╨░╨╣╨║╨╕ ╤Б╨╛ ╤Б╨║╤А╨░╨┐╨░ ╤З╨░╤Б╤В╨╛ 0 ╨┐╤А╨╕ ╨╗╨╕╨╝╨╕╤В╨░╤Е/╨░╨╜╤В╨╕╨▒╨╛╤В╨╡ ╨┐╤А╨╕ ╤В╨╛╨╝ ╨╢╨╡ ╨╢╨╕╨▓╨╛╨╝ ╨┐╤А╨╛╤Д╨╕╨╗╨╡;
-        # ╨┐╨╛╨╗╨╜╨░╤П ╨┐╤А╨╛╨▓╨╡╤А╨║╨░ ╨║╨░╨║ ╤Г ┬л╨╛╨▒╤Л╤З╨╜╤Л╤Е┬╗ ╨┐╨╗╨░╤В╤Д╨╛╤А╨╝ ╨┤╨░╨▓╨░╨╗╨░ ╨╗╨╛╨╢╨╜╤Л╨╣ ╨╛╤В╨║╨░╨╖ ╨╕ HTTP 400 ╨▒╨╡╨╖ ╤Б╨╛╤Е╤А╨░╨╜╨╡╨╜╨╕╤П.
-        # ╨Ч╨░╤Й╨╕╤Й╨░╨╡╨╝╤Б╤П ╨╛╤В ╨┐╨╛╨┤╨╛╨╖╤А╨╕╤В╨╡╨╗╤М╨╜╨╛╨│╨╛ ╨╛╨▒╨╜╤Г╨╗╨╡╨╜╨╕╤П ╨┐╨╛ ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨░╨╝ ╨╕ ╤З╨╕╤Б╨╗╤Г ╨┐╨╛╤Б╤В╨╛╨▓.
+        # Подписчики и лайки со скрапа часто 0 при лимитах/антиботе при том же живом профиле;
+        # полная проверка как у «обычных» платформ давала ложный отказ и HTTP 400 без сохранения.
+        # Защищаемся от подозрительного обнуления по просмотрам и числу постов.
         fields = ["view_count", "post_count"]
     elif account.platform == Platform.TIKTOK:
-        # TikTok: ╨▓ UI ╨┐╤А╨╛╤Д╨╕╨╗╤М ╨╢╨╕╨▓╨╛╨╣ (╤А╨╛╨╗╨╕╨║╨╕ ╨╜╨░ ╨╝╨╡╤Б╤В╨╡), ╨░ follower/like ╤Б ╨┐╨░╤А╤Б╨╡╤А╨░ ╤З╨░╤Б╤В╨╛ 0
-        # (╨░╨╜╤В╨╕╨▒╨╛╤В, ╨│╨╛╤Б╤В╤М, ╤Г╤А╨╡╨╖╨░╨╜╨╜╤Л╨╣ SSR) тАФ ╨╕╨╜╨░╤З╨╡ refresh ╨╛╤В╨║╨░╤В╤Л╨▓╨░╨╡╤В╤Б╤П, ╤Е╨╛╤В╤П ╨┐╨╛╤Б╤В╤Л ╨╛╨▒╨╜╨╛╨▓╨╕╨╗╨╕╤Б╤М.
+        # TikTok: в UI профиль живой (ролики на месте), а follower/like с парсера часто 0
+        # (антибот, гость, урезанный SSR) — иначе refresh откатывается, хотя посты обновились.
         fields = ["view_count", "post_count"]
     elif account.platform == Platform.FACEBOOK:
-        # ╨б╤Г╨╝╨╝╨░ ╨╗╨░╨╣╨║╨╛╨▓ ╨┐╨╛ ╨┐╨╛╤Б╤В╨░╨╝ ╨╝╨╛╨╢╨╡╤В ╨╖╨░╨║╨╛╨╜╨╛╨╝╨╡╤А╨╜╨╛ ╨╛╨▒╨╜╤Г╨╗╨╕╤В╤М╤Б╤П (╨▓╤Б╨╡ ╨┐╨╛╤Б╤В╤Л тЙд MIN_VIEWS ╨┤╨╗╤П ╨┤╨╡╤В╨░╨╗╤М╨╜╤Л╤Е ╨╗╨░╨╣╨║╨╛╨▓).
-        # ╨Я╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╕ ╤Б╨╛ ╤Б╨║╤А╨░╨┐╨░ ╤З╨░╤Б╤В╨╛ 0 ╨┐╤А╨╕ ╤В╨╛╨╣ ╨╢╨╡ ╨╢╨╕╨▓╨╛╨╣ ╤Б╤В╤А╨░╨╜╨╕╤Ж╨╡ (DOM / headless / ╤П╨╖╤Л╨║ ╨▒╨╗╨╛╨║╨░) тАФ
-        # ╨╡╤Б╨╗╨╕ ╤В╤А╨╡╨▒╨╛╨▓╨░╤В╤М ┬л╨╜╨╡ ╨╛╨▒╨╜╤Г╨╗╤П╤В╤М follower_count┬╗, ╨▓╨╡╤Б╤М refresh ╨╛╤В╨║╨░╤В╤Л╨▓╨░╨╡╤В╤Б╤П ╨╕ **╨╜╨╡ ╤Б╨╛╤Е╤А╨░╨╜╤П╤О╤В╤Б╤П**
-        # ╨╗╨░╨╣╨║╨╕ ╨┐╨╛╤Б╤В╨╛╨▓ ╨┐╨╛╤Б╨╗╨╡ enrich. ╨Э╨╡ ╨▓╨║╨╗╤О╤З╨░╨╡╨╝ follower_count ╨╕ like_count ╨▓ ╤Н╤В╤Г ╨┐╤А╨╛╨▓╨╡╤А╨║╤Г.
+        # Сумма лайков по постам может закономерно обнулиться (все посты ≤ MIN_VIEWS для детальных лайков).
+        # Подписчики со скрапа часто 0 при той же живой странице (DOM / headless / язык блока) —
+        # если требовать «не обнулять follower_count», весь refresh откатывается и **не сохраняются**
+        # лайки постов после enrich. Не включаем follower_count и like_count в эту проверку.
         fields = ["view_count", "post_count"]
     active_post_count = _posts_for_account_stats(account).count()
     for f in fields:
@@ -591,13 +591,13 @@ def _refresh_stats_trustworthy(account: Account, stats_before: dict[str, int]) -
                 and f == "post_count"
                 and active_post_count == 0
             ):
-                # ╨б╨▒╤А╨░╤Б╤Л╨▓╨░╨╡╨╝ ╨╗╨╛╨╢╨╜╤Л╨╣ videoCount ╨╕╨╖ ╤И╨░╨┐╨║╨╕, ╨║╨╛╨│╨┤╨░ ╨┐╨╛╤Б╤В╨╛╨▓ ╨▓ ╨С╨Ф ╨╜╨╡╤В.
+                # Сбрасываем ложный videoCount из шапки, когда постов в БД нет.
                 continue
             return False
     return True
 
-# ╨Я╨░╤А╤Б╨╡╤А╤Л (╨╛╤Б╨╛╨▒╨╡╨╜╨╜╨╛ Instagram og:image ╨┐╤А╨╕ ╨░╨╜╤В╨╕╨▒╨╛╤В╨╡) ╨╕╨╜╨╛╨│╨┤╨░ ╨╛╤В╨┤╨░╤О╤В ╨┐╤Г╤Б╤В╤Г╤О ╤Б╤В╤А╨╛╨║╤Г тАФ
-# ╨╜╨╡ ╨╖╨░╤В╨╕╤А╨░╨╡╨╝ ╤Г╨╢╨╡ ╤Б╨╛╤Е╤А╨░╨╜╤С╨╜╨╜╤Л╨╣ CDN-URL, ╨╕╨╜╨░╤З╨╡ ╨▓ UI ╨┐╤А╨╛╨┐╨░╨┤╨░╨╡╤В ╨░╨▓╨░╤В╨░╤А╨║╨░ ╨┤╨╛ ╤Б╨╗╨╡╨┤╤Г╤О╤Й╨╡╨│╨╛ ╤Г╨┤╨░╤З╨╜╨╛╨│╨╛ ╨┐╨░╤А╤Б╨░.
+# Парсеры (особенно Instagram og:image при антиботе) иногда отдают пустую строку —
+# не затираем уже сохранённый CDN-URL, иначе в UI пропадает аватарка до следующего удачного парса.
 _SKIP_EMPTY_STR_UPDATE = frozenset({"avatar_url"})
 
 _PLATFORM_WORKERS = {
@@ -634,10 +634,10 @@ def _refresh_all_delay_seconds(account: Account) -> float:
 
     Instagram is already preloaded in batch and generally doesn't need extra delay.
     Other platforms keep a short jitter to reduce burst traffic / anti-bot friction.
-    Facebook: 2тАУ5 ╨╝╨╕╨╜ ╨╝╨╡╨╢╨┤╤Г ╨░╨║╨║╨░╤Г╨╜╤В╨░╨╝╨╕ (120тАУ300 ╤Б) тАФ Playwright + ╨░╨╜╤В╨╕╨▒╨╛╤В.
-    TikTok: ╨┐╨░╤Г╨╖╨░ ╨╝╨╡╨╢╨┤╤Г ╨░╨║╨║╨░╤Г╨╜╤В╨░╨╝╨╕ 5тАУ10 ╤Б (env REFRESH_ALL_DELAY_TIKTOK_*).
-    YouTube: ╨┐╨░╤Г╨╖╨░ 5тАУ10 ╤Б ╨╝╨╡╨╢╨┤╤Г ╨░╨║╨║╨░╤Г╨╜╤В╨░╨╝╨╕ тАФ ╤Б╨╜╨╕╨╢╨░╨╡╤В ╤А╨╕╤Б╨║ ╨║╨▓╨╛╤В/╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨╛╨║ ╨┐╤А╨╕ ╤Б╨╡╤А╨╕╨╕ ╨╖╨░╨┐╤А╨╛╤Б╨╛╨▓.
-    Rumble: ╨┐╨░╤Г╨╖╨░ 20тАУ40 ╤Б (env REFRESH_ALL_DELAY_RUMBLE_*) тАФ Cloudflare + Playwright.
+    Facebook: 2–5 мин между аккаунтами (120–300 с) — Playwright + антибот.
+    TikTok: пауза между аккаунтами 5–10 с (env REFRESH_ALL_DELAY_TIKTOK_*).
+    YouTube: пауза 5–10 с между аккаунтами — снижает риск квот/блокировок при серии запросов.
+    Rumble: пауза 20–40 с (env REFRESH_ALL_DELAY_RUMBLE_*) — Cloudflare + Playwright.
     """
     platform_defaults: dict[str, tuple[float, float]] = {
         Platform.INSTAGRAM: (0.0, 0.0),
@@ -657,8 +657,8 @@ def _refresh_all_delay_seconds(account: Account) -> float:
     # Backward-compatible global clamp/fallback
     global_lo = _get_float_setting("REFRESH_ALL_DELAY_MIN", lo)
     global_hi = _get_float_setting("REFRESH_ALL_DELAY_MAX", hi)
-    # REFRESH_ALL_DELAY_MIN/MAX ╨┐╨╛ ╤Г╨╝╨╛╨╗╤З╨░╨╜╨╕╤О 0 тАФ ╤Н╤В╨╛ ┬л╨▒╨╡╨╖ ╨│╨╗╨╛╨▒╨░╨╗╤М╨╜╨╛╨╣ ╨╜╨░╨┤╤Б╤В╤А╨╛╨╣╨║╨╕┬╗,
-    # ╨░ ╨╜╨╡ ┬л╨╛╨▒╨╜╤Г╨╗╨╕╤В╤М ╨╜╨╕╨╢╨╜╤О╤О ╨│╤А╨░╨╜╨╕╤Ж╤Г ╨┐╨░╤Г╨╖╤Л┬╗ (╨╕╨╜╨░╤З╨╡ min(..., 0) ╨╗╨╛╨╝╨░╨╡╤В ╨┤╨╢╨╕╤В╤В╨╡╤А ╨┐╨╗╨░╤В╤Д╨╛╤А╨╝).
+    # REFRESH_ALL_DELAY_MIN/MAX по умолчанию 0 — это «без глобальной надстройки»,
+    # а не «обнулить нижнюю границу паузы» (иначе min(..., 0) ломает джиттер платформ).
     if global_lo <= 0 and global_hi <= 0:
         a = max(0.0, min(lo, hi))
         b = max(lo, hi)
@@ -676,7 +676,7 @@ def _refresh_all_cooldown_seconds(
     account: Account,
     exc: BaseException | None = None,
 ) -> float:
-    """╨Я╨░╤Г╨╖╨░ ╨╝╨╡╨╢╨┤╤Г ╨░╨║╨║╨░╤Г╨╜╤В╨░╨╝╨╕ ╨▓ ╤Б╨╡╤А╨╕╨╣╨╜╨╛╨╝ refresh; 0 ╨╡╤Б╨╗╨╕ ╨┐╤А╨╛╤Д╨╕╨╗╤М ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜/╤Г╨┤╨░╨╗╤С╨╜."""
+    """Пауза между аккаунтами в серийном refresh; 0 если профиль не найден/удалён."""
     if exc is not None and is_profile_unavailable_error(str(exc)):
         return 0.0
     if bool(getattr(account, "profile_unavailable", False)):
@@ -696,7 +696,7 @@ def _refresh_int_env(name: str, default: int, *, min_v: int = 1, max_v: int = 32
 
 
 def _refresh_worker_count(*, account_count: int | None = None) -> int:
-    """╨Ь╨╕╨╜╨╕╨╝╤Г╨╝ ╨▓╨╛╤А╨║╨╡╤А╨╛╨▓ ╨╕╨╖ AUTO_REFRESH_WORKERS (╨┐╨╛ ╤Г╨╝╨╛╨╗╤З╨░╨╜╨╕╤О 3)."""
+    """Минимум воркеров из AUTO_REFRESH_WORKERS (по умолчанию 3)."""
     try:
         n = int(str(os.environ.get("AUTO_REFRESH_WORKERS", "3")).strip() or "3")
     except Exception:
@@ -709,8 +709,8 @@ def _refresh_worker_count(*, account_count: int | None = None) -> int:
 
 def _parallel_refresh_worker_count(accounts: list[Account]) -> int:
     """
-    ╨Т╨╛╤А╨║╨╡╤А╤Л ╨┤╨╗╤П bulk / refresh_all: ╨┐╨░╤А╨░╨╗╨╗╨╡╨╗╤М╨╜╨╛ ╤А╨░╨╖╨╜╤Л╨╡ ╨┐╨╗╨░╤В╤Д╨╛╤А╨╝╤Л.
-    ╨С╨╡╤А╤С╨╝ max(AUTO_REFRESH_WORKERS, ╤З╨╕╤Б╨╗╨╛ ╨┐╨╗╨░╤В╤Д╨╛╤А╨╝ ╨▓ ╨┐╨░╨║╨╡╤В╨╡), ╨▓ ╨┐╤А╨╡╨┤╨╡╨╗╨░╤Е ╨╗╨╕╨╝╨╕╤В╨╛╨▓ concurrency.
+    Воркеры для bulk / refresh_all: параллельно разные платформы.
+    Берём max(AUTO_REFRESH_WORKERS, число платформ в пакете), в пределах лимитов concurrency.
     """
     n = len(accounts)
     if n <= 1:
@@ -725,7 +725,7 @@ def _parallel_refresh_worker_count(accounts: list[Account]) -> int:
 
 
 def _keep_bulk_refresh_running(state: AutoRefreshState) -> None:
-    """╨Т╨╛╤Б╤Б╤В╨░╨╜╨╛╨▓╨╕╤В╤М is_running, ╨╡╤Б╨╗╨╕ ╤Д╨╗╨░╨│ ╤Б╨▒╤А╨╛╤Б╨╕╨╗╨╕ ╨┐╨╛╨▒╨╛╤З╨╜╤Л╨╝ ╨┐╤А╨╛╤Ж╨╡╤Б╤Б╨╛╨╝, ╨░ ╨┐╨╛╤В╨╛╨║ bulk ╨╡╤Й╤С ╤А╨░╨▒╨╛╤В╨░╨╡╤В."""
+    """Восстановить is_running, если флаг сбросили побочным процессом, а поток bulk ещё работает."""
     from .refresh_state import keep_auto_refresh_run_alive
 
     keep_auto_refresh_run_alive(state)
@@ -756,7 +756,7 @@ def _interleave_accounts_by_platform(items: list[Account]) -> list[Account]:
     return interleave_accounts_by_platform(items)
 
 
-from .db_connections import (  # noqa: E402 тАФ re-export for apps / tests
+from .db_connections import (  # noqa: E402 — re-export for apps / tests
     ensure_fresh_db_connections,
     release_db_for_long_task,
     run_with_db_reconnect,
@@ -765,11 +765,11 @@ from .db_connections import (  # noqa: E402 тАФ re-export for apps / tests
 
 
 def humanize_refresh_run_detail(exc: BaseException) -> str:
-    """╨Ъ╨╛╤А╨╛╤В╨║╨╕╨╣ ╤В╨╡╨║╤Б╤В ╨╛╤И╨╕╨▒╨║╨╕ ╨┤╨╗╤П run_detail / CSV (╨▒╨╡╨╖ ╨░╨╜╨│╨╗. psycopg ╨┐╨╛ ╤Г╨╝╨╛╨╗╤З╨░╨╜╨╕╤О)."""
+    """Короткий текст ошибки для run_detail / CSV (без англ. psycopg по умолчанию)."""
     if _stale_db_connection_error(exc):
         return (
-            "╨б╨╛╨╡╨┤╨╕╨╜╨╡╨╜╨╕╨╡ ╤Б ╨▒╨░╨╖╨╛╨╣ ╤А╨░╨╖╨╛╤А╨▓╨░╨╜╨╛ (╨┤╨╛╨╗╨│╨╕╨╣ ╨╖╨░╨┐╤А╨╛╤Б ╨╕╨╗╨╕ ╨┐╨╡╤А╨╡╨╖╨░╨┐╤Г╤Б╨║ Django). "
-            "╨Ч╨░╨┐╤Г╤Б╤В╨╕╤В╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╤Б╨╜╨╛╨▓╨░."
+            "Соединение с базой разорвано (долгий запрос или перезапуск Django). "
+            "Запустите обновление снова."
         )
     detail = str(exc).replace("\r\n", " ").replace("\n", " ").strip()
     if len(detail) > 800:
@@ -783,8 +783,8 @@ def _format_refresh_error(account: Account, exc: BaseException) -> tuple[str, in
         return user_visible_profile_unavailable_error(str(exc)), status.HTTP_400_BAD_REQUEST
     if _stale_db_connection_error(exc):
         return humanize_refresh_run_detail(exc), status.HTTP_500_INTERNAL_SERVER_ERROR
-    # 500: ╨▓╨╜╤Г╤В╤А╨╡╨╜╨╜╤П╤П ╨╛╤И╨╕╨▒╨║╨░ ╤Б╤К╤С╨╝╨░/╨С╨Ф тАФ ╨╜╨╡ ┬л╤И╨╗╤О╨╖┬╗; ╤В╨╡╨║╤Б╤В ╨▓ detail ╨┤╨╗╤П ╨║╨╗╨╕╨╡╨╜╤В╨░ ╨╕ ╨╗╨╛╨│ ╨┤╨╗╤П ╤Б╨╡╤А╨▓╨╡╤А╨░.
-    return f"╨Ю╤И╨╕╨▒╨║╨░: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR
+    # 500: внутренняя ошибка съёма/БД — не «шлюз»; текст в detail для клиента и лог для сервера.
+    return f"Ошибка: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR
 
 
 def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -> tuple[Account | None, str | None, int | None]:
@@ -795,7 +795,7 @@ def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -
         with account_refresh_priority_session():
             return _refresh_with_retry(account, scraped=scraped), None, None
     except RefreshCancelledError:
-        return None, "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝", None
+        return None, "Остановлено пользователем", None
     except Exception as exc:
         from accounts.scrape_fallback_recovery import (
             notify_playwright_batch_errors,
@@ -837,8 +837,8 @@ def _refresh_account_for_api(account: Account, *, scraped: dict | None = None) -
 
 def _refresh_link_clicks_for_accounts(accounts: list[Account], *, log_prefix: str = "refresh") -> dict | None:
     """
-    ╨в╨╛ ╨╢╨╡, ╤З╤В╨╛ POST /api/accounts/refresh-link-clicks/ тАФ ╨▒╨░╤В╤З ╨╕╨╖ Links API
-    + ╨║╤Н╤И ╨╕╨╜╨┤╨╡╨║╤Б╨░ ╨┤╨╗╤П sync_link_clicks_for_account ╨▓ _apply_refresh.
+    То же, что POST /api/accounts/refresh-link-clicks/ — батч из Links API
+    + кэш индекса для sync_link_clicks_for_account в _apply_refresh.
     """
     from integrations.links_client import links_api_configured
     from integrations.links_sync import begin_refresh_all_links, refresh_link_clicks_batch
@@ -847,7 +847,7 @@ def _refresh_link_clicks_for_accounts(accounts: list[Account], *, log_prefix: st
         return None
     if not links_api_configured():
         print(
-            f"[{log_prefix}] link clicks: skip (Links API ╨╜╨╡ ╨╜╨░╤Б╤В╤А╨╛╨╡╨╜)",
+            f"[{log_prefix}] link clicks: skip (Links API не настроен)",
             file=sys.stderr,
             flush=True,
         )
@@ -903,7 +903,7 @@ def _mark_bulk_refresh_queued_cancelled(state: AutoRefreshState) -> None:
     changed = False
     for i, it in enumerate(items):
         if (it.get("status") or "").strip() == "queued":
-            items[i] = {**it, "status": "cancelled", "detail": "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝"}
+            items[i] = {**it, "status": "cancelled", "detail": "Остановлено пользователем"}
             changed = True
     if changed:
         rd["items"] = items
@@ -927,17 +927,17 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
     if not ordered:
         state.is_running = False
         state.finished_at = timezone.now()
-        state.last_error = "╨Р╨║╨║╨░╤Г╨╜╤В╤Л ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜╤Л"
+        state.last_error = "Аккаунты не найдены"
         state.save(update_fields=["is_running", "finished_at", "last_error", "updated_at"])
         return
 
     from .refresh_queue import order_accounts_for_refresh
 
     accounts = order_accounts_for_refresh(ordered)
-    # ╨Ч╨┤╨╡╤Б╤М ╨░╨║╨║╨░╤Г╨╜╤В╤Л ╨▓╤Л╨▒╤А╨░╨╜╤Л ╤А╤Г╨║╨░╨╝╨╕ тАФ ╨┐╤А╨░╨▓╨╕╨╗╨╛ ┬л╨╜╨╡ ╤В╤А╨╛╨│╨░╤В╤М ╨╜╨╡╨┤╨░╨▓╨╜╨╛ ╨╛╨▒╨╜╨╛╨▓╨╗╤С╨╜╨╜╤Л╨╡┬╗
-    # ╨║ ╨╜╨╕╨╝ ╨╜╨╡ ╨╛╤В╨╜╨╛╤Б╨╕╤В╤Б╤П: ╨╛╨╜╨╛ ╨┤╨╗╤П ╨┐╤А╨╛╨│╨╛╨╜╨╛╨▓ ╨┐╨╛ ╤А╨░╤Б╨┐╨╕╤Б╨░╨╜╨╕╤О, ╤З╤В╨╛╨▒╤Л ╨╜╨╡ ╤Б╨║╤А╨╡╤Б╤В╨╕ ╨▓╤Б╤О ╤Б╨╡╤В╤М
-    # ╨╖╨░╨╜╨╛╨▓╨╛. ╨а╨░╨╜╤М╤И╨╡ ╨▓╤Л╨▒╨╛╤А ╤В╤А╤С╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ ╨╕ ┬л╨Ю╨▒╨╜╨╛╨▓╨╕╤В╤М┬╗ ╨┤╨░╨▓╨░╨╗╨╕ ╨┐╤А╨╛╨│╨╛╨╜ ╨╜╨░ ╤Б╨╡╨║╤Г╨╜╨┤╤Г
-    # ╤Б ╤В╤А╨╡╨╝╤П ┬л╨┐╤А╨╛╨┐╤Г╤Й╨╡╨╜╨╛┬╗ тАФ ╤Б╨╛ ╤Б╤В╨╛╤А╨╛╨╜╤Л ╤Н╤В╨╛ ╨▓╤Л╨│╨╗╤П╨┤╨╡╨╗╨╛ ╨║╨░╨║ ┬л╨║╨╜╨╛╨┐╨║╨░ ╨╜╨╡ ╤А╨░╨▒╨╛╤В╨░╨╡╤В┬╗.
+    # Здесь аккаунты выбраны руками — правило «не трогать недавно обновлённые»
+    # к ним не относится: оно для прогонов по расписанию, чтобы не скрести всю сеть
+    # заново. Раньше выбор трёх аккаунтов и «Обновить» давали прогон на секунду
+    # с тремя «пропущено» — со стороны это выглядело как «кнопка не работает».
     skip_recent_hours, cutoff = 0, None
     from .refresh_priority import account_refresh_priority_session
 
@@ -952,15 +952,15 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                     shutdown_all_workers,
                 )
 
-                # ╨Ч╨░╨║╤А╤Л╨▓╨░╨╡╨╝ ╨┤╨╡╨╝╨╛╨╜╤Л, ╨╛╤Б╤В╨░╨▓╤И╨╕╨╡╤Б╤П ╨╛╤В ╨┐╤А╨╛╤И╨╗╨╛╨│╨╛ ╨┐╤А╨╛╨│╨╛╨╜╨░.
+                # Закрываем демоны, оставшиеся от прошлого прогона.
                 shutdown_all_workers()
-                # ╨Ш ╤Б╤А╨░╨╖╤Г ╤Б╨╜╨╕╨╝╨░╨╡╨╝ ╤Д╨╗╨░╨│. shutdown_all_workers() ╨▓╨╖╨▓╨╛╨┤╨╕╤В force_stop,
-                # ╤З╤В╨╛╨▒╤Л ╨┤╨╡╨╝╨╛╨╜╤Л ╨╜╨╡ ╨┐╨╛╨┤╨╜╤П╨╗╨╕╤Б╤М ╨╛╨▒╤А╨░╤В╨╜╨╛, ╨┐╨╛╨║╨░ ╨╕╨┤╤С╤В kill, тАФ ╨╜╨╛ ╨╖╨┤╨╡╤Б╤М ╨╝╤Л
-                # ╤Б╨░╨╝╨╕ ╨╢╨╡ ╤Б╨╛╨▒╨╕╤А╨░╨╡╨╝╤Б╤П ╨╕╤Е ╨┐╨╛╨┤╨╜╨╕╨╝╨░╤В╤М. ╨С╨╡╨╖ ╤Н╤В╨╛╨│╨╛ ╨║╨░╨╢╨┤╤Л╨╣ ╨░╨║╨║╨░╤Г╨╜╤В,
-                # ╨║╨╛╤В╨╛╤А╨╛╨╝╤Г ╨╜╤Г╨╢╨╡╨╜ ╨▒╤А╨░╤Г╨╖╨╡╤А, ╨┐╨╛╨╗╤Г╤З╨░╨╗ ┬л╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝┬╗ ╨▒╨╡╨╖
-                # ╨╡╨┤╨╕╨╜╨╛╨╣ ╨┐╨╛╨┐╤Л╤В╨║╨╕: 22 ╨╕╨╖ 25 ╨▓ ╨╛╨┤╨╜╨╛╨╝ ╨┐╤А╨╛╨│╨╛╨╜╨╡, 18 ╨╕╨╖ 22 ╨▓ ╨┤╤А╤Г╨│╨╛╨╝, ╨┐╤А╨╕
-                # ╨╜╤Г╨╗╨╡ ╨╜╨░╤Б╤В╨╛╤П╤Й╨╕╤Е ╨╛╤В╨║╨░╨╖╨╛╨▓. ╨в╨░╨║ ╨╢╨╡ ╨┐╨╛╤Б╤В╤Г╨┐╨░╨╡╤В
-                # interrupt_competing_playwright_for_account_refresh ╨▓ ╤Б╨▓╨╛╤С╨╝ finally.
+                # И сразу снимаем флаг. shutdown_all_workers() взводит force_stop,
+                # чтобы демоны не поднялись обратно, пока идёт kill, — но здесь мы
+                # сами же собираемся их поднимать. Без этого каждый аккаунт,
+                # которому нужен браузер, получал «Остановлено пользователем» без
+                # единой попытки: 22 из 25 в одном прогоне, 18 из 22 в другом, при
+                # нуле настоящих отказов. Так же поступает
+                # interrupt_competing_playwright_for_account_refresh в своём finally.
                 clear_playwright_refresh_force_stop()
             except Exception:
                 pass
@@ -972,7 +972,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
             state.refresh_from_db(fields=["cancel_requested"])
             if state.cancel_requested:
                 stop_requested.set()
-                state.last_error = "╨Ю╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨╛╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝."
+                state.last_error = "Обновление остановлено пользователем."
                 state.save(update_fields=["last_error", "updated_at"])
             errors_out: list[dict] = []
             import uuid
@@ -998,7 +998,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                 aborted = abort_active_apify_jobs()
                 if aborted:
                     print(
-                        f"[bulk_refresh] ╨╛╤В╨╝╨╡╨╜╨╡╨╜╨╛ ╨░╨║╤В╨╕╨▓╨╜╤Л╤Е Apify jobs: {aborted}",
+                        f"[bulk_refresh] отменено активных Apify jobs: {aborted}",
                         file=sys.stderr,
                         flush=True,
                     )
@@ -1099,7 +1099,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         with state_lock:
                             state.refresh_from_db(fields=["cancel_requested"])
                             if bool(state.cancel_requested):
-                                state.last_error = "╨Ю╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨╛╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝."
+                                state.last_error = "Обновление остановлено пользователем."
                                 state.save(update_fields=["last_error", "updated_at"])
                                 stop_requested.set()
                                 return
@@ -1146,7 +1146,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                             _persist_auto_refresh_run_item(account.id, status="running", worker=slot)
 
                             if cutoff is not None and account.updated_at and account.updated_at >= cutoff:
-                                skip_detail = f"╨╜╨╡╨┤╨░╨▓╨╜╨╛ ╨╛╨▒╨╜╨╛╨▓╨╗╤С╨╜ (тЙд {skip_recent_hours} ╤З)"
+                                skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
                                 _persist_auto_refresh_run_item(
                                     account.id,
                                     status="skipped",
@@ -1212,7 +1212,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                         .first()
                                     )
                                     if job and job.status != ApifyRefreshJobStatus.SUCCEEDED:
-                                        err_msg = (job.error_message or "╨Ю╤И╨╕╨▒╨║╨░ Apify")[:800]
+                                        err_msg = (job.error_message or "Ошибка Apify")[:800]
                                         _persist_auto_refresh_run_item(
                                             account.id,
                                             status="error",
@@ -1251,13 +1251,13 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 if refreshed is not None and is_refresh_cancel_requested():
                                     _restore_account_refresh_baseline(account.pk, refresh_baseline)
                                     refreshed = None
-                                    detail = "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝"
+                                    detail = "Остановлено пользователем"
                                 if refreshed is not None:
                                     _persist_auto_refresh_run_item(
                                         account.id, status="done", worker=None, detail="",
                                     )
                                     _mark_progress(success=True, failed=False)
-                                elif detail and "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜" in str(detail):
+                                elif detail and "Остановлен" in str(detail):
                                     _persist_auto_refresh_run_item(
                                         account.id,
                                         status="cancelled",
@@ -1317,7 +1317,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                 account.id,
                                 status="cancelled",
                                 worker=None,
-                                detail="╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝",
+                                detail="Остановлено пользователем",
                             )
                             _mark_progress(success=False, failed=False)
                             stop_requested.set()
@@ -1394,7 +1394,7 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                                     )
                                 if account.platform == Platform.FACEBOOK and delay_sec > 0:
                                     print(
-                                        f"[bulk_refresh] facebook cooldown {delay_sec:.0f} ╤Б",
+                                        f"[bulk_refresh] facebook cooldown {delay_sec:.0f} с",
                                         file=sys.stderr,
                                         flush=True,
                                     )
@@ -1426,10 +1426,10 @@ def _run_bulk_refresh_background(account_ids: list[int]) -> None:
                         _mark_bulk_refresh_queued_cancelled(state)
                     if errors_out:
                         last = errors_out[-1]
-                        prefix = "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╨╖╨░╨┐╤А╨╛╤И╨╡╨╜╨░. " if stop_requested.is_set() else ""
+                        prefix = "Остановка запрошена. " if stop_requested.is_set() else ""
                         state.last_error = (
-                            f"{prefix}╨Ю╤И╨╕╨▒╨╛╨║: {len(errors_out)} ╨╕╨╖ {len(ordered)}. "
-                            f"╨Я╨╛╤Б╨╗╨╡╨┤╨╜╤П╤П (id={last.get('id')}): {last.get('detail', '')}"
+                            f"{prefix}Ошибок: {len(errors_out)} из {len(ordered)}. "
+                            f"Последняя (id={last.get('id')}): {last.get('detail', '')}"
                         )[:4000]
                         state.save(update_fields=["last_error", "updated_at"])
                     elif not stop_requested.is_set():
@@ -1526,7 +1526,7 @@ def _finalize_refresh_all_run_detail_stale() -> None:
                 stt = str(it.get("status") or "")
                 if stt in ("queued", "running"):
                     it["status"] = "cancelled"
-                    it["detail"] = "╨╜╨╡ ╨╛╨▒╤А╨░╨▒╨╛╤В╨░╨╜ (╨╛╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╨╕╨╗╨╕ ╨┐╤А╨╡╤А╤Л╨▓╨░╨╜╨╕╨╡)"
+                    it["detail"] = "не обработан (остановка или прерывание)"
                     it["worker"] = None
                     changed = True
             if changed:
@@ -1547,13 +1547,13 @@ def _refresh_all_cancel_requested() -> bool:
 
 def _refresh_all_set_user_stop_message() -> None:
     RefreshAllState.objects.filter(pk=1).update(
-        last_error="╨б╨▒╨╛╤А ╨╛╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝.",
+        last_error="Сбор остановлен пользователем.",
         updated_at=timezone.now(),
     )
 
 
 def _refresh_all_atomic_progress(*, failed: bool, last_error: str = "") -> None:
-    """╨Я╨╛╤В╨╛╨║╨╛╨▒╨╡╨╖╨╛╨┐╨░╤Б╨╜╤Л╨╣ ╤Б╤З╤С╤В╤З╨╕╨║ ╨┐╤А╨╛╨│╤А╨╡╤Б╤Б╨░ ╨▒╨╡╨╖ ╨╛╨▒╤Й╨╡╨│╨╛ ╤Н╨║╨╖╨╡╨╝╨┐╨╗╤П╤А╨░ ╨╝╨╛╨┤╨╡╨╗╨╕ ╨▓ ╨┐╨░╨╝╤П╤В╨╕."""
+    """Потокобезопасный счётчик прогресса без общего экземпляра модели в памяти."""
     now = timezone.now()
     qs = RefreshAllState.objects.filter(pk=1)
     if failed:
@@ -1573,15 +1573,15 @@ def _refresh_all_atomic_progress(*, failed: bool, last_error: str = "") -> None:
 
 def _refresh_all_apply_completion_summary(report_rows: list[dict]) -> None:
     """
-    ╨Я╨╛╤Б╨╗╨╡ ╨┐╨╛╨╗╨╜╨╛╨│╨╛ ╨┐╤А╨╛╤Е╨╛╨┤╨░ ╨╛╤З╨╡╤А╨╡╨┤╨╕: ╨╖╨░╤Д╨╕╨║╤Б╨╕╤А╨╛╨▓╨░╤В╤М ╤Б╨▓╨╛╨┤╨║╤Г ╨┐╨╛ ╨╛╤И╨╕╨▒╨║╨░╨╝ ╨▓ last_error ╨╕ run_detail.
-    ╨Т╨╛ ╨▓╤А╨╡╨╝╤П ╨┐╤А╨╛╨│╨╛╨╜╨░ last_error ╨┐╨╡╤А╨╡╨╖╨░╨┐╨╕╤Б╤Л╨▓╨░╨╡╤В╤Б╤П ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨╣ ╨╛╤И╨╕╨▒╨║╨╛╨╣ ╨┐╨╛ ╨░╨║╨║╨░╤Г╨╜╤В╤Г тАФ ╨╖╨┤╨╡╤Б╤М ╨┤╨░╤С╨╝ ╨╕╤В╨╛╨│.
+    После полного прохода очереди: зафиксировать сводку по ошибкам в last_error и run_detail.
+    Во время прогона last_error перезаписывается последней ошибкой по аккаунту — здесь даём итог.
     """
     try:
         with transaction.atomic():
             st = RefreshAllState.objects.select_for_update().get(pk=1)
             rd = st.run_detail if isinstance(st.run_detail, dict) else {}
             rd = dict(rd)
-            err_rows = [r for r in report_rows if r.get("status") == "╨╛╤И╨╕╨▒╨║╨░"]
+            err_rows = [r for r in report_rows if r.get("status") == "ошибка"]
             failed_n = len(err_rows)
             if failed_n:
                 last = err_rows[-1]
@@ -1595,8 +1595,8 @@ def _refresh_all_apply_completion_summary(report_rows: list[dict]) -> None:
                     "last_error_detail": err_txt[:2000],
                 }
                 summary_msg = (
-                    f"╨Т ╤Е╨╛╨┤╨╡ ╤Б╨▒╨╛╤А╨░ ╨╛╤И╨╕╨▒╨╛╨║: {failed_n}. "
-                    f"╨Я╨╛╤Б╨╗╨╡╨┤╨╜╤П╤П ({plat}/@{uname}): {err_txt}"
+                    f"В ходе сбора ошибок: {failed_n}. "
+                    f"Последняя ({plat}/@{uname}): {err_txt}"
                 )[:4000]
                 st.run_detail = rd
                 st.last_error = summary_msg
@@ -1611,7 +1611,7 @@ def _refresh_all_apply_completion_summary(report_rows: list[dict]) -> None:
 
 
 def _refresh_all_local_dt_str(dt) -> str:
-    """╨з╨╡╨╗╨╛╨▓╨╡╨║╨╛╤З╨╕╤В╨░╨╡╨╝╨╛╨╡ ╨╗╨╛╨║╨░╨╗╤М╨╜╨╛╨╡ ╨▓╤А╨╡╨╝╤П (╨╜╨░╤Б╤В╤А╨╛╨╣╨║╨╕ Django, ╨╛╨▒╤Л╤З╨╜╨╛ Europe/Moscow)."""
+    """Человекочитаемое локальное время (настройки Django, обычно Europe/Moscow)."""
     if not dt:
         return ""
     if timezone.is_naive(dt):
@@ -1631,8 +1631,8 @@ def _refresh_all_save_report_csv(
     failed_db: int,
 ) -> None:
     """
-    ╨б╨╛╤Е╤А╨░╨╜╤П╨╡╤В UTF-8 CSV ╨╛╤В╤З╤С╤В╨░ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨│╨╛ ┬л╤Б╨╛╨▒╤А╨░╤В╤М ╨▓╤Б╨╡╤Е┬╗ ╨▓ RefreshAllState.last_report_csv
-    ╨╕ ╨╝╨╡╤В╨░╨┤╨░╨╜╨╜╤Л╨╡ ╨┐╤А╨╛╨│╨╛╨╜╨░ ╨▓ run_detail['report_run'].
+    Сохраняет UTF-8 CSV отчёта последнего «собрать всех» в RefreshAllState.last_report_csv
+    и метаданные прогона в run_detail['report_run'].
     """
     try:
         wall_sec = 0.0
@@ -1641,23 +1641,23 @@ def _refresh_all_save_report_csv(
         buffer = io.StringIO()
         writer = csv.writer(buffer, lineterminator="\n")
         headers = [
-            "ID ╨░╨║╨║╨░╤Г╨╜╤В╨░",
-            "╨Я╨╗╨╛╤Й╨░╨┤╨║╨░",
-            "╨Ы╨╛╨│╨╕╨╜",
-            "╨б╤В╨░╤В╤Г╤Б",
-            "╨б╨╡╨║╤Г╨╜╨┤ ╨╜╨░ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡",
-            "╨Э╨░╤З╨░╨╗╨╛ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П (╨╗╨╛╨║╨░╨╗╤М╨╜╨╛╨╡)",
-            "╨Ъ╨╛╨╜╨╡╤Ж ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П (╨╗╨╛╨║╨░╨╗╤М╨╜╨╛╨╡)",
-            "╨б╨╛╤Е╤А╨░╨╜╨╡╨╜╨╛ ╨▓ ╨С╨Ф (╨╗╨╛╨║╨░╨╗╤М╨╜╨╛╨╡)",
-            "╨Я╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╕",
-            "╨Ф╨╡╨╗╤М╤В╨░ ╨┐╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╛╨▓",
-            "╨Ы╨░╨╣╨║╨╕",
-            "╨Ф╨╡╨╗╤М╤В╨░ ╨╗╨░╨╣╨║╨╛╨▓",
-            "╨Я╤А╨╛╤Б╨╝╨╛╤В╤А╤Л",
-            "╨Ф╨╡╨╗╤М╤В╨░ ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨╛╨▓",
-            "╨Я╨╛╤Б╤В╤Л",
-            "╨Ф╨╡╨╗╤М╤В╨░ ╨┐╨╛╤Б╤В╨╛╨▓",
-            "╨в╨╡╨║╤Б╤В ╨╛╤И╨╕╨▒╨║╨╕",
+            "ID аккаунта",
+            "Площадка",
+            "Логин",
+            "Статус",
+            "Секунд на обновление",
+            "Начало обновления (локальное)",
+            "Конец обновления (локальное)",
+            "Сохранено в БД (локальное)",
+            "Подписчики",
+            "Дельта подписчиков",
+            "Лайки",
+            "Дельта лайков",
+            "Просмотры",
+            "Дельта просмотров",
+            "Посты",
+            "Дельта постов",
+            "Текст ошибки",
         ]
         writer.writerow(headers)
         for row in report_rows:
@@ -1681,27 +1681,27 @@ def _refresh_all_save_report_csv(
                 row.get("error", ""),
             ])
         writer.writerow([])
-        writer.writerow(["╨Ш╨в╨Ю╨У ╨┐╤А╨╛╨│╨╛╨╜╨░", "╨Я╨░╤А╨░╨╝╨╡╤В╤А", "╨Ч╨╜╨░╤З╨╡╨╜╨╕╨╡"])
+        writer.writerow(["ИТОГ прогона", "Параметр", "Значение"])
         ok_rows = sum(
             1 for r in report_rows
-            if r.get("status") in ("╨╛╨▒╨╜╨╛╨▓╨╕╨╗╨╛╤Б╤М", "╨╜╨╡╤В ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╣")
+            if r.get("status") in ("обновилось", "нет обновлений")
         )
         meta_lines = [
-            ("╨Э╨░╤З╨░╨╗╨╛ ╤Б╨▒╨╛╤А╨░ (╨╗╨╛╨║╨░╨╗╤М╨╜╨╛╨╡)", _refresh_all_local_dt_str(run_wall_start)),
-            ("╨Ъ╨╛╨╜╨╡╤Ж ╤Б╨▒╨╛╤А╨░ (╨╗╨╛╨║╨░╨╗╤М╨╜╨╛╨╡)", _refresh_all_local_dt_str(run_wall_end)),
-            ("╨Т╤Б╨╡╨│╨╛ ╤Б╨╡╨║╤Г╨╜╨┤ (╨╝╨╛╨╜╨╛╤В╨╛╨╜╨╜╨╛)", str(round(run_duration_mono_sec, 3))),
-            ("╨Т╤Б╨╡╨│╨╛ ╤Б╨╡╨║╤Г╨╜╨┤ (╨┐╨╛ ╤З╨░╤Б╨░╨╝)", str(round(wall_sec, 3))),
-            ("╨Т╨╛╤А╨║╨╡╤А╨╛╨▓", str(worker_count)),
-            ("╨б╤В╤А╨╛╨║ ╨▓ ╨╛╤В╤З╤С╤В╨╡", str(len(report_rows))),
-            ("╨г╤Б╨┐╨╡╤И╨╜╤Л╤Е (╨┐╨╛ ╤Б╤В╤А╨╛╨║╨░╨╝)", str(ok_rows)),
-            ("╨Ю╤И╨╕╨▒╨╛╨║ (╨┐╨╛ ╤Б╤В╤А╨╛╨║╨░╨╝)", str(sum(1 for r in report_rows if r.get("status") == "╨╛╤И╨╕╨▒╨║╨░"))),
-            ("╨Э╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╨╡╨╜╨╛ (╨┐╨╛ ╤Б╤В╤А╨╛╨║╨░╨╝)", str(sum(1 for r in report_rows if r.get("status") == "╨╜╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╨╡╨╜╨╛"))),
-            ("╨Ю╨▒╤А╨░╨▒╨╛╤В╨░╨╜╨╛ (╤Б╤З╤С╤В╤З╨╕╨║ ╨С╨Ф)", str(processed_db)),
-            ("╨г╤Б╨┐╨╡╤И╨╜╨╛ (╤Б╤З╤С╤В╤З╨╕╨║ ╨С╨Ф)", str(success_db)),
-            ("╨б ╨╛╤И╨╕╨▒╨║╨╛╨╣ (╤Б╤З╤С╤В╤З╨╕╨║ ╨С╨Ф)", str(failed_db)),
+            ("Начало сбора (локальное)", _refresh_all_local_dt_str(run_wall_start)),
+            ("Конец сбора (локальное)", _refresh_all_local_dt_str(run_wall_end)),
+            ("Всего секунд (монотонно)", str(round(run_duration_mono_sec, 3))),
+            ("Всего секунд (по часам)", str(round(wall_sec, 3))),
+            ("Воркеров", str(worker_count)),
+            ("Строк в отчёте", str(len(report_rows))),
+            ("Успешных (по строкам)", str(ok_rows)),
+            ("Ошибок (по строкам)", str(sum(1 for r in report_rows if r.get("status") == "ошибка"))),
+            ("Не выполнено (по строкам)", str(sum(1 for r in report_rows if r.get("status") == "не выполнено"))),
+            ("Обработано (счётчик БД)", str(processed_db)),
+            ("Успешно (счётчик БД)", str(success_db)),
+            ("С ошибкой (счётчик БД)", str(failed_db)),
         ]
         for label, value in meta_lines:
-            writer.writerow(["╨Ш╨в╨Ю╨У ╨┐╤А╨╛╨│╨╛╨╜╨░", label, value])
+            writer.writerow(["ИТОГ прогона", label, value])
 
         generated_at = timezone.now()
         meta_dict = {
@@ -1713,8 +1713,8 @@ def _refresh_all_save_report_csv(
             "worker_count": worker_count,
             "row_count": len(report_rows),
             "row_ok_count": ok_rows,
-            "row_error_count": sum(1 for r in report_rows if r.get("status") == "╨╛╤И╨╕╨▒╨║╨░"),
-            "row_skipped_count": sum(1 for r in report_rows if r.get("status") == "╨╜╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╨╡╨╜╨╛"),
+            "row_error_count": sum(1 for r in report_rows if r.get("status") == "ошибка"),
+            "row_skipped_count": sum(1 for r in report_rows if r.get("status") == "не выполнено"),
             "db_processed_accounts": processed_db,
             "db_success_accounts": success_db,
             "db_failed_accounts": failed_db,
@@ -1765,7 +1765,7 @@ def _run_refresh_all_background(
         )
         accounts = order_accounts_for_refresh(list(accounts_qs))
         worker_count = _parallel_refresh_worker_count(accounts)
-        _ = download_csv  # CSV ╨╜╨░ ╤Б╨╡╤А╨▓╨╡╤А╨╡ ╨▓╤Б╨╡╨│╨┤╨░; ╤Д╨╗╨░╨│ ╤В╨╛╨╗╤М╨║╨╛ ╨▓ ╨╛╤В╨▓╨╡╤В╨╡ POST ╨┤╨╗╤П ╤Б╨╛╨▓╨╝╨╡╤Б╤В╨╕╨╝╨╛╤Б╤В╨╕
+        _ = download_csv  # CSV на сервере всегда; флаг только в ответе POST для совместимости
 
         skip_recent_hours, skip_cutoff = _schedule_skip_recent_cutoff()
         from .refresh_skip_recent import build_initial_run_detail_items
@@ -1798,7 +1798,7 @@ def _run_refresh_all_background(
             aborted = abort_active_apify_jobs()
             if aborted:
                 print(
-                    f"[refresh_all] ╨╛╤В╨╝╨╡╨╜╨╡╨╜╨╛ ╨░╨║╤В╨╕╨▓╨╜╤Л╤Е Apify jobs: {aborted}",
+                    f"[refresh_all] отменено активных Apify jobs: {aborted}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -1991,12 +1991,12 @@ def _run_refresh_all_background(
                                         "updated_at",
                                     ],
                                 )
-                                skip_detail = f"╨╜╨╡╨┤╨░╨▓╨╜╨╛ ╨╛╨▒╨╜╨╛╨▓╨╗╤С╨╜ (тЙд {skip_recent_hours} ╤З)"
+                                skip_detail = f"недавно обновлён (≤ {skip_recent_hours} ч)"
                                 row = {
                                     "id": account.id,
                                     "platform": account.platform,
                                     "username": account.username,
-                                    "status": "╨┐╤А╨╛╨┐╤Г╤Й╨╡╨╜",
+                                    "status": "пропущен",
                                     "follower_count": account.follower_count,
                                     "follower_delta": 0,
                                     "like_count": account.like_count,
@@ -2025,7 +2025,7 @@ def _run_refresh_all_background(
                                     "id": account.id,
                                     "platform": account.platform,
                                     "username": account.username,
-                                    "status": "╨┐╤А╨╛╨┐╤Г╤Й╨╡╨╜",
+                                    "status": "пропущен",
                                     "follower_count": before["follower_count"],
                                     "follower_delta": 0,
                                     "like_count": before["like_count"],
@@ -2053,7 +2053,7 @@ def _run_refresh_all_background(
                                     "id": account.id,
                                     "platform": account.platform,
                                     "username": account.username,
-                                    "status": "╨╛╤И╨╕╨▒╨║╨░",
+                                    "status": "ошибка",
                                     "error": err_detail,
                                     "follower_count": before["follower_count"],
                                     "follower_delta": None,
@@ -2086,7 +2086,7 @@ def _run_refresh_all_background(
                                         "id": account.id,
                                         "platform": account.platform,
                                         "username": account.username,
-                                        "status": "╨╛╤И╨╕╨▒╨║╨░",
+                                        "status": "ошибка",
                                         "error": detail,
                                         "follower_count": before["follower_count"],
                                         "follower_delta": None,
@@ -2129,12 +2129,12 @@ def _run_refresh_all_background(
                                         "post_count": account.post_count,
                                     }
                                     if job and job.status != ApifyRefreshJobStatus.SUCCEEDED:
-                                        detail = (job.error_message or "╨Ю╤И╨╕╨▒╨║╨░ Apify")[:800]
+                                        detail = (job.error_message or "Ошибка Apify")[:800]
                                         row = {
                                             "id": account.id,
                                             "platform": account.platform,
                                             "username": account.username,
-                                            "status": "╨╛╤И╨╕╨▒╨║╨░",
+                                            "status": "ошибка",
                                             "error": detail,
                                             "follower_count": before["follower_count"],
                                             "follower_delta": None,
@@ -2160,9 +2160,9 @@ def _run_refresh_all_background(
                                         }
                                         changed_count = sum(1 for v in changed.values() if v)
                                         status_label = (
-                                            "╨╜╨╡╤В ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╣"
+                                            "нет обновлений"
                                             if changed_count == 0
-                                            else "╨╛╨▒╨╜╨╛╨▓╨╕╨╗╨╛╤Б╤М"
+                                            else "обновилось"
                                         )
                                         row = {
                                             "id": account.id,
@@ -2207,7 +2207,7 @@ def _run_refresh_all_background(
                                         "id": account.id,
                                         "platform": account.platform,
                                         "username": account.username,
-                                        "status": "╨╛╤В╨╝╨╡╨╜╤С╨╜",
+                                        "status": "отменён",
                                         "follower_count": before["follower_count"],
                                         "follower_delta": 0,
                                         "like_count": before["like_count"],
@@ -2216,14 +2216,14 @@ def _run_refresh_all_background(
                                         "view_delta": 0,
                                         "post_count": before["post_count"],
                                         "post_delta": 0,
-                                        "detail": "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝",
+                                        "detail": "Остановлено пользователем",
                                     }
                                     _refresh_all_atomic_progress(failed=False)
                                     _persist_refresh_all_run_item(
                                         account.id,
                                         status="cancelled",
                                         worker=None,
-                                        detail="╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝",
+                                        detail="Остановлено пользователем",
                                     )
                                     stop_requested.set()
                                 else:
@@ -2245,7 +2245,7 @@ def _run_refresh_all_background(
                                     }
                                     changed = {k: (after[k] != before[k]) for k in before}
                                     changed_count = sum(1 for v in changed.values() if v)
-                                    status_label = "╨╜╨╡╤В ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╣" if changed_count == 0 else "╨╛╨▒╨╜╨╛╨▓╨╕╨╗╨╛╤Б╤М"
+                                    status_label = "нет обновлений" if changed_count == 0 else "обновилось"
                                     row = {
                                         "id": account.id,
                                         "platform": account.platform,
@@ -2268,7 +2268,7 @@ def _run_refresh_all_background(
                                 "id": account.id,
                                 "platform": account.platform,
                                 "username": account.username,
-                                "status": "╨╛╤В╨╝╨╡╨╜╤С╨╜",
+                                "status": "отменён",
                                 "follower_count": before["follower_count"],
                                 "follower_delta": 0,
                                 "like_count": before["like_count"],
@@ -2277,14 +2277,14 @@ def _run_refresh_all_background(
                                 "view_delta": 0,
                                 "post_count": before["post_count"],
                                 "post_delta": 0,
-                                "detail": "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝",
+                                "detail": "Остановлено пользователем",
                             }
                             _refresh_all_atomic_progress(failed=False)
                             _persist_refresh_all_run_item(
                                 account.id,
                                 status="cancelled",
                                 worker=None,
-                                detail="╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝",
+                                detail="Остановлено пользователем",
                             )
                             stop_requested.set()
                         except Exception as e:
@@ -2322,7 +2322,7 @@ def _run_refresh_all_background(
                                         "id": account.id,
                                         "platform": account.platform,
                                         "username": account.username,
-                                        "status": "╤Г╤Б╨┐╨╡╤И╨╜╨╛",
+                                        "status": "успешно",
                                         "error": "",
                                         "follower_count": account.follower_count,
                                         "follower_delta": (
@@ -2361,7 +2361,7 @@ def _run_refresh_all_background(
                                     "id": account.id,
                                     "platform": account.platform,
                                     "username": account.username,
-                                    "status": "╨╛╤И╨╕╨▒╨║╨░",
+                                    "status": "ошибка",
                                     "error": detail,
                                     "follower_count": before["follower_count"],
                                     "follower_delta": None,
@@ -2387,7 +2387,7 @@ def _run_refresh_all_background(
                             row["refresh_duration_sec"] = round(acc_mono_end - acc_mono_start, 3)
                             row["refresh_started_local"] = _refresh_all_local_dt_str(acc_wall_start)
                             row["refresh_finished_local"] = _refresh_all_local_dt_str(acc_wall_end)
-                            if row.get("status") not in ("╨╛╤И╨╕╨▒╨║╨░", "╨╜╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╨╡╨╜╨╛"):
+                            if row.get("status") not in ("ошибка", "не выполнено"):
                                 row["account_db_updated_local"] = _refresh_all_local_dt_str(account.updated_at)
                             else:
                                 row["account_db_updated_local"] = ""
@@ -2441,7 +2441,7 @@ def _run_refresh_all_background(
                     "id": acc_nf.id,
                     "platform": acc_nf.platform,
                     "username": acc_nf.username,
-                    "status": "╨╜╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╨╡╨╜╨╛",
+                    "status": "не выполнено",
                     "follower_count": fb,
                     "follower_delta": 0,
                     "like_count": lb,
@@ -2450,7 +2450,7 @@ def _run_refresh_all_background(
                     "view_delta": 0,
                     "post_count": pb,
                     "post_delta": 0,
-                    "error": "╨╛╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╨┤╨╛ ╨╛╨▒╤А╨░╨▒╨╛╤В╨║╨╕ ╤Н╤В╨╛╨│╨╛ ╨░╨║╨║╨░╤Г╨╜╤В╨░",
+                    "error": "остановка до обработки этого аккаунта",
                     "refresh_duration_sec": "",
                     "refresh_started_local": "",
                     "refresh_finished_local": "",
@@ -2606,7 +2606,7 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
     stats_before = {f: int(getattr(account, f) or 0) for f in _STAT_FIELDS}
     account.profile_unavailable = False
     # _partial=True means we only have non-stat fields (e.g. avatar from authenticated HTML
-    # when follower counts were unavailable) тАФ preserve existing DB stats.
+    # when follower counts were unavailable) — preserve existing DB stats.
     is_partial = data.pop("_partial", False)
     posts_authoritative = data.pop("_posts_authoritative", True)
     has_posts_key = "_posts" in data
@@ -2618,21 +2618,21 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             # Some scrapers return extra fields (e.g. following_count) that are
             # not stored in Account model; skip them without breaking refresh.
             continue
-        # Username тАФ ╨║╨╗╤О╤З ╤Г╨╜╨╕╨║╨░╨╗╤М╨╜╨╛╤Б╤В╨╕; ╤Б╨║╤А╨░╨┐╨╡╤А ╨╜╨╡ ╨┤╨╛╨╗╨╢╨╡╨╜ ╨┐╨╛╨┤╨╝╨╡╨╜╤П╤В╤М @╨║╨╕╤А╨╕╨╗╨╗╨╕╤Ж╨░ ╨╜╨░ UCтАж.
+        # Username — ключ уникальности; скрапер не должен подменять @кириллица на UC….
         if field == "username":
             continue
-        # _partial ╤Г Instagram ╤Б╤В╨░╨▓╨╕╤В╤Б╤П, ╨║╨╛╨│╨┤╨░ ╤Б╨╛╨▒╤А╨░╨╗╨╕ ╨╝╨╡╨╜╤М╤И╨╡ ╨┐╨╛╤Б╤В╨╛╨▓, ╤З╨╡╨╝ ╨╖╨░╤П╨▓╨╗╨╡╨╜╨╛ ╨▓
-        # ╨┐╤А╨╛╤Д╨╕╨╗╨╡ (191 ╨┐╨╛╤Б╤В, ╤Б╨╛╨▒╤А╨░╨╜╨╛ 36). ╨н╤В╨╛ ╤Г╤В╨▓╨╡╤А╨╢╨┤╨╡╨╜╨╕╨╡ ╨┐╤А╨╛ ╤Б╨┐╨╕╤Б╨╛╨║ ╨┐╨╛╤Б╤В╨╛╨▓, ╨░ ╨╜╨╡
-        # ╨┐╤А╨╛ ╨▓╤Б╤О ╤Б╤В╨░╤В╨╕╤Б╤В╨╕╨║╤Г: ╨┐╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╕ ╨▒╨╡╤А╤Г╤В╤Б╤П ╤Б╨╛ ╤Б╤В╤А╨░╨╜╨╕╤Ж╤Л ╨┐╤А╨╛╤Д╨╕╨╗╤П ╨╕ ╨║ ╨┐╨╛╤Б╤В╨░╨╝
-        # ╨╛╤В╨╜╨╛╤И╨╡╨╜╨╕╤П ╨╜╨╡ ╨╕╨╝╨╡╤О╤В. ╨а╨░╨╜╤М╤И╨╡ ╤Д╨╗╨░╨│ ╨▓╤Л╨▒╤А╨░╤Б╤Л╨▓╨░╨╗ ╨╕ ╨╕╤Е ╤В╨╛╨╢╨╡ тАФ ╨┐╨╛╤Н╤В╨╛╨╝╤Г ╨▓ ╨▒╨░╨╖╨╡
-        # ╤Б╤В╨╛╤П╨╗╨╕ ╨╜╤Г╨╗╨╕ ╨┐╤А╨╕ ╨╕╤Б╨┐╤А╨░╨▓╨╜╨╛ ╤Б╨╜╤П╤В╤Л╤Е 456 000. ╨Ю╤В ╨╖╨░╨╜╤Г╨╗╨╡╨╜╨╕╤П ╨┐╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╛╨▓
-        # ╨╖╨░╤Й╨╕╤Й╨░╨╡╤В ╨┐╤А╨╛╨▓╨╡╤А╨║╨░ ╨╜╨╕╨╢╨╡: ╨╜╨╛╨╗╤М ╨╜╨╡ ╨╖╨░╤В╨╕╤А╨░╨╡╤В ╨╢╨╕╨▓╨╛╨╡ ╤З╨╕╤Б╨╗╨╛.
+        # _partial у Instagram ставится, когда собрали меньше постов, чем заявлено в
+        # профиле (191 пост, собрано 36). Это утверждение про список постов, а не
+        # про всю статистику: подписчики берутся со страницы профиля и к постам
+        # отношения не имеют. Раньше флаг выбрасывал и их тоже — поэтому в базе
+        # стояли нули при исправно снятых 456 000. От зануления подписчиков
+        # защищает проверка ниже: ноль не затирает живое число.
         if is_partial and field in _POST_DERIVED_STAT_FIELDS:
-            continue  # ╨╜╨╡╨┐╨╛╨╗╨╜╤Л╨╣ ╤Б╨┐╨╕╤Б╨╛╨║ ╨┐╨╛╤Б╤В╨╛╨▓ тАФ ╤Б╤З╨╕╤В╨░╨╡╨╝ ╨░╨│╤А╨╡╨│╨░╤В╤Л ╨┐╨╛ ╨▒╨░╨╖╨╡, ╨░ ╨╜╨╡ ╨┐╨╛ ╨╜╨╡╨╝╤Г
-        # ╨Э╨╛╨╗╤М ╨┐╨╛╨▓╨╡╤А╤Е ╨╢╨╕╨▓╨╛╨│╨╛ ╤З╨╕╤Б╨╗╨░ тАФ ╨┐╨╛╤З╤В╨╕ ╨▓╤Б╨╡╨│╨┤╨░ ╨╜╨╡╤Г╨┤╨░╨▓╤И╨╕╨╣╤Б╤П ╤Б╤К╤С╨╝, ╨░ ╨╜╨╡ ╤А╨╡╨░╨╗╤М╨╜╨╛╨╡
-        # ╨┐╨░╨┤╨╡╨╜╨╕╨╡ ╨┤╨╛ ╨╜╤Г╨╗╤П. ╨д╨╗╨░╨│ _partial ╤Б╨┐╨░╤Б╨░╨╡╤В ╤В╨╛╨╗╤М╨║╨╛ ╨║╨╛╨│╨┤╨░ ╨╜╨╡ ╤Б╨╛╨▒╤А╨░╨╗╨╛╤Б╤М ╨▓╨╛╨╛╨▒╤Й╤С
-        # ╨╜╨╕╤З╨╡╨│╨╛; ╤З╨░╤Б╤В╨╕╤З╨╜╤Л╨╣ ╨╛╤В╨▓╨╡╤В (Instagram ╨╛╤В╨┤╨░╨╗ ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╤Л ╨╕ ╨┐╨╛╤Б╤В╤Л, ╨░ ╨┐╨╛╨┤╨┐╨╕╤Б╤З╨╕╨║╨╛╨▓
-        # ╨╕ ╨╗╨░╨╣╨║╨╕ тАФ ╨╜╤Г╨╗╤П╨╝╨╕) ╨┐╤А╨╛╤Е╨╛╨┤╨╕╨╗ ╨╝╨╕╨╝╨╛ ╨╜╨╡╨│╨╛ ╨╕ ╨╖╨░╤В╨╕╤А╨░╨╗ ╨╜╨░╨║╨╛╨┐╨╗╨╡╨╜╨╜╨╛╨╡.
+            continue  # неполный список постов — считаем агрегаты по базе, а не по нему
+        # Ноль поверх живого числа — почти всегда неудавшийся съём, а не реальное
+        # падение до нуля. Флаг _partial спасает только когда не собралось вообщё
+        # ничего; частичный ответ (Instagram отдал просмотры и посты, а подписчиков
+        # и лайки — нулями) проходил мимо него и затирал накопленное.
         if (
             field in _STAT_FIELDS
             and not value
@@ -2666,12 +2666,12 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             setattr(account, field, value)
 
     if account.platform == Platform.TIKTOK:
-        # Apify/╨┐╨░╤А╤Б╨╡╤А ╨╝╨╛╨│╤Г╤В ╨╖╨░╨╜╨╕╨╖╨╕╤В╤М heart ╨╛╤В╨╜╨╛╤Б╨╕╤В╨╡╨╗╤М╨╜╨╛ UI; ╨╜╨╡ ╤А╨╛╨╜╤П╨╡╨╝ ╨╗╨░╨╣╨║╨╕ ╨┐╤А╨╛╤Д╨╕╨╗╤П ╨┐╤А╨╕ refresh.
+        # Apify/парсер могут занизить heart относительно UI; не роняем лайки профиля при refresh.
         account.like_count = max(
             int(stats_before.get("like_count", 0) or 0),
             int(account.like_count or 0),
         )
-        # videoCount ╨╕╨╖ ╤И╨░╨┐╨║╨╕ ╨▒╨╡╨╖ ╤Б╨┐╨╕╤Б╨║╨░ ╨┐╨╛╤Б╤В╨╛╨▓ тАФ ╤В╨╛╨╗╤М╨║╨╛ ╤Д╨░╨║╤В╨╕╤З╨╡╤Б╨║╨╕╨╡ ╨┐╨╛╤Б╤В╤Л ╨▓ ╨С╨Ф.
+        # videoCount из шапки без списка постов — только фактические посты в БД.
         if has_posts_key and not posts_authoritative and not posts:
             account.post_count = _posts_for_account_stats(account).count()
 
@@ -2709,8 +2709,8 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
 
         if not _refresh_stats_trustworthy(account, stats_before):
             raise ValueError(
-                "╨Ф╨░╨╜╨╜╤Л╨╡ ╨▓╤Л╨│╨╗╤П╨┤╤П╤В ╨║╨░╨║ ╨╛╤И╨╕╨▒╨║╨░ ╨╕╨╗╨╕ ╨╜╨╡╨┤╨╛╤Б╤В╤Г╨┐╨╜╨╛╤Б╤В╤М: ╨╜╤Г╨╗╨╡╨▓╤Л╨╡ ╨╝╨╡╤В╤А╨╕╨║╨╕ ╨┐╤А╨╕ ╨╜╨╡╨╜╤Г╨╗╨╡╨▓╤Л╤Е ╨▓ ╨▒╨░╨╖╨╡ "
-                "╨╕╨╗╨╕ ╨┐╤А╨╛╤Д╨╕╨╗╤М ╨┐╨╛╨╝╨╡╤З╨╡╨╜ ╨╜╨╡╨┤╨╛╤Б╤В╤Г╨┐╨╜╤Л╨╝. ╨Ю╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨╜╨╡ ╨┐╤А╨╕╨╝╨╡╨╜╨╡╨╜╨╛."
+                "Данные выглядят как ошибка или недоступность: нулевые метрики при ненулевых в базе "
+                "или профиль помечен недоступным. Обновление не применено."
             )
 
         raise_if_refresh_cancel_requested()
@@ -2779,7 +2779,7 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             link_click_count=account.link_click_count,
         )
 
-        # Fix snapshots where view_count is still 0 тАФ these are snapshots created
+        # Fix snapshots where view_count is still 0 — these are snapshots created
         # before the view_count field was added to AccountSnapshot (migration 0006).
         # Without this, delta = current_view_count - 0 = full count (wrong).
         account.snapshots.filter(
@@ -2787,7 +2787,7 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
             view_count=0,
         ).update(view_count=account.view_count)
 
-        # Fix snapshots where post_count is still 0 тАФ happens when a scraper only
+        # Fix snapshots where post_count is still 0 — happens when a scraper only
         # recently started returning post_count (e.g. Threads). Without this, the
         # first refresh would show the entire post count as a single-day delta.
         if account.post_count:
@@ -2829,7 +2829,7 @@ def _apply_refresh_after_scrape(account_pk: int, snap_pk: int, data: dict) -> Ac
 
 def _refresh_with_retry(account: Account, scraped: dict | None = None) -> Account:
     """
-    ╨б╨║╤А╨░╨┐╨╕╨╜╨│ ╨╛╨┤╨╕╨╜ ╤А╨░╨╖; ╨╖╨░╨┐╨╕╤Б╤М ╨▓ ╨С╨Ф тАФ ╤Б ╨┐╨╡╤А╨╡╨┐╨╛╨┤╨║╨╗╤О╤З╨╡╨╜╨╕╨╡╨╝ (╨┐╨╛╤Б╨╗╨╡ ╨┤╨╛╨╗╨│╨╛╨│╨╛ worker).
+    Скрапинг один раз; запись в БД — с переподключением (после долгого worker).
     """
     from .refresh_cancel import RefreshCancelledError, raise_if_refresh_cancel_requested
 
@@ -2875,7 +2875,7 @@ def _refresh_with_retry(account: Account, scraped: dict | None = None) -> Accoun
         except Exception as exc:
             last_exc = exc
             msg = str(exc).lower()
-            if "╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜" in msg or "not found" in msg:
+            if "не найден" in msg or "not found" in msg:
                 raise
             if not _stale_db_connection_error(exc) or attempt >= db_attempts - 1:
                 raise
@@ -2888,8 +2888,8 @@ class AccountViewSet(viewsets.ModelViewSet):
     serializer_class = AccountSerializer
 
     def get_queryset(self):
-        # ╨Ф╨╗╤П detail-╨╛╨┐╨╡╤А╨░╤Ж╨╕╨╣ ╨░╨║╨║╨░╤Г╨╜╤В ╨┤╨╛╨╗╨╢╨╡╨╜ ╨▒╤Л╤В╤М ╨┤╨╛╤Б╤В╤Г╨┐╨╡╨╜ ╨┐╨╛ ID ╨┤╨░╨╢╨╡ ╨╡╤Б╨╗╨╕ ╨╛╨╜
-        # ╤Б╨║╤А╤Л╤В ╨│╨╗╨╛╨▒╨░╨╗╤М╨╜╤Л╨╝╨╕ ╤Д╨╕╨╗╤М╤В╤А╨░╨╝╨╕ (╨╕╨╜╨░╤З╨╡ delete/retrieve ╨┤╨░╤О╤В 404).
+        # Для detail-операций аккаунт должен быть доступен по ID даже если он
+        # скрыт глобальными фильтрами (иначе delete/retrieve дают 404).
         action = getattr(self, "action", "")
         force_include_hidden_for_detail = action in {
             "retrieve",
@@ -2985,9 +2985,9 @@ class AccountViewSet(viewsets.ModelViewSet):
         if not force_include_hidden_for_detail:
             qs = _apply_archived_filter(qs, self.request.query_params.get("archived"))
             qs = _apply_banned_filter(qs, self.request.query_params.get("banned"))
-            # ╨Ф╨╛╨╝╨╡╨╜ тАФ ╤Б╨░╨╝╤Л╨╣ ╨▓╨╡╤А╤Е╨╜╨╕╨╣ ╤Д╨╕╨╗╤М╤В╤А. ╨Э╨░ detail ╨╜╨╡ ╨╜╨░╨║╨╗╨░╨┤╤Л╨▓╨░╨╡╨╝: ╨░╨║╨║╨░╤Г╨╜╤В
-            # ╨┤╨╛╨╗╨╢╨╡╨╜ ╨╛╤В╨║╤А╤Л╨▓╨░╤В╤М╤Б╤П ╨╕ ╨┐╤А╨░╨▓╨╕╤В╤М╤Б╤П ╨┐╨╛ ID, ╨╕╨╜╨░╤З╨╡ delete/retrieve ╨┤╨░╤О╤В
-            # 404 ╤А╨╛╨▓╨╜╨╛ ╨║╨░╨║ ╨╕ ╤Б ╨╛╤Б╤В╨░╨╗╤М╨╜╤Л╨╝╨╕ ╤Б╨║╤А╤Л╨▓╨░╤О╤Й╨╕╨╝╨╕ ╤Д╨╕╨╗╤М╤В╤А╨░╨╝╨╕ ╨▓╤Л╤И╨╡.
+            # Домен — самый верхний фильтр. На detail не накладываем: аккаунт
+            # должен открываться и правиться по ID, иначе delete/retrieve дают
+            # 404 ровно как и с остальными скрывающими фильтрами выше.
             qs = domains.narrow(qs, domains.resolve(self.request))
         return _apply_visibility_filters(
             qs,
@@ -3001,7 +3001,7 @@ class AccountViewSet(viewsets.ModelViewSet):
         serializer.instance.refresh_from_db(fields=["updated_at"])
 
     def perform_update(self, serializer):
-        """╨б╨╝╨╡╨╜╨░ ╨┐╤А╨╛╤Д╨╕╨╗╤П/╨▓╨╗╨░╨┤╨╡╨╗╤М╤Ж╨░/╨│╤А╤Г╨┐╨┐╤Л/╤Б╤В╤А╨░╨╜╤Л ╨╜╨╡ ╨┤╨▓╨╕╨│╨░╨╡╤В ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗ тАФ ╤В╨╛╨╗╤М╨║╨╛ ╤Г╤Б╨┐╨╡╤И╨╜╤Л╨╣ refresh ╤Б╤В╨░╤В╨╕╤Б╤В╨╕╨║╨╕."""
+        """Смена профиля/владельца/группы/страны не двигает «Обновлён» — только успешный refresh статистики."""
         validated = serializer.validated_data
         if _account_assignment_only_validated(validated):
             serializer.save(update_fields=_account_assignment_update_fields(validated))
@@ -3016,8 +3016,8 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """
-        ╨Ш╨╝╨┐╨╛╤А╤В ╤Б╨┐╨╕╤Б╨║╨░: ╤Б╤Г╤Й╨╡╤Б╤В╨▓╤Г╤О╤Й╨╕╨╣ ╨░╨║╨║╨░╤Г╨╜╤В тАФ ╤В╨╛╨╗╤М╨║╨╛ ╤Б╨╝╨╡╨╜╨░ ╨┐╤А╨╛╤Д╨╕╨╗╤П/╨▓╨╗╨░╨┤╨╡╨╗╤М╤Ж╨░/╨│╤А╤Г╨┐╨┐╤Л/╤Б╤В╤А╨░╨╜╤Л
-        (╤Б╤В╨░╤В╨╕╤Б╤В╨╕╨║╨░ ╨╕ ┬л╨Ю╨▒╨╜╨╛╨▓╨╗╤С╨╜┬╗ ╨╜╨╡ ╤В╤А╨╛╨│╨░╨╡╨╝). ╨С╨╡╨╖ ╨╕╨╖╨╝╨╡╨╜╨╡╨╜╨╕╨╣ тАФ ╨╡╤Б╨╗╨╕ ╨▓╤Б╨╡ ╨┐╨╡╤А╨╡╨┤╨░╨╜╨╜╤Л╨╡ ╨┐╨╛╨╗╤П ╤В╨╡ ╨╢╨╡.
+        Импорт списка: существующий аккаунт — только смена профиля/владельца/группы/страны
+        (статистика и «Обновлён» не трогаем). Без изменений — если все переданные поля те же.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -3077,12 +3077,12 @@ class AccountViewSet(viewsets.ModelViewSet):
                     "job_id": job.pk,
                     "apify_run_id": job.apify_run_id or None,
                     "status": job.status,
-                    "detail": "╨Ч╨░╨┐╤Г╤Й╨╡╨╜ ╤Б╨▒╨╛╤А Apify",
+                    "detail": "Запущен сбор Apify",
                 },
                 status=status.HTTP_202_ACCEPTED,
             )
         with _account_refresh_mutex(account.id):
-            # ╨Я╨╛╤Б╨╗╨╡ ┬л╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╕╤В╤М ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡┬╗ force_stop ╨▒╨╗╨╛╨║╨╕╤А╤Г╨╡╤В Playwright ╨┤╨╛ ╤Б╨▒╤А╨╛╤Б╨░.
+            # После «Остановить автообновление» force_stop блокирует Playwright до сброса.
             try:
                 from .refresh_state import clear_orphan_cancel_flags
 
@@ -3097,13 +3097,13 @@ class AccountViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="bulk-refresh")
     def bulk_refresh(self, request):
         """
-        ╨Ч╨░╨┐╤Г╤Б╤В╨╕╤В╤М ╤Д╨╛╨╜╨╛╨▓╨╛╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨▓╤Л╨▒╤А╨░╨╜╨╜╤Л╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ (╤Б╤В╨░╤В╤Г╤Б тАФ auto-refresh-status).
-        ╨Ф╨╗╤П ╨╜╨╡╤Б╨║╨╛╨╗╤М╨║╨╕╤Е Instagram: ╨╛╨┤╨╕╨╜ Playwright-╤Б╨╡╨░╨╜╤Б ╨╜╨░ ╨▓╤Б╨╡ /reels/ ╨▓ ╤Д╨╛╨╜╨╛╨▓╨╛╨╝ ╨┐╨╛╤В╨╛╨║╨╡.
+        Запустить фоновое обновление выбранных аккаунтов (статус — auto-refresh-status).
+        Для нескольких Instagram: один Playwright-сеанс на все /reels/ в фоновом потоке.
         """
         ids = request.data.get("ids")
         if not isinstance(ids, list) or not ids:
             return Response(
-                {"detail": "╨Я╨╡╤А╨╡╨┤╨░╨╣╤В╨╡ ╨╝╨░╤Б╤Б╨╕╨▓ ids"},
+                {"detail": "Передайте массив ids"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         id_ints: list[int] = []
@@ -3114,7 +3114,7 @@ class AccountViewSet(viewsets.ModelViewSet):
                 continue
         if not id_ints:
             return Response(
-                {"detail": "╨Т ids ╨┤╨╛╨╗╨╢╨╜╤Л ╨▒╤Л╤В╤М ╤З╨╕╤Б╨╗╨╛╨▓╤Л╨╡ ╨╕╨┤╨╡╨╜╤В╨╕╤Д╨╕╨║╨░╤В╨╛╤А╤Л ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓"},
+                {"detail": "В ids должны быть числовые идентификаторы аккаунтов"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         by_id = {a.id: a for a in Account.objects.filter(id__in=id_ints).select_related("profile")}
@@ -3123,14 +3123,14 @@ class AccountViewSet(viewsets.ModelViewSet):
             if i in by_id:
                 ordered.append(by_id[i])
         if not ordered:
-            return Response({"detail": "╨Р╨║╨║╨░╤Г╨╜╤В╤Л ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜╤Л"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Аккаунты не найдены"}, status=status.HTTP_404_NOT_FOUND)
 
         with _refresh_all_start_lock:
             state = AutoRefreshState.get()
             rr = RefreshAllState.get()
             if state.is_running or rr.is_running:
                 return Response(
-                    {"detail": "╨б╨╡╨╣╤З╨░╤Б ╤Г╨╢╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╤П╨╡╤В╤Б╤П ╨┤╤А╤Г╨│╨╛╨╡ ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡/╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡."},
+                    {"detail": "Сейчас уже выполняется другое автообновление/обновление."},
                     status=status.HTTP_409_CONFLICT,
                 )
             skip_recent_hours, skip_cutoff = _schedule_skip_recent_cutoff()
@@ -3170,16 +3170,16 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-update")
     def bulk_update(self, request):
-        """╨Ь╨░╤Б╤Б╨╛╨▓╨╛ ╨╛╨▒╨╜╨╛╨▓╨╕╤В╤М ╨┐╨╛╨╗╤П ╨▓╤Л╨▒╤А╨░╨╜╨╜╤Л╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ (╨┤╨╛╨╝╨╡╨╜/╨┐╤А╨╛╤Д╨╕╨╗╤М/╨▓╨╗╨░╨┤╨╡╨╗╨╡╤Ж/╨│╤А╤Г╨┐╨┐╨░/╤Б╤В╤А╨░╨╜╨░/╨░╤А╤Е╨╕╨▓)."""
+        """Массово обновить поля выбранных аккаунтов (домен/профиль/владелец/группа/страна/архив)."""
         id_ints = _parse_account_ids_list(request.data.get("ids"))
         if id_ints is None:
             return Response(
-                {"detail": "╨Я╨╡╤А╨╡╨┤╨░╨╣╤В╨╡ ╨╝╨░╤Б╤Б╨╕╨▓ ids"},
+                {"detail": "Передайте массив ids"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not id_ints:
             return Response(
-                {"detail": "╨Т ids ╨┤╨╛╨╗╨╢╨╜╤Л ╨▒╤Л╤В╤М ╤З╨╕╤Б╨╗╨╛╨▓╤Л╨╡ ╨╕╨┤╨╡╨╜╤В╨╕╤Д╨╕╨║╨░╤В╨╛╤А╤Л ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓"},
+                {"detail": "В ids должны быть числовые идентификаторы аккаунтов"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3188,8 +3188,8 @@ class AccountViewSet(viewsets.ModelViewSet):
         update_fields: list[str] = []
 
         fk_map = (
-            # ╨Ф╨╛╨╝╨╡╨╜ ╨╖╨┤╨╡╤Б╤М ╨╢╨╡: ╤Н╤В╨╛ ╤В╨░╨║╨╛╨╡ ╨╢╨╡ ╨╜╨░╨╖╨╜╨░╤З╨╡╨╜╨╕╨╡, ╨║╨░╨║ ╨┐╤А╨╛╤Д╨╕╨╗╤М ╨╕╨╗╨╕ ╨▓╨╗╨░╨┤╨╡╨╗╨╡╤Ж,
-            # ╨╕ ╤А╨░╤Б╨║╨╗╨░╨┤╤Л╨▓╨░╤В╤М ╨░╨║╨║╨░╤Г╨╜╤В╤Л ╨┐╨╛ ╨┤╨╛╨╝╨╡╨╜╨░╨╝ ╨╜╨░╨┤╨╛ ╤В╨╡╨╝╨╕ ╨╢╨╡ ╨╝╨░╤Б╤Б╨╛╨▓╤Л╨╝╨╕ ╨┤╨╡╨╣╤Б╤В╨▓╨╕╤П╨╝╨╕.
+            # Домен здесь же: это такое же назначение, как профиль или владелец,
+            # и раскладывать аккаунты по доменам надо теми же массовыми действиями.
             ("domain_id", "domain_id", Domain),
             ("profile_id", "profile_id", Profile),
             ("owner_id", "owner_id", Owner),
@@ -3208,12 +3208,12 @@ class AccountViewSet(viewsets.ModelViewSet):
                 pk = int(raw)
             except (TypeError, ValueError):
                 return Response(
-                    {"detail": f"╨Э╨╡╨║╨╛╤А╤А╨╡╨║╤В╨╜╤Л╨╣ {payload_key}"},
+                    {"detail": f"Некорректный {payload_key}"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             if not model_cls.objects.filter(pk=pk).exists():
                 return Response(
-                    {"detail": f"{payload_key}={pk} ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜"},
+                    {"detail": f"{payload_key}={pk} не найден"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
             updates[field_name] = pk
@@ -3229,7 +3229,7 @@ class AccountViewSet(viewsets.ModelViewSet):
 
         if not update_fields:
             return Response(
-                {"detail": "╨г╨║╨░╨╢╨╕╤В╨╡ ╤Е╨╛╤В╤П ╨▒╤Л ╨╛╨┤╨╜╨╛ ╨┐╨╛╨╗╨╡ ╨┤╨╗╤П ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П"},
+                {"detail": "Укажите хотя бы одно поле для обновления"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -3239,16 +3239,16 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="bulk-delete")
     def bulk_delete(self, request):
-        """╨г╨┤╨░╨╗╨╕╤В╤М ╨▓╤Л╨▒╤А╨░╨╜╨╜╤Л╨╡ ╨░╨║╨║╨░╤Г╨╜╤В╤Л."""
+        """Удалить выбранные аккаунты."""
         id_ints = _parse_account_ids_list(request.data.get("ids"))
         if id_ints is None:
             return Response(
-                {"detail": "╨Я╨╡╤А╨╡╨┤╨░╨╣╤В╨╡ ╨╝╨░╤Б╤Б╨╕╨▓ ids"},
+                {"detail": "Передайте массив ids"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if not id_ints:
             return Response(
-                {"detail": "╨Т ids ╨┤╨╛╨╗╨╢╨╜╤Л ╨▒╤Л╤В╤М ╤З╨╕╤Б╨╗╨╛╨▓╤Л╨╡ ╨╕╨┤╨╡╨╜╤В╨╕╤Д╨╕╨║╨░╤В╨╛╤А╤Л ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓"},
+                {"detail": "В ids должны быть числовые идентификаторы аккаунтов"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         qs = Account.objects.filter(id__in=id_ints)
@@ -3258,11 +3258,11 @@ class AccountViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="refresh-link-clicks")
     def refresh_link_clicks(self, request):
-        """╨Ю╨▒╨╜╨╛╨▓╨╕╤В╤М ╨┐╨╡╤А╨╡╤Е╨╛╨┤╤Л (Links) ╨┤╨╗╤П ╨▓╤Л╨▒╤А╨░╨╜╨╜╤Л╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ ╨▒╨╡╨╖ scrape ╨┐╨╗╨░╤В╤Д╨╛╤А╨╝."""
+        """Обновить переходы (Links) для выбранных аккаунтов без scrape платформ."""
         ids = request.data.get("ids")
         if not isinstance(ids, list) or not ids:
             return Response(
-                {"detail": "╨Я╨╡╤А╨╡╨┤╨░╨╣╤В╨╡ ╨╝╨░╤Б╤Б╨╕╨▓ ids"},
+                {"detail": "Передайте массив ids"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         id_ints: list[int] = []
@@ -3273,19 +3273,19 @@ class AccountViewSet(viewsets.ModelViewSet):
                 continue
         if not id_ints:
             return Response(
-                {"detail": "╨Т ids ╨┤╨╛╨╗╨╢╨╜╤Л ╨▒╤Л╤В╤М ╤З╨╕╤Б╨╗╨╛╨▓╤Л╨╡ ╨╕╨┤╨╡╨╜╤В╨╕╤Д╨╕╨║╨░╤В╨╛╤А╤Л ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓"},
+                {"detail": "В ids должны быть числовые идентификаторы аккаунтов"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         by_id = {a.id: a for a in Account.objects.filter(id__in=id_ints)}
         ordered = [by_id[i] for i in id_ints if i in by_id]
         if not ordered:
-            return Response({"detail": "╨Р╨║╨║╨░╤Г╨╜╤В╤Л ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜╤Л"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"detail": "Аккаунты не найдены"}, status=status.HTTP_404_NOT_FOUND)
 
         from integrations.links_client import LinksApiError, links_api_configured
 
         if not links_api_configured():
             return Response(
-                {"detail": "Links API ╨╜╨╡ ╨╜╨░╤Б╤В╤А╨╛╨╡╨╜ (LINKS_API_URL / LINKS_API_TOKEN ╨▓ .env)"},
+                {"detail": "Links API не настроен (LINKS_API_URL / LINKS_API_TOKEN в .env)"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         try:
@@ -3323,7 +3323,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             )
         if not upload:
             return Response(
-                {"detail": "╨Я╨╡╤А╨╡╨┤╨░╨╣╤В╨╡ ╤Д╨░╨╣╨╗ ╨▓ ╨┐╨╛╨╗╨╡ file"},
+                {"detail": "Передайте файл в поле file"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         try:
@@ -3333,20 +3333,20 @@ class AccountViewSet(viewsets.ModelViewSet):
                 return Response(
                     {
                         "detail": (
-                            "╨Ш╨╝╨┐╨╛╤А╤В ╨┐╤А╨╡╤А╨▓╨░╨╜ ╨╕╨╖тАС╨╖╨░ ╨▒╨╗╨╛╨║╨╕╤А╨╛╨▓╨║╨╕ ╨▓ ╨С╨Ф (deadlock), "
-                            "╨╛╨▒╤Л╤З╨╜╨╛ ╤Н╤В╨╛ ╨┐╨░╤А╨░╨╗╨╗╨╡╨╗╤М╨╜╨╛╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓. "
-                            "╨Я╨╛╨┤╨╛╨╢╨┤╨╕╤В╨╡ 10тАУ20 ╤Б ╨╕ ╨┐╨╛╨▓╤В╨╛╤А╨╕╤В╨╡ ╨╕╨╝╨┐╨╛╤А╤В."
+                            "Импорт прерван из‑за блокировки в БД (deadlock), "
+                            "обычно это параллельное обновление аккаунтов. "
+                            "Подождите 10–20 с и повторите импорт."
                         ),
                     },
                     status=status.HTTP_409_CONFLICT,
                 )
             return Response(
-                {"detail": f"╨Ю╤И╨╕╨▒╨║╨░ ╤А╨░╨╖╨▒╨╛╤А╨░ CSV: {e}"},
+                {"detail": f"Ошибка разбора CSV: {e}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except Exception as e:
             return Response(
-                {"detail": f"╨Ю╤И╨╕╨▒╨║╨░ ╤А╨░╨╖╨▒╨╛╤А╨░ CSV: {e}"},
+                {"detail": f"Ошибка разбора CSV: {e}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(summary)
@@ -3358,7 +3358,7 @@ class AccountViewSet(viewsets.ModelViewSet):
             rr = RefreshAllState.get()
             if auto_st.is_running or rr.is_running:
                 return Response(
-                    {"detail": "╨г╨╢╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╤П╨╡╤В╤Б╤П ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡, ╤Б╨▒╨╛╤А ╨▓╤Б╨╡╤Е ╨╕╨╗╨╕ ╨╝╨░╤Б╤Б╨╛╨▓╨╛╨╡ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡."},
+                    {"detail": "Уже выполняется автообновление, сбор всех или массовое обновление."},
                     status=status.HTTP_409_CONFLICT,
                 )
             download_csv = request.query_params.get("download_csv") in {"1", "true", "yes"}
@@ -3453,9 +3453,9 @@ class AccountViewSet(viewsets.ModelViewSet):
 
 
 class _DomainScopedCreateMixin:
-    """╨Х╤Б╨╗╨╕ domain_id ╨╜╨╡ ╨┐╨╡╤А╨╡╨┤╨░╨╗╨╕, ╨░ ╨░╨┤╤А╨╡╤Б тАФ /reiz, ╨║╨╗╨░╨┤╤С╨╝ ╨▓ ╤В╨╡╨║╤Г╤Й╨╕╨╣ ╨┤╨╛╨╝╨╡╨╜.
+    """Если domain_id не передали, а адрес — /reiz, кладём в текущий домен.
 
-    ╨п╨▓╨╜╤Л╨╣ ``domain_id: null`` (┬л╨С╨╡╨╖ ╨┤╨╛╨╝╨╡╨╜╨░┬╗ ╨▓ ╨╝╨╛╨┤╨░╨╗╨║╨╡) ╤Г╨▓╨░╨╢╨░╨╡╨╝: ╨╜╨╡ ╨┐╨╛╨┤╨╝╨╡╨╜╤П╨╡╨╝.
+    Явный ``domain_id: null`` («Без домена» в модалке) уважаем: не подменяем.
     """
 
     def perform_create(self, serializer):
@@ -3538,8 +3538,8 @@ class ProfileViewSet(_DomainScopedCreateMixin, viewsets.ModelViewSet):
         )
         include_hidden_profiles = _coerce_bool(self.request.query_params.get("include_hidden_profiles"))
         action = getattr(self, "action", "") or ""
-        # ╨Я╨╛ ╤Б╨┐╨╕╤Б╨║╤Г ╤Б╨║╤А╤Л╤В╤Л╨╡ ╨╜╨╡ ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╡╨╝ ╨▒╨╡╨╖ ╤Д╨╗╨░╨│╨░; ╨┐╨╛ ID тАФ ╨▓╤Б╨╡╨│╨┤╨░ ╨╜╨░╤Е╨╛╨┤╨╕╨╝ ╨╖╨░╨┐╨╕╤Б╤М,
-        # ╨╕╨╜╨░╤З╨╡ PATCH/DELETE ╤Б╨║╤А╤Л╤В╨╛╨│╨╛ ╨┐╤А╨╛╤Д╨╕╨╗╤П ╨┤╨░╤О╤В 404.
+        # По списку скрытые не показываем без флага; по ID — всегда находим запись,
+        # иначе PATCH/DELETE скрытого профиля дают 404.
         detail_actions = {"retrieve", "update", "partial_update", "destroy"}
         if action in detail_actions:
             return qs
@@ -3565,10 +3565,10 @@ def platforms(request):
 
 
 def _aggregate_yesterday_calendar_deltas(account_ids: list[int], today) -> tuple[int | None, int | None, int | None, int | None]:
-    """╨б╤Г╨╝╨╝╨░ ╨┤╨╜╨╡╨▓╨╜╤Л╤Е ╨┤╨╡╨╗╤М╤В ╨╖╨░ ╨║╨░╨╗╨╡╨╜╨┤╨░╤А╨╜╤Л╨╣ ┬л╨▓╤З╨╡╤А╨░┬╗: snap(╨▓╤З╨╡╤А╨░) тИТ snap(╨┐╨╛╨╖╨░╨▓╤З╨╡╤А╨░) ╨┐╨╛ ╨║╨░╨╢╨┤╨╛╨╝╤Г ╨░╨║╨║╨░╤Г╨╜╤В╤Г.
+    """Сумма дневных дельт за календарный «вчера»: snap(вчера) − snap(позавчера) по каждому аккаунту.
 
-    `today` тАФ ╨║╨░╨╗╨╡╨╜╨┤╨░╤А╨╜╤Л╨╣ ╨┤╨╡╨╜╤М ╨▓ ╨░╨║╤В╨╕╨▓╨╜╨╛╨╣ ╤В╨░╨╣╨╝╨╖╨╛╨╜╨╡ (╤Б╨╝. summary: timezone.localdate()), ╨┤╨╗╤П ╨┐╤А╨╛╨┤╨░╨║╤И╨╡╨╜╨░ Europe/Moscow.
-    ╨Э╤Г╨╢╨╜╨░ ╨┤╨╗╤П ╨╝╨░╤Б╤И╤В╨░╨▒╨░ ╨╝╨╕╨╜╨╕-╨│╤А╨░╤Д╨╕╨║╨╛╨▓ ╨╜╨░ TV: ╨▓╤З╨╡╤А╨░╤И╨╜╨╕╨╣ ╨┐╤А╨╕╤А╨╛╤Б╤В = 50% ╨▓╤Л╤Б╨╛╤В╤Л ╨┐╤А╨╕ ╤А╨░╨▓╨╡╨╜╤Б╤В╨▓╨╡ ╤Б ╤Б╨╡╨│╨╛╨┤╨╜╤П╤И╨╜╨╕╨╝.
+    `today` — календарный день в активной таймзоне (см. summary: timezone.localdate()), для продакшена Europe/Moscow.
+    Нужна для масштаба мини-графиков на TV: вчерашний прирост = 50% высоты при равенстве с сегодняшним.
     """
     if not account_ids:
         return (None, None, None, None)
@@ -3600,11 +3600,11 @@ def _aggregate_yesterday_calendar_deltas(account_ids: list[int], today) -> tuple
 
 
 def _aggregate_prev_snapshot_pair_deltas(account_ids: list[int], today) -> tuple[int | None, int | None, int | None, int | None]:
-    """╨б╤Г╨╝╨╝╨░ (╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╕╨╣ ╤Б╨╜╨╕╨╝╨╛╨║ тИТ ╨┐╤А╨╡╨┤╤Л╨┤╤Г╤Й╨╕╨╣) ╨┐╨╛ ╨║╨░╨╢╨┤╨╛╨╝╤Г ╨░╨║╨║╨░╤Г╨╜╤В╤Г, ╨╛╨▒╨░ ╤Б date < today.
+    """Сумма (последний снимок − предыдущий) по каждому аккаунту, оба с date < today.
 
-    ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╡╤В╤Б╤П, ╨║╨╛╨│╨┤╨░ ╨╜╨╡╤В ╨┐╨░╤А╤Л ╤Б╨╜╨╕╨╝╨║╨╛╨▓ ╤А╨╛╨▓╨╜╨╛ ╨╖╨░ ╨║╨░╨╗╨╡╨╜╨┤╨░╤А╨╜╤Л╨╣ ┬л╨▓╤З╨╡╤А╨░┬╗ ╨╕ ┬л╨┐╨╛╨╖╨░╨▓╤З╨╡╤А╨░┬╗, ╨╜╨╛ ╨╕╤Б╤В╨╛╤А╨╕╤П ╤Г╨╢╨╡ ╨╡╤Б╤В╤М
-    (╨╜╨░╨┐╤А╨╕╨╝╨╡╤А, ╨┤╨╜╨╡╨▓╨╜╨╛╨╣ ╤Б╨╜╨╕╨╝╨╛╨║ ╨╖╨░ ┬л╨▓╤З╨╡╤А╨░┬╗ ╨╡╤Й╤С ╨╜╨╡ ╤Б╨╛╨╖╨┤╨░╨╜ ╨┤╨╛ ╤Б╨╗╨╡╨┤╤Г╤О╤Й╨╡╨│╨╛ ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П). ╨Ш╨╜╤В╨╡╤А╨▓╨░╨╗ ╨╝╨╡╨╢╨┤╤Г ╨┤╨▓╤Г╨╝╤П ╨┤╨░╤В╨░╨╝╨╕
-    ╨╝╨╛╨╢╨╡╤В ╨▒╤Л╤В╤М ╨▒╨╛╨╗╤М╤И╨╡ ╤Б╤Г╤В╨╛╨║ тАФ ╤Н╤В╨╛ ╨▓╤Б╤С ╤А╨░╨▓╨╜╨╛ ╨╛╤Б╨╝╤Л╤Б╨╗╨╡╨╜╨╜╨░╤П ╨╛╨┐╨╛╤А╨╜╨░╤П ╨┤╨╡╨╗╤М╤В╨░ ╨┤╨╗╤П ╨╝╨░╤Б╤И╤В╨░╨▒╨░ ╨│╤А╨░╤Д╨╕╨║╨░, ╨╜╨╡ ╨▓╤Л╨┤╤Г╨╝╨║╨░.
+    Используется, когда нет пары снимков ровно за календарный «вчера» и «позавчера», но история уже есть
+    (например, дневной снимок за «вчера» ещё не создан до следующего автообновления). Интервал между двумя датами
+    может быть больше суток — это всё равно осмысленная опорная дельта для масштаба графика, не выдумка.
     """
     if not account_ids:
         return (None, None, None, None)
@@ -3637,7 +3637,7 @@ def _aggregate_prev_snapshot_pair_deltas(account_ids: list[int], today) -> tuple
 
 
 def compute_summary(request) -> dict:
-    """Aggregate stats + deltas across accounts (╤Г╤З╨╕╤В╤Л╨▓╨░╨╡╤В X-Domain / domain scope)."""
+    """Aggregate stats + deltas across accounts (учитывает X-Domain / domain scope)."""
     today = timezone.localdate()
     include_hidden = _coerce_bool(request.query_params.get("include_hidden"))
     include_hidden_platforms = include_hidden or _coerce_bool(request.query_params.get("include_hidden_platforms"))
@@ -3689,8 +3689,8 @@ def compute_summary(request) -> dict:
             dv = clamp_platform_view_delta(acc.platform, dv)
             view_delta_sum += dv
         else:
-            # ╨Э╨╡╤В ╤Б╨╜╨╕╨╝╨║╨░ ╨╜╨╡ ╤Б╤В╨░╤А╤И╨╡ cutoff тАФ ╤Б╤З╨╕╤В╨░╨╡╨╝ baseline ╨╜╤Г╨╗╨╡╨▓╤Л╨╝: ╨▓╨╡╤Б╤М ╤В╨╡╨║╤Г╤Й╨╕╨╣ ╤Б╤З╤С╤В╤З╨╕╨║
-            # ╤Г╤З╨░╤Б╤В╨▓╤Г╨╡╤В ╨▓ ╨┤╨╡╨╗╤М╤В╨╡ (╨░╨║╤В╤Г╨░╨╗╤М╨╜╨╛ ╨┤╨╗╤П ╨╛╨║╨╜╨░ 30╨┤ ╨╕ ┬л╨╝╨╛╨╗╨╛╨┤╤Л╤Е┬╗ ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓).
+            # Нет снимка не старше cutoff — считаем baseline нулевым: весь текущий счётчик
+            # участвует в дельте (актуально для окна 30д и «молодых» аккаунтов).
             dv = int(acc.view_count or 0)
             view_delta_sum += dv
 
@@ -3748,8 +3748,8 @@ def _schedule_db_error_response(exc: BaseException) -> Response:
     return Response(
         {
             "detail": (
-                "╨Ю╤И╨╕╨▒╨║╨░ ╨▒╨░╨╖╤Л ╨┤╨░╨╜╨╜╤Л╤Е (╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ / ╤А╨░╤Б╨┐╨╕╤Б╨░╨╜╨╕╨╡). "
-                "╨Э╨░ ╤Б╨╡╤А╨▓╨╡╤А╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╨╕╤В╨╡ ┬лpython manage.py migrate┬╗ ╨▓ ╨║╨░╤В╨░╨╗╨╛╨│╨╡ backend ╨╕ ╨┐╨╡╤А╨╡╨╖╨░╨┐╤Г╤Б╤В╨╕╤В╨╡ ╨┐╤А╨╛╤Ж╨╡╤Б╤Б."
+                "Ошибка базы данных (автообновление / расписание). "
+                "На сервере выполните «python manage.py migrate» в каталоге backend и перезапустите процесс."
             ),
         },
         status=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -3870,7 +3870,7 @@ def _coerce_bool(value) -> bool:
 
 
 def _parse_account_ids_list(raw) -> list[int] | None:
-    """None тАФ ╨╜╨╡╤В ╨╝╨░╤Б╤Б╨╕╨▓╨░; [] тАФ ╨╝╨░╤Б╤Б╨╕╨▓ ╨▒╨╡╨╖ ╨▓╨░╨╗╨╕╨┤╨╜╤Л╤Е id."""
+    """None — нет массива; [] — массив без валидных id."""
     if not isinstance(raw, list):
         return None
     out: list[int] = []
@@ -3939,9 +3939,9 @@ def _get_hidden_platforms() -> set[str]:
 def _apply_archived_filter(qs, archived_param):
     """
     archived query param:
-      - omitted / 0 / false / active тЖТ ╤В╨╛╨╗╤М╨║╨╛ ╨░╨║╤В╤Г╨░╨╗╤М╨╜╤Л╨╡ (is_archived=False)
-      - 1 / true / archived тЖТ ╤В╨╛╨╗╤М╨║╨╛ ╨░╤А╤Е╨╕╨▓
-      - all / both тЖТ ╨▒╨╡╨╖ ╤Д╨╕╨╗╤М╤В╤А╨░
+      - omitted / 0 / false / active → только актуальные (is_archived=False)
+      - 1 / true / archived → только архив
+      - all / both → без фильтра
     """
     raw = str(archived_param or "").strip().lower()
     if raw in ("all", "both", "any"):
@@ -3954,9 +3954,9 @@ def _apply_archived_filter(qs, archived_param):
 def _apply_banned_filter(qs, banned_param):
     """
     banned query param:
-      - omitted / 0 / false / active тЖТ ╤В╨╛╨╗╤М╨║╨╛ ╨╜╨╡ ╨▓ ╨▒╨░╨╜╨╡ (is_banned=False)
-      - 1 / true / banned тЖТ ╤В╨╛╨╗╤М╨║╨╛ ╨▒╨░╨╜
-      - all / both тЖТ ╨▒╨╡╨╖ ╤Д╨╕╨╗╤М╤В╤А╨░
+      - omitted / 0 / false / active → только не в бане (is_banned=False)
+      - 1 / true / banned → только бан
+      - all / both → без фильтра
     """
     raw = str(banned_param or "").strip().lower()
     if raw in ("all", "both", "any"):
@@ -4076,8 +4076,8 @@ def refresh_schedule(request):
             sync_schedule_from_db(force=True)
         else:
             print(
-                "[scheduler] POST /schedule/: ╨┐╨╗╨░╨╜╨╕╤А╨╛╨▓╤Й╨╕╨║ ╨╜╨╡ ╨╖╨░╨┐╤Г╤Й╨╡╨╜ тАФ "
-                "╤Б╨╗╨╛╤В╤Л ╨┐╨╛ ╨▓╤А╨╡╨╝╨╡╨╜╨╕ ╨╜╨╡ ╤Б╤А╨░╨▒╨╛╤В╨░╤О╤В. ╨Я╨╡╤А╨╡╨╖╨░╨┐╤Г╤Б╤В╨╕╤В╨╡ runserver.",
+                "[scheduler] POST /schedule/: планировщик не запущен — "
+                "слоты по времени не сработают. Перезапустите runserver.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -4089,7 +4089,7 @@ def refresh_schedule(request):
 
 @api_view(["POST"])
 def auto_refresh_telegram_test(request):
-    """╨Я╤А╨╛╨▓╨╡╤А╨║╨░ TELEGRAM_BOT_TOKEN ╨╕ chat_id (╤В╨╡╤Б╤В╨╛╨▓╨╛╨╡ ╤Б╨╛╨╛╨▒╤Й╨╡╨╜╨╕╨╡)."""
+    """Проверка TELEGRAM_BOT_TOKEN и chat_id (тестовое сообщение)."""
     try:
         from .models import RefreshScheduleConfig
         from .telegram_report import send_telegram_test_message
@@ -4108,9 +4108,9 @@ def auto_refresh_telegram_test(request):
         send_telegram_test_message(config=config, chat_id=chat_id, chat_ids=chat_ids)
         n = len(chat_ids) if chat_ids else 1
         detail = (
-            f"╨б╨╛╨╛╨▒╤Й╨╡╨╜╨╕╨╡ ╨╛╤В╨┐╤А╨░╨▓╨╗╨╡╨╜╨╛ ╨▓ {n} ╤З╨░╤В(╨╛╨▓) Telegram."
+            f"Сообщение отправлено в {n} чат(ов) Telegram."
             if chat_ids and len(chat_ids) > 1
-            else "╨б╨╛╨╛╨▒╤Й╨╡╨╜╨╕╨╡ ╨╛╤В╨┐╤А╨░╨▓╨╗╨╡╨╜╨╛ ╨▓ Telegram."
+            else "Сообщение отправлено в Telegram."
         )
         return Response({"ok": True, "detail": detail})
     except Exception as exc:
@@ -4120,19 +4120,19 @@ def auto_refresh_telegram_test(request):
         )
 
 
-#: ╨з╨░╤Б ╨┐╨╛ ╨╝╨╡╤Б╤В╨╜╨╛╨╝╤Г ╨▓╤А╨╡╨╝╨╡╨╜╨╕ (Europe/Moscow), ╨╜╨░ ╨║╨╛╤В╨╛╤А╨╛╨╝ ╤А╨╡╨╢╨╡╤В╤Б╤П ┬л╨┤╨╡╨╜╤М┬╗ ╤Б╤З╤С╤В╤З╨╕╨║╨░.
-#: ╨б 10:00 ╨┤╨╛ 20:00 ╤Д╤А╨╛╨╜╤В ╤А╨░╤Б╤В╤П╨│╨╕╨▓╨░╨╡╤В ╨┐╤А╨╕╤А╨╛╤Б╤В prevтЖТnow; ╨┐╨╛╤Б╨╗╨╡ 20:00 ╤Ж╨╕╤Д╤А╨░
-#: ╨╖╨░╨╝╨╛╤А╨╛╨╢╨╡╨╜╨░ ╨┤╨╛ ╤Б╨╗╨╡╨┤╤Г╤О╤Й╨╕╤Е 10:00.
+#: Час по местному времени (Europe/Moscow), на котором режется «день» счётчика.
+#: С 10:00 до 20:00 фронт растягивает прирост prev→now; после 20:00 цифра
+#: заморожена до следующих 10:00.
 VIEWS_ANCHOR_HOUR = 10
 VIEWS_GROWTH_END_HOUR = 20
 
 
 @api_view(["GET"])
 def domain_list(request):
-    """╨Ф╨╛╨╝╨╡╨╜╤Л ╨╕ ╤В╨╛, ╨║╨░╨║╨╛╨╣ ╨╕╨╖ ╨╜╨╕╤Е ╨▓╤Л╨▒╤А╨░╨╜ ╤В╨╡╨║╤Г╤Й╨╕╨╝ ╨░╨┤╤А╨╡╤Б╨╛╨╝.
+    """Домены и то, какой из них выбран текущим адресом.
 
-    ╨д╤А╨╛╨╜╤В ╨┐╨╛ ╤Н╤В╨╛╨╝╤Г ╨╛╤В╨▓╨╡╤В╤Г ╨┐╨╛╨╜╨╕╨╝╨░╨╡╤В, ╨│╨┤╨╡ ╨╛╨╜ ╨╜╨░╤Е╨╛╨┤╨╕╤В╤Б╤П, ╨╕ ╨┐╨╛╨┤╨┐╨╕╤Б╤Л╨▓╨░╨╡╤В ╤Н╨║╤А╨░╨╜.
-    ``current`` ╨╝╨╛╨╢╨╡╤В ╨▒╤Л╤В╤М ╨┐╤Г╤Б╤В╤Л╨╝ тАФ ╨╖╨╜╨░╤З╨╕╤В, ╨░╨┤╤А╨╡╤Б ╨▒╨╡╨╖ ╨┤╨╛╨╝╨╡╨╜╨░ ╨╕ ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╡╨╝ ╨▓╤Б╤С.
+    Фронт по этому ответу понимает, где он находится, и подписывает экран.
+    ``current`` может быть пустым — значит, адрес без домена и показываем всё.
     """
     scope = domains.resolve(request)
     rows = [
@@ -4148,14 +4148,14 @@ def domain_list(request):
         "aggregate_slug": domains.AGGREGATE_DOMAIN_SLUG,
         "current": scope.domain.slug if scope.domain else None,
         "aggregate": scope.aggregate,
-        # ╨Ъ╤Г╤Б╨╛╨║ ╨░╨┤╤А╨╡╤Б╨░ ╨▒╤Л╨╗, ╨░ ╨┤╨╛╨╝╨╡╨╜╨░ ╤В╨░╨║╨╛╨│╨╛ ╨╜╨╡╤В тАФ ╤Д╤А╨╛╨╜╤В╤Г ╤Б╤В╨╛╨╕╤В ╤Б╨║╨░╨╖╨░╤В╤М ╨╛╨▒ ╤Н╤В╨╛╨╝
-        # ╨▓╤Б╨╗╤Г╤Е, ╨░ ╨╜╨╡ ╨╝╨╛╨╗╤З╨░ ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╤В╤М ╤З╤Г╨╢╨╛╨╣ ╨╜╨░╨▒╨╛╤А.
+        # Кусок адреса был, а домена такого нет — фронту стоит сказать об этом
+        # вслух, а не молча показывать чужой набор.
         "unknown": scope.unknown,
         "unassigned_accounts": Account.objects.filter(domain__isnull=True).count(),
     })
 
 
-#: ╨Я╨╛╨║╨░╨╖╨░╤В╨╡╨╗╨╕ ╨╢╨╕╨▓╨╛╨│╨╛ ╤Б╤З╤С╤В╤З╨╕╨║╨░: ╨║╨╗╤О╤З ╨┤╨╗╤П ╤Д╤А╨╛╨╜╤В╨░ -> ╨┐╨╛╨╗╨╡ ╨▓ AccountSnapshot.
+#: Показатели живого счётчика: ключ для фронта -> поле в AccountSnapshot.
 VC_METRICS = {
     "views": "view_count",
     "followers": "follower_count",
@@ -4166,25 +4166,25 @@ VC_METRICS = {
 
 
 def _totals_as_of(day, scope=None):
-    """╨Ш╤В╨╛╨│╨╕ ╨╜╨░ ╨║╨╛╨╜╨╡╤Ж ╨┤╨╜╤П ``day`` тАФ ╨┐╨╛ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨╝╤Г ╤Б╨╜╨╕╨╝╨║╤Г ╨║╨░╨╢╨┤╨╛╨│╨╛ ╨░╨║╨║╨░╤Г╨╜╤В╨░.
+    """Итоги на конец дня ``day`` — по последнему снимку каждого аккаунта.
 
-    ╨Я╤А╨╛╤Б╤В╨╛ ╨┐╤А╨╛╤Б╤Г╨╝╨╝╨╕╤А╨╛╨▓╨░╤В╤М ``AccountSnapshot`` ╨╖╨░ ╨┤╨░╤В╤Г ╨╜╨╡╨╗╤М╨╖╤П: ╤Б╤В╤А╨╛╨║╨╕ ╤В╨░╨╝ ╤В╨╛╨╗╤М╨║╨╛
-    ╨┐╨╛ ╨╛╨▒╨╜╨╛╨▓╨╗╤С╨╜╨╜╤Л╨╝ ╨▓ ╤Н╤В╨╛╤В ╨┤╨╡╨╜╤М ╨░╨║╨║╨░╤Г╨╜╤В╨░╨╝, ╨┐╨╛╤Н╤В╨╛╨╝╤Г ╤Б╤Г╨╝╨╝╨░ ╨╖╨░ ╨┤╨╡╨╜╤М тАФ ╤Н╤В╨╛ ╤Б╤Г╨╝╨╝╨░ ╨┐╨╛
-    ╤Б╨╗╤Г╤З╨░╨╣╨╜╨╛╨╝╤Г ╨┐╨╛╨┤╨╝╨╜╨╛╨╢╨╡╤Б╤В╨▓╤Г (╨▓ ╨▒╨░╨╖╨╡ ╨▓╤Б╤В╤А╨╡╤З╨░╨╡╤В╤Б╤П ┬л╨┤╨╡╨╗╤М╤В╨░┬╗ тИТ884 638). ╨С╨╡╤А╤С╨╝ ╨┐╨╛
-    ╨║╨░╨╢╨┤╨╛╨╝╤Г ╨░╨║╨║╨░╤Г╨╜╤В╤Г ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╕╨╣ ╤Б╨╜╨╕╨╝╨╛╨║ ╨╜╨╡ ╨┐╨╛╨╖╨╢╨╡ ╨┤╨░╤В╤Л ╨╕ ╤Б╨║╨╗╨░╨┤╤Л╨▓╨░╨╡╨╝: ╤Н╤В╨╛ ╨╕ ╨╡╤Б╤В╤М
-    ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨╡ ╨╕╨╖╨▓╨╡╤Б╤В╨╜╨╛╨╡ ╤Б╨╛╤Б╤В╨╛╤П╨╜╨╕╨╡ ╤Б╨╡╤В╨╕ ╨╜╨░ ╤В╨╛╤В ╨╝╨╛╨╝╨╡╨╜╤В.
+    Просто просуммировать ``AccountSnapshot`` за дату нельзя: строки там только
+    по обновлённым в этот день аккаунтам, поэтому сумма за день — это сумма по
+    случайному подмножеству (в базе встречается «дельта» −884 638). Берём по
+    каждому аккаунту последний снимок не позже даты и складываем: это и есть
+    последнее известное состояние сети на тот момент.
 
-    ╨Я╤А╨╛╨▓╨╡╤А╨╡╨╜╨╛ ╤Б╨▓╨╡╤А╨║╨╛╨╣: ╨┤╨╗╤П ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨╛╨▓ ╤А╨╡╨╖╤Г╨╗╤М╤В╨░╤В ╤Б╨╛╨▓╨┐╨░╨┤╨░╨╡╤В ╤Б
-    ``AutoRefreshPoint.view_count_total``, ╨│╨┤╨╡ ╨╜╨░╤Б╤В╨╛╤П╤Й╨╕╨╣ ╤Б╨╡╤В╨╡╨▓╨╛╨╣ ╨╕╤В╨╛╨│ ╤Г╨╢╨╡ ╨╡╤Б╤В╤М.
+    Проверено сверкой: для просмотров результат совпадает с
+    ``AutoRefreshPoint.view_count_total``, где настоящий сетевой итог уже есть.
 
-    ``scope`` ╤Б╤Г╨╢╨░╨╡╤В ╤Б╤З╤С╤В ╨┤╨╛ ╨┤╨╛╨╝╨╡╨╜╨░: ╨╕╨╜╨░╤З╨╡ ╨╜╨░ /reiz ╤Б ╨╜╤Г╨╗╤С╨╝ ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ ╤Б╤З╤С╤В╤З╨╕╨║
-    ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╗ ╨▒╤Л ╨╕╤В╨╛╨│╨╕ ╨▓╤Б╨╡╨╣ ╤Б╨╡╤В╨╕ тАФ ╤З╨╕╤Б╨╗╨░, ╨║╨╛╤В╨╛╤А╤Л╨╝ ╨╜╨░ ╤Н╤В╨╛╨╝ ╤Н╨║╤А╨░╨╜╨╡ ╨▓╨╖╤П╤В╤М╤Б╤П
-    ╨╜╨╡╨╛╤В╨║╤Г╨┤╨░.
+    ``scope`` сужает счёт до домена: иначе на /reiz с нулём аккаунтов счётчик
+    показывал бы итоги всей сети — числа, которым на этом экране взяться
+    неоткуда.
     """
     qs = AccountSnapshot.objects.filter(date__lte=day)
     if scope is not None:
         if scope.unknown:
-            return (None, 0)      # ╤Г╤Б╤В╨░╤А╨╡╨▓╤И╨░╤П ╤Б╤Б╤Л╨╗╨║╨░ тАФ ╤Б╤З╨╕╤В╨░╤В╤М ╨╜╨╡╤З╨╡╨│╨╛
+            return (None, 0)      # устаревшая ссылка — считать нечего
         if scope.scoped:
             qs = qs.filter(domains.account_q(scope, "account__"))
     rows = (
@@ -4202,14 +4202,14 @@ def _totals_as_of(day, scope=None):
 
 
 def _views_total_at(moment, scope=None):
-    """╨б╤Г╨╝╨╝╨░╤А╨╜╤Л╨╡ ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╤Л ╤Б╨╡╤В╨╕ ╨╜╨░ ╨╝╨╛╨╝╨╡╨╜╤В ``moment`` тАФ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╤П╤П ╤В╨╛╤З╨║╨░ ╨╜╨╡ ╨┐╨╛╨╖╨╢╨╡ ╨╜╨╡╨│╨╛.
+    """Суммарные просмотры сети на момент ``moment`` — последняя точка не позже него.
 
-    ╨Ф╨╗╤П ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨╛╨▓ ╨╕╤Б╤В╨╛╤З╨╜╨╕╨║ ╤В╨╛╤З╨╜╨╡╨╡, ╤З╨╡╨╝ ╤Б╨╜╨╕╨╝╨║╨╕: ``AutoRefreshPoint`` ╨┐╨╕╤И╨╡╤В╤Б╤П ╤Б╨╛
-    ╨▓╤А╨╡╨╝╨╡╨╜╨╡╨╝, ╨┐╨╛╤Н╤В╨╛╨╝╤Г ┬л╨╜╨░ 10:00┬╗ ╨╖╨┤╨╡╤Б╤М ╨▒╤Г╨║╨▓╨░╨╗╤М╨╜╨╛ ╨╜╨░ 10:00, ╨░ ╨╜╨╡ ┬л╨╜╨░ ╨║╨╛╨╜╨╡╤Ж ╨┤╨╜╤П┬╗.
-    ╨г ╨╛╤Б╤В╨░╨╗╤М╨╜╤Л╤Е ╨┐╨╛╨║╨░╨╖╨░╤В╨╡╨╗╨╡╨╣ ╤В╨░╨║╨╛╨│╨╛ ╤А╤П╨┤╨░ ╨╜╨╡╤В тАФ ╨╛╨╜╨╕ ╨╕╨┤╤Г╤В ╤З╨╡╤А╨╡╨╖ ``_totals_as_of``.
+    Для просмотров источник точнее, чем снимки: ``AutoRefreshPoint`` пишется со
+    временем, поэтому «на 10:00» здесь буквально на 10:00, а не «на конец дня».
+    У остальных показателей такого ряда нет — они идут через ``_totals_as_of``.
 
-    ╨Т╨╛╨╖╨▓╤А╨░╤Й╨░╨╡╤В ``(total, measured_at)`` ╨╕╨╗╨╕ ``(None, None)``, ╨╡╤Б╨╗╨╕ ╤В╨╛╤З╨╡╨║ ╨┤╨╛
-    ╤Н╤В╨╛╨│╨╛ ╨╝╨╛╨╝╨╡╨╜╤В╨░ ╨╡╤Й╤С ╨╜╨╡╤В.
+    Возвращает ``(total, measured_at)`` или ``(None, None)``, если точек до
+    этого момента ещё нет.
     """
     point = (
         AutoRefreshPoint.objects.filter(measured_at__lte=moment)
@@ -4269,29 +4269,29 @@ def _account_growth_between(prev_moment, now_moment) -> dict:
 
 @api_view(["GET"])
 def views_anchors(request):
-    """╨Ю╨┐╨╛╤А╨╜╤Л╨╡ ╤В╨╛╤З╨║╨╕ ╨┤╨╗╤П ┬л╨╢╨╕╨▓╤Л╤Е┬╗ ╤Б╤З╤С╤В╤З╨╕╨║╨╛╨▓ ╨╜╨░ ╤Д╤А╨╛╨╜╤В╨╡ тАФ ╨┐╨╛ ╨║╨░╨╢╨┤╨╛╨╝╤Г ╨┐╨╛╨║╨░╨╖╨░╤В╨╡╨╗╤О.
+    """Опорные точки для «живых» счётчиков на фронте — по каждому показателю.
 
-    ╨Ю╨║╨╜╨╛ ╤А╨╛╤Б╤В╨░: 10:00тАУ20:00 ╨┐╨╛ ╨Ь╨╛╤Б╨║╨▓╨╡. ╨д╤А╨╛╨╜╤В ╨▓╨╡╨┤╤С╤В ╤З╨╕╤Б╨╗╨╛ ╨╛╤В ``prev``
-    (╨╖╨╜╨░╤З╨╡╨╜╨╕╨╡ ╨╜╨░ ╨┐╤А╨╛╤И╨╗╤Л╨╡ 10:00) ╨║ ``now`` (╨╜╨░ ╤Б╨╡╨│╨╛╨┤╨╜╤П╤И╨╜╨╕╨╡ 10:00) тАФ ╨╕╨╖╨╝╨╡╤А╨╡╨╜╨╜╤Л╨╣
-    ╨┐╤А╨╕╤А╨╛╤Б╤В, ╤А╨░╤Б╤В╤П╨╜╤Г╤В╤Л╨╣ ╨┐╨╛ ╤Н╤В╨╕╨╝ 10 ╤З╨░╤Б╨░╨╝. ╨б 20:00 ╨┤╨╛ ╤Б╨╗╨╡╨┤╤Г╤О╤Й╨╕╤Е 10:00 ╤Ж╨╕╤Д╤А╨░
-    ╤Б╤В╨╛╨╕╤В ╨╜╨░ ``now``. ╨Т╨╕╨┤╨╕╨╝╨╛╨╡ ╤З╨╕╤Б╨╗╨╛ ╨╛╤В╤Б╤В╨░╤С╤В ╨╛╤В ┬л╨╢╨╕╨▓╨╛╨╣┬╗ ╨▒╨░╨╖╤Л ╨┐╤А╨╕╨╝╨╡╤А╨╜╨╛ ╨╜╨░ ╤Б╤Г╤В╨║╨╕
-    ╨╕ ╨╜╨╕╨║╨╛╨│╨┤╨░ ╨╡╤С ╨╜╨╡ ╨╛╨▒╨│╨╛╨╜╤П╨╡╤В.
+    Окно роста: 10:00–20:00 по Москве. Фронт ведёт число от ``prev``
+    (значение на прошлые 10:00) к ``now`` (на сегодняшние 10:00) — измеренный
+    прирост, растянутый по этим 10 часам. С 20:00 до следующих 10:00 цифра
+    стоит на ``now``. Видимое число отстаёт от «живой» базы примерно на сутки
+    и никогда её не обгоняет.
 
-    ``growth`` ╨╝╨╛╨╢╨╡╤В ╨▒╤Л╤В╤М ╨╜╤Г╨╗╤С╨╝ тАФ ╨╖╨╜╨░╤З╨╕╤В, ╨╖╨░ ╨┐╤А╨╛╤И╨╗╤Л╨╡ ╤Б╤Г╤В╨║╨╕ ╨┐╤А╨╛╨│╨╛╨╜╨╛╨▓ ╨╜╨╡ ╨▒╤Л╨╗╨╛ ╨╕
-    ╨┐╨╛╨║╨░╨╖╨░╤В╨╡╨╗╤М ╨╜╨╡ ╨╝╨╡╨╜╤П╨╗╤Б╤П. ╨в╨╛╨│╨┤╨░ ╤Б╤З╤С╤В╤З╨╕╨║ ╤З╨╡╤Б╤В╨╜╨╛ ╤Б╤В╨╛╨╕╤В: ╨┤╨╛╤А╨╕╤Б╨╛╨▓╤Л╨▓╨░╤В╤М ╨┤╨▓╨╕╨╢╨╡╨╜╨╕╨╡,
-    ╨║╨╛╤В╨╛╤А╨╛╨│╨╛ ╨╜╨╡ ╨▒╤Л╨╗╨╛, ╨╖╨╜╨░╤З╨╕╤В ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╤В╤М ╨▓╤Л╨┤╤Г╨╝╨░╨╜╨╜╤Л╨╡ ╤Ж╨╕╤Д╤А╤Л.
+    ``growth`` может быть нулём — значит, за прошлые сутки прогонов не было и
+    показатель не менялся. Тогда счётчик честно стоит: дорисовывать движение,
+    которого не было, значит показывать выдуманные цифры.
 
-    ╨в╨╛╤З╨╜╨╛╤Б╤В╤М ╨╕╤Б╤В╨╛╤З╨╜╨╕╨║╨╛╨▓ ╤А╨░╨╖╨╜╨░╤П, ╨╕ ╤Н╤В╨╛ ╨▓╨╕╨┤╨╜╨╛ ╨▓ ``source`` ╨║╨░╨╢╨┤╨╛╨│╨╛ ╨┐╨╛╨║╨░╨╖╨░╤В╨╡╨╗╤П:
+    Точность источников разная, и это видно в ``source`` каждого показателя:
 
-    - ``views`` ╨╕╨┤╤Г╤В ╨╕╨╖ ``AutoRefreshPoint``, ╨│╨┤╨╡ ╨╡╤Б╤В╤М ╨▓╤А╨╡╨╝╤П ╨╖╨░╨╝╨╡╤А╨░, ╨┐╨╛╤Н╤В╨╛╨╝╤Г
-      ┬л╨╜╨░ 10:00┬╗ ╨╖╨┤╨╡╤Б╤М ╨▒╤Г╨║╨▓╨░╨╗╤М╨╜╨╛ ╨╜╨░ 10:00;
-    - ╨╛╤Б╤В╨░╨╗╤М╨╜╤Л╨╡ тАФ ╨╕╨╖ ``AccountSnapshot``, ╨│╨┤╨╡ ╤Г ╤Б╨╜╨╕╨╝╨║╨░ ╤В╨╛╨╗╤М╨║╨╛ ╨┤╨░╤В╨░. ╨в╨░╨╝ ╨╛╨┐╨╛╤А╨░
-      ╤Н╤В╨╛ ┬л╨║╨╛╨╜╨╡╤Ж ╨┤╨╜╤П┬╗, ╨░ ╨╜╨╡ 10:00. ╨а╤П╨┤╨░ ╤Б╨╛ ╨▓╤А╨╡╨╝╨╡╨╜╨╡╨╝ ╨┐╨╛ ╨╜╨╕╨╝ ╨▓ ╨▒╨░╨╖╨╡ ╨┐╤А╨╛╤Б╤В╨╛ ╨╜╨╡╤В.
+    - ``views`` идут из ``AutoRefreshPoint``, где есть время замера, поэтому
+      «на 10:00» здесь буквально на 10:00;
+    - остальные — из ``AccountSnapshot``, где у снимка только дата. Там опора
+      это «конец дня», а не 10:00. Ряда со временем по ним в базе просто нет.
     """
     now = timezone.localtime()
     window_start = now.replace(hour=VIEWS_ANCHOR_HOUR, minute=0, second=0, microsecond=0)
     if now < window_start:
-        # ╨Ф╨╛ 10:00 ╨╡╤Й╤С ╨╕╨┤╤С╤В ╨▓╤З╨╡╤А╨░╤И╨╜╨╡╨╡ ╨╛╨║╨╜╨╛ (╤А╨╛╤Б╤В ╤Г╨╢╨╡ ╨╖╨░╨║╨╛╨╜╤З╨╡╨╜ ╨▓ 20:00 тАФ ╨╖╨░╨╝╨╛╤А╨╛╨╖╨║╨░).
+        # До 10:00 ещё идёт вчерашнее окно (рост уже закончен в 20:00 — заморозка).
         window_start -= datetime.timedelta(days=1)
     window_end = window_start.replace(
         hour=VIEWS_GROWTH_END_HOUR, minute=0, second=0, microsecond=0,
@@ -4313,7 +4313,7 @@ def views_anchors(request):
         if prev_val is None or now_val is None:
             growth = 0
         else:
-            # ╨Ю╤В╤А╨╕╤Ж╨░╤В╨╡╨╗╤М╨╜╤Л╨╣ ╨┐╤А╨╕╤А╨╛╤Б╤В (╨░╨║╨║╨░╤Г╨╜╤В╤Л ╤Г╨┤╨░╨╗╨╕╨╗╨╕) ╨╜╨╡ ╨╛╤В╨╝╨░╤В╤Л╨▓╨░╨╡╨╝ ╨╜╨░╨╖╨░╨┤.
+            # Отрицательный прирост (аккаунты удалили) не отматываем назад.
             growth = max(0, now_val - prev_val)
         return {"prev": prev_val, "now": now_val, "growth": growth, "source": source}
 
@@ -4321,7 +4321,7 @@ def views_anchors(request):
     metrics = {}
     at_now = at_prev = None
 
-    # ╨Т╤Б╨╡ ╨┐╨╛╨║╨░╨╖╨░╤В╨╡╨╗╨╕ тАФ ╨┐╨╛ ╤Б╨╜╨╕╨╝╨║╨░╨╝, ╤Б ╤В╨╛╤З╨╜╨╛╤Б╤В╤М╤О ╨┤╨╛ ╨┤╨╜╤П.
+    # Все показатели — по снимкам, с точностью до дня.
     day_now = window_start.date()
     day_prev = prev_start.date()
     totals_now, n_now = _totals_as_of(day_now, scope)
@@ -4333,9 +4333,9 @@ def views_anchors(request):
             "account_snapshot",
         )
 
-    # ╨С╨╡╨╖ ╨┤╨╛╨╝╨╡╨╜╨░ ╨┐╤А╨╛╤Б╨╝╨╛╤В╤А╨░╨╝ ╨╡╤Б╤В╤М ╨╕╤Б╤В╨╛╤З╨╜╨╕╨║ ╤В╨╛╤З╨╜╨╡╨╡: ╨▓ AutoRefreshPoint ╤Г ╨╖╨░╨╝╨╡╤А╨░
-    # ╨╡╤Б╤В╤М ╨▓╤А╨╡╨╝╤П, ╨┐╨╛╤Н╤В╨╛╨╝╤Г ╨╛╨┐╨╛╤А╨░ ╨▒╤Г╨║╨▓╨░╨╗╤М╨╜╨╛ ╨╜╨░ 10:00, ╨░ ╨╜╨╡ ┬л╨╜╨░ ╨║╨╛╨╜╨╡╤Ж ╨┤╨╜╤П┬╗.
-    # ╨Я╨╛ ╨┤╨╛╨╝╨╡╨╜╨░╨╝ ╨╛╨╜ ╨╜╨╡ ╤А╨░╨╖╨▒╨╕╤В, ╨┐╨╛╤Н╤В╨╛╨╝╤Г ╨▓╨╜╤Г╤В╤А╨╕ ╨┤╨╛╨╝╨╡╨╜╨░ ╨╛╤Б╤В╨░╤О╤В╤Б╤П ╤Б╨╜╨╕╨╝╨║╨╕.
+    # Без домена просмотрам есть источник точнее: в AutoRefreshPoint у замера
+    # есть время, поэтому опора буквально на 10:00, а не «на конец дня».
+    # По доменам он не разбит, поэтому внутри домена остаются снимки.
     if not scope.unknown:
         views_now, at_now = _views_total_at(window_start, scope)
         views_prev, at_prev = _views_total_at(prev_start, scope)
@@ -4347,12 +4347,12 @@ def views_anchors(request):
             "tz": str(timezone.get_current_timezone()),
             "anchor_hour": VIEWS_ANCHOR_HOUR,
             "growth_end_hour": VIEWS_GROWTH_END_HOUR,
-            # ╨з╤В╨╛╨▒╤Л ╤Д╤А╨╛╨╜╤В ╨┐╨╛╨┐╤А╨░╨▓╨╕╨╗ ╤Б╨▓╨╛╨╕ ╤З╨░╤Б╤Л: ╨┐╤А╨╕ ╤Б╨▒╨╕╤В╤Л╤Е ╨╗╨╛╨║╨░╨╗╤М╨╜╤Л╤Е ╤З╨░╤Б╨░╤Е ╨╛╨╜
-            # ╨╕╨╜╨░╤З╨╡ ╨┐╨╛╨║╨░╨╢╨╡╤В ╤З╨╕╤Б╨╗╨╛ ╨╕╨╖ ╨┤╤А╤Г╨│╨╛╨│╨╛ ╨╝╨╡╤Б╤В╨░ ╤Б╤Г╤В╨╛╨║.
+            # Чтобы фронт поправил свои часы: при сбитых локальных часах он
+            # иначе покажет число из другого места суток.
             "server_now": now.isoformat(),
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
-            # ╨Э╨╛╨▓╤Л╨╡ ╤П╨║╨╛╤А╤П (╨╕ ╨╜╨╛╨▓╤Л╨╣ ╤А╨╛╤Б╤В) ╨╜╨░╤З╨╕╨╜╨░╤О╤В╤Б╤П ╨▓ ╤Б╨╗╨╡╨┤╤Г╤О╤Й╨╕╨╡ 10:00 тАФ ╨╜╨╡ ╨▓ 20:00.
+            # Новые якоря (и новый рост) начинаются в следующие 10:00 — не в 20:00.
             "next_window_start": next_window_start.isoformat(),
             "metrics": metrics,
             # Прирост просмотров по аккаунтам за окно. Фронт складывает по тем
@@ -4363,8 +4363,8 @@ def views_anchors(request):
             "account_growth": _account_growth_between(prev_start, window_start),
             "snapshot_days": {"now": str(day_now), "prev": str(day_prev),
                               "accounts_now": n_now, "accounts_prev": n_prev},
-            # ╨б╤В╨░╤А╤Л╨╡ ╨║╨╗╤О╤З╨╕ ╨╛╤Б╤В╨░╨▓╨╗╨╡╨╜╤Л, ╤З╤В╨╛╨▒╤Л ╤Г╨╢╨╡ ╨▓╤Л╨╗╨╛╨╢╨╡╨╜╨╜╤Л╨╣ ╤Д╤А╨╛╨╜╤В ╨╜╨╡ ╤Б╨╗╨╛╨╝╨░╨╗╤Б╤П,
-            # ╨┐╨╛╨║╨░ ╨▒╤Н╨║╨╡╨╜╨┤ ╨╕ ╤Д╤А╨╛╨╜╤В ╨▓╤Л╨║╨░╤В╤Л╨▓╨░╤О╤В╤Б╤П ╨┐╨╛ ╨╛╤В╨┤╨╡╨╗╤М╨╜╨╛╤Б╤В╨╕.
+            # Старые ключи оставлены, чтобы уже выложенный фронт не сломался,
+            # пока бэкенд и фронт выкатываются по отдельности.
             "views_prev": metrics["views"]["prev"],
             "views_now": metrics["views"]["now"],
             "growth": metrics["views"]["growth"],
@@ -4377,12 +4377,12 @@ def views_anchors(request):
 @api_view(["GET"])
 def auto_refresh_series(request):
     """
-    ╨в╨╛╤З╨║╨╕ ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П ╨┤╨╗╤П ╨│╤А╨░╤Д╨╕╨║╨░.
+    Точки автообновления для графика.
 
-    - ╨б ╨┐╨░╤А╨░╨╝╨╡╤В╤А╨╛╨╝ ``date=YYYY-MM-DD`` тАФ ╨▓╤Б╨╡ ╤В╨╛╤З╨║╨╕ ╨╖╨░ ╨║╨░╨╗╨╡╨╜╨┤╨░╤А╨╜╤Л╨╣ ╨┤╨╡╨╜╤М (local_date).
-    - ╨С╨╡╨╖ ``date`` тАФ ╤Б╨║╨╛╨╗╤М╨╖╤П╤Й╨╕╨╡ 24 ╤З╨░╤Б╨░ ╨┐╨╛ measured_at ╨┐╨╗╤О╤Б ╤Б╨╕╨╜╤В╨╡╤В╨╕╤З╨╡╤Б╨║╨░╤П ╤В╨╛╤З╨║╨░
-      ╨▓ ╨╜╨░╤З╨░╨╗╨╡ ╨╛╨║╨╜╨░ (╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╕╨╣ ╨╕╨╖╨▓╨╡╤Б╤В╨╜╤Л╨╣ ╤Б╤Г╨╝╨╝╨░╤А╨╜╤Л╨╣ total), ╤З╤В╨╛╨▒╤Л ╨╗╨╕╨╜╨╕╤П ╨╜╨░ TV
-      ╨╜╨╡ ┬л╨╛╨▒╤А╤Л╨▓╨░╨╗╨░╤Б╤М┬╗ ╨┤╨╛ ╨┐╨╡╤А╨▓╨╛╨│╨╛ ╨┐╤А╨╛╨│╨╛╨╜╨░ ╤В╨╡╨║╤Г╤Й╨╕╤Е ╤Б╤Г╤В╨╛╨║.
+    - С параметром ``date=YYYY-MM-DD`` — все точки за календарный день (local_date).
+    - Без ``date`` — скользящие 24 часа по measured_at плюс синтетическая точка
+      в начале окна (последний известный суммарный total), чтобы линия на TV
+      не «обрывалась» до первого прогона текущих суток.
     """
     try:
         date_raw = (request.query_params.get("date") or "").strip()
@@ -4401,7 +4401,7 @@ def auto_refresh_series(request):
                 target_date = datetime.date.fromisoformat(date_raw)
             except ValueError:
                 return Response(
-                    {"detail": "╨Э╨╡╨▓╨╡╤А╨╜╤Л╨╣ ╨┐╨░╤А╨░╨╝╨╡╤В╤А date. ╨Ш╤Б╨┐╨╛╨╗╤М╨╖╤Г╨╣╤В╨╡ ╤Д╨╛╤А╨╝╨░╤В YYYY-MM-DD."},
+                    {"detail": "Неверный параметр date. Используйте формат YYYY-MM-DD."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
@@ -4483,7 +4483,7 @@ def auto_refresh_series(request):
 @api_view(["GET"])
 def auto_refresh_status(request):
     """
-    ╨б╤В╨░╤В╤Г╤Б ╤Д╨╛╨╜╨╛╨▓╨╛╨│╨╛ ╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П (╨░╨▓╤В╨╛ + refresh_all). ╨б╨▒╤А╨░╤Б╤Л╨▓╨░╨╡╤В ╨╖╨░╨▓╨╕╤Б╤И╨╕╨╣ is_running ╨┐╨╛ ╤В╨░╨╣╨╝╨░╤Г╤В╤Г.
+    Статус фонового обновления (авто + refresh_all). Сбрасывает зависший is_running по таймауту.
     """
     try:
         from .refresh_state import clear_stale_refresh_runs_if_needed
@@ -4575,7 +4575,7 @@ def auto_refresh_run_now(request):
         rr = RefreshAllState.get()
         if state.is_running or rr.is_running:
             return Response(
-                {"started": False, "detail": "╨Р╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╨╕╨╗╨╕ ╤Б╨▒╨╛╤А ╨▓╤Б╨╡╤Е ╤Г╨╢╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╤П╨╡╤В╤Б╤П."},
+                {"started": False, "detail": "Автообновление или сбор всех уже выполняется."},
                 status=status.HTTP_409_CONFLICT,
             )
         from .apps import _scheduled_refresh
@@ -4594,7 +4594,7 @@ def auto_refresh_run_now(request):
 
 @api_view(["POST"])
 def auto_refresh_reset_state(request):
-    """╨б╨▒╤А╨╛╤Б╨╕╤В╤М ╨╖╨░╨▓╨╕╤Б╤И╨╕╨╣ is_running (╨┐╨╛╤Б╨╗╨╡ warm_tiktok, ╤Б╨▒╨╛╤П ╨▓╨╛╤А╨║╨╡╤А╨╛╨▓). body/query: force=1."""
+    """Сбросить зависший is_running (после warm_tiktok, сбоя воркеров). body/query: force=1."""
     try:
         from .refresh_state import clear_stale_refresh_runs_if_needed, clear_stuck_refresh_run
 
@@ -4604,7 +4604,7 @@ def auto_refresh_reset_state(request):
         force = str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
         if force:
             cleared = clear_stuck_refresh_run(
-                reason="╨б╨▒╤А╨╛╤И╨╡╨╜╨╛ ╨▓╤А╤Г╤З╨╜╤Г╤О (API auto-refresh-reset-state).",
+                reason="Сброшено вручную (API auto-refresh-reset-state).",
             )
         else:
             cleared = clear_stale_refresh_runs_if_needed()
@@ -4619,11 +4619,11 @@ def auto_refresh_stop(request):
     try:
         state = AutoRefreshState.get()
         if not state.is_running:
-            return Response({"stopped": False, "detail": "╨Р╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╡ ╤Б╨╡╨╣╤З╨░╤Б ╨╜╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╤П╨╡╤В╤Б╤П."}, status=status.HTTP_409_CONFLICT)
+            return Response({"stopped": False, "detail": "Автообновление сейчас не выполняется."}, status=status.HTTP_409_CONFLICT)
         from .refresh_state import force_stop_auto_refresh
         from platforms.apify.abort import abort_active_apify_jobs
 
-        force_stop_auto_refresh(reason="╨Ю╤Б╤В╨░╨╜╨╛╨▓╨╗╨╡╨╜╨╛ ╨┐╨╛╨╗╤М╨╖╨╛╨▓╨░╤В╨╡╨╗╨╡╨╝.")
+        force_stop_auto_refresh(reason="Остановлено пользователем.")
         abort_active_apify_jobs()
         state.refresh_from_db(fields=["is_running", "cancel_requested", "current_account", "updated_at"])
         return Response(
@@ -4631,8 +4631,8 @@ def auto_refresh_stop(request):
                 "stopped": True,
                 "is_running": bool(state.is_running),
                 "detail": (
-                    "╨Ю╤Б╤В╨░╨╜╨╛╨▓╨║╨░ ╨┐╤А╨╕╨╜╤П╤В╨░. ╨б╤В╨░╤В╤Г╤Б ╤Б╨▒╤А╨╛╤И╨╡╨╜; ╨▒╤А╨░╤Г╨╖╨╡╤А╤Л ╨╖╨░╨║╤А╤Л╨▓╨░╤О╤В╤Б╤П ╨▓ ╤Д╨╛╨╜╨╡. "
-                    "╨Ю╨▒╨╜╨╛╨▓╨╕╤В╨╡ ╤Б╤В╤А╨░╨╜╨╕╤Ж╤Г, ╨╡╤Б╨╗╨╕ ╨║╨╜╨╛╨┐╨║╨░ ╨╡╤Й╤С ┬л╨Ю╤Б╤В╨░╨╜╨╛╨▓╨║╨░тАж┬╗."
+                    "Остановка принята. Статус сброшен; браузеры закрываются в фоне. "
+                    "Обновите страницу, если кнопка ещё «Остановка…»."
                 ),
             },
         )
@@ -4642,13 +4642,13 @@ def auto_refresh_stop(request):
 
 @api_view(["GET"])
 def auto_refresh_report_download(request):
-    """╨б╨║╨░╤З╨░╤В╤М CSV ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨│╨╛ ╨╖╨░╨▓╨╡╤А╤И╤С╨╜╨╜╨╛╨│╨╛ ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П (╨╡╤Б╨╗╨╕ ╨▓╨║╨╗╤О╤З╨╡╨╜╨╛ ╨▓ ╨╜╨░╤Б╤В╤А╨╛╨╣╨║╨░╤Е)."""
+    """Скачать CSV последнего завершённого автообновления (если включено в настройках)."""
     try:
         state = AutoRefreshState.get()
         body = (getattr(state, "last_report_csv", None) or "").strip()
         if not body:
             return Response(
-                {"detail": "╨Ю╤В╤З╤С╤В ╨╡╤Й╤С ╨╜╨╡ ╤Б╤Д╨╛╤А╨╝╨╕╤А╨╛╨▓╨░╨╜. ╨Ф╨╛╨╢╨┤╨╕╤В╨╡╤Б╤М ╨╖╨░╨▓╨╡╤А╤И╨╡╨╜╨╕╤П ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╤П ╤Б ╨▓╨║╨╗╤О╤З╤С╨╜╨╜╤Л╨╝ CSV."},
+                {"detail": "Отчёт ещё не сформирован. Дождитесь завершения автообновления с включённым CSV."},
                 status=status.HTTP_404_NOT_FOUND,
             )
         ts = state.last_report_generated_at or timezone.now()
@@ -4665,7 +4665,7 @@ def auto_refresh_report_download(request):
 
 @api_view(["GET"])
 def auto_refresh_last_error_ids(request):
-    """ID ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ ╤Б╨╛ ╤Б╤В╨░╤В╤Г╤Б╨╛╨╝ ┬л╨╛╤И╨╕╨▒╨║╨░┬╗ ╨▓ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨╝ ╨╖╨░╨▓╨╡╤А╤И╤С╨╜╨╜╨╛╨╝ ╨░╨▓╤В╨╛╨╛╨▒╨╜╨╛╨▓╨╗╨╡╨╜╨╕╨╕ ╨┐╨╛ ╤А╨░╤Б╨┐╨╕╤Б╨░╨╜╨╕╤О."""
+    """ID аккаунтов со статусом «ошибка» в последнем завершённом автообновлении по расписанию."""
     try:
         from .auto_refresh_csv import extract_error_account_ids_from_saved_auto_refresh_csv
 
@@ -4690,7 +4690,7 @@ def auto_refresh_last_error_ids(request):
 
 @api_view(["GET"])
 def refresh_all_status(request):
-    """╨б╤В╨░╤В╤Г╤Б ╤Д╨╛╨╜╨╛╨▓╨╛╨│╨╛ POST /api/accounts/refresh_all/ (╨╛╤З╨╡╤А╨╡╨┤╤М, ╤Б╨╗╨╛╤В╤Л ╨▓╨╛╤А╨║╨╡╤А╨╛╨▓)."""
+    """Статус фонового POST /api/accounts/refresh_all/ (очередь, слоты воркеров)."""
     try:
         st = RefreshAllState.get()
         total = max(0, int(st.total_accounts or 0))
@@ -4731,12 +4731,12 @@ def refresh_all_status(request):
 
 @api_view(["POST"])
 def refresh_all_stop(request):
-    """╨Ч╨░╨┐╤А╨╛╤Б╨╕╤В╤М ╨╛╤Б╤В╨░╨╜╨╛╨▓╨║╤Г ╤В╨╡╨║╤Г╤Й╨╡╨│╨╛ ╤Б╨▒╨╛╤А╨░ ╨▓╤Б╨╡╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓."""
+    """Запросить остановку текущего сбора всех аккаунтов."""
     try:
         st = RefreshAllState.get()
         if not st.is_running:
             return Response(
-                {"stopped": False, "detail": "╨б╨▒╨╛╤А ╨▓╤Б╨╡╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ ╤Б╨╡╨╣╤З╨░╤Б ╨╜╨╡ ╨▓╤Л╨┐╨╛╨╗╨╜╤П╨╡╤В╤Б╤П."},
+                {"stopped": False, "detail": "Сбор всех аккаунтов сейчас не выполняется."},
                 status=status.HTTP_409_CONFLICT,
             )
         st.cancel_requested = True
@@ -4753,7 +4753,7 @@ def refresh_all_stop(request):
 
 @api_view(["GET"])
 def refresh_all_report_download(request):
-    """╨б╨║╨░╤З╨░╤В╤М CSV ╨╛╤В╤З╤С╤В╨░ ╨┐╨╛╤Б╨╗╨╡╨┤╨╜╨╡╨│╨╛ ╨╖╨░╨▓╨╡╤А╤И╤С╨╜╨╜╨╛╨│╨╛ ╤Б╨▒╨╛╤А╨░ ╨▓╤Б╨╡╤Е (GET /api/accounts/refresh-all-report/)."""
+    """Скачать CSV отчёта последнего завершённого сбора всех (GET /api/accounts/refresh-all-report/)."""
     try:
         st = RefreshAllState.get()
         body = (getattr(st, "last_report_csv", None) or "").strip()
@@ -4761,8 +4761,8 @@ def refresh_all_report_download(request):
             return Response(
                 {
                     "detail": (
-                        "╨Ю╤В╤З╤С╤В ╨╡╤Й╤С ╨╜╨╡ ╤Б╤Д╨╛╤А╨╝╨╕╤А╨╛╨▓╨░╨╜. ╨Ч╨░╨┐╤Г╤Б╤В╨╕╤В╨╡ ╤Б╨▒╨╛╤А ╨▓╤Б╨╡╤Е ╨░╨║╨║╨░╤Г╨╜╤В╨╛╨▓ "
-                        "╨╕ ╨┤╨╛╨╢╨┤╨╕╤В╨╡╤Б╤М ╨╖╨░╨▓╨╡╤А╤И╨╡╨╜╨╕╤П тАФ CSV ╤Б╨╛╤Е╤А╨░╨╜╨╕╤В╤Б╤П ╨╜╨░ ╤Б╨╡╤А╨▓╨╡╤А╨╡ ╨░╨▓╤В╨╛╨╝╨░╤В╨╕╤З╨╡╤Б╨║╨╕."
+                        "Отчёт ещё не сформирован. Запустите сбор всех аккаунтов "
+                        "и дождитесь завершения — CSV сохранится на сервере автоматически."
                     ),
                 },
                 status=status.HTTP_404_NOT_FOUND,
@@ -4781,7 +4781,7 @@ def refresh_all_report_download(request):
 
 def account_avatar(request, pk: int):
     """
-    ╨Р╨▓╨░╤В╨░╤А: ╨╗╨╛╨║╨░╨╗╤М╨╜╤Л╨╣ ╤Д╨░╨╣╨╗, ╨╕╨╜╨░╤З╨╡ ╨┐╤А╨╛╨║╤Б╨╕ avatar_url (CDN).
+    Аватар: локальный файл, иначе прокси avatar_url (CDN).
     GET /api/accounts/<pk>/avatar/
     """
     from .avatar_storage import serve_account_avatar_response
@@ -4791,7 +4791,7 @@ def account_avatar(request, pk: int):
 
 def post_thumbnail(request, pk: int):
     """
-    ╨Я╤А╨╡╨▓╤М╤О ╨┐╨╛╤Б╤В╨░: ╨╗╨╛╨║╨░╨╗╤М╨╜╤Л╨╣ ╤Д╨░╨╣╨╗, ╨╕╨╜╨░╤З╨╡ ╨┐╤А╨╛╨║╤Б╨╕ thumbnail_url (CDN).
+    Превью поста: локальный файл, иначе прокси thumbnail_url (CDN).
     GET /api/posts/<pk>/thumbnail/
     """
     from .post_thumbnail_storage import serve_post_thumbnail_response
