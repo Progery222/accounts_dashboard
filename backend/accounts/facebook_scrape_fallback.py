@@ -24,12 +24,23 @@ def is_facebook_antibot_error(exc: BaseException) -> bool:
 
 
 def is_facebook_fallback_trigger_error(exc: BaseException) -> bool:
-    """Ошибки 1 (rate limit), 2 (антибот), 7 (профиль недоступен) — см. документацию UI."""
-    if is_facebook_rate_limited_error(exc):
-        return True
-    if is_facebook_antibot_error(exc):
+    """Ошибки 1 (rate limit), 2 (антибот), 7 (профиль недоступен) — см. документацию UI.
+
+    Это «нужен ли вообще повтор через Apify по этому аккаунту». Переключение
+    всей платформы решается отдельно — is_facebook_batch_switch_error.
+    """
+    if is_facebook_batch_switch_error(exc):
         return True
     return is_profile_unavailable_error(str(exc))
+
+
+def is_facebook_batch_switch_error(exc: BaseException) -> bool:
+    """Сломан сам сбор, а не один профиль: остаток прогона имеет смысл вести Apify.
+
+    Rate limit и антибот бьют по всем следующим аккаунтам, «профиль недоступен» —
+    нет: он про конкретную страницу и на остальные никак не влияет.
+    """
+    return is_facebook_rate_limited_error(exc) or is_facebook_antibot_error(exc)
 
 
 class FacebookBatchFallback:
@@ -37,8 +48,10 @@ class FacebookBatchFallback:
     Один прогон bulk / refresh_all / автообновление.
 
     Основной способ — ScrapeBackendConfig.facebook_backend.
-    При fallback и primary Playwright: после rate limit, антибота или «профиль недоступен»
-    остальные Facebook идут через Apify до конца прогона.
+    При fallback и primary Playwright: после rate limit или антибота остальные
+    Facebook идут через Apify до конца прогона — эти ошибки означают, что сбор
+    сломан и следующим аккаунтам тоже не пройти. «Профиль недоступен» пачку не
+    переключает: по нему идёт точечный повтор через Apify.
     """
 
     def __init__(
@@ -103,7 +116,11 @@ class FacebookBatchFallback:
     def on_playwright_failure(self, account: Account, exc: BaseException) -> bool:
         if account.platform != Platform.FACEBOOK:
             return False
-        if not is_facebook_fallback_trigger_error(exc):
+        # Всю платформу переключаем только там, где сломан сам сбор: rate limit
+        # и антибот означают, что следующие аккаунты через Playwright тоже не
+        # пройдут. «Профиль недоступен» — про один аккаунт: по нему идёт
+        # точечный повтор через Apify, остальные остаются на Playwright.
+        if not is_facebook_batch_switch_error(exc):
             return False
         return self._try_activate(str(exc))
 
@@ -154,12 +171,12 @@ def retry_facebook_via_apify_after_playwright_failure(
         return None
     if batch_ctx is None or parent_batch_id is None:
         return None
-    from accounts.scrape_backend import (
-        refresh_account_via_apify_sync,
-        should_use_apify_for_account,
-    )
+    from accounts.scrape_backend import refresh_account_via_apify_sync
 
-    if not should_use_apify_for_account(account, batch_ctx=batch_ctx):
+    # Не спрашиваем batch_ctx.use_apify: «профиль недоступен» больше не
+    # переключает платформу, и этот вопрос вернул бы «Playwright», заблокировав
+    # точечный повтор. Решение повторять уже принято выше.
+    if not apify_enabled():
         return None
 
     return refresh_account_via_apify_sync(

@@ -11,9 +11,12 @@
 Отдельно стоит ``efir``: это не арендатор, а сводный эфир по всем доменам.
 """
 
-from .models import AGGREGATE_DOMAIN_SLUG, Domain
+from django.db.models import Q
 
-__all__ = ["AGGREGATE_DOMAIN_SLUG", "DomainScope", "resolve", "narrow", "slug_from_request"]
+from .models import AGGREGATE_DOMAIN_SLUG, TOPICS_DOMAIN_SLUGS, Domain
+
+__all__ = ["AGGREGATE_DOMAIN_SLUG", "DomainScope", "resolve", "narrow", "slug_from_request",
+           "is_topics", "account_q"]
 
 
 class DomainScope:
@@ -91,4 +94,31 @@ def narrow(queryset, scope, field="domain"):
         return queryset.none()
     if not scope.scoped:
         return queryset
+    if is_topics(scope):
+        # AI собирает аккаунты по темам, а не по полю domain. Сужаем только
+        # выборки аккаунтов (и того, что на них ссылается); у справочников
+        # (профили, группы…) в AI своих строк нет — там пусто, как и было.
+        prefix = field[:-len("domain")] if field.endswith("domain") else ""
+        if queryset.model.__name__ == "Account" or prefix:
+            return queryset.filter(account_q(scope, prefix))
     return queryset.filter(**{field: scope.domain})
+
+
+def is_topics(scope):
+    """AI и Стенды: аккаунты берутся из тем домена, а не из ``Account.domain``."""
+    return bool(scope is not None and scope.domain is not None
+                and scope.domain.slug in TOPICS_DOMAIN_SLUGS)
+
+
+def account_q(scope, prefix=""):
+    """Условие «аккаунт относится к домену» с учётом тем AI.
+
+    ``prefix`` — путь до аккаунта, например ``"account__"`` для снимков.
+    Через ``id__in`` с подзапросом, а не join по темам: аккаунт из двух тем
+    иначе пришёл бы в выдачу дважды.
+    """
+    if is_topics(scope):
+        from .models import Topic
+        ids = Topic.accounts.through.objects.filter(topic__board=scope.domain.slug).values("account_id")
+        return Q(**{prefix + "id__in": ids})
+    return Q(**{prefix + "domain": scope.domain})

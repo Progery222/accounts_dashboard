@@ -13,6 +13,13 @@ RESERVED_DOMAIN_SLUGS = frozenset({
     "api", "admin", "media", "static", "healthz", "index",
 })
 
+#: Домен, который собирает аккаунты не по полю ``Account.domain``, а по темам
+#: (``Topic``). Аккаунт можно положить в несколько тем, и при этом он остаётся
+#: в своём обычном домене — ничего никуда не переезжает.
+TOPICS_DOMAIN_SLUG = "ai"
+#: Все такие домены: у каждого свой набор тем (у «Стендов» темы — это стенды).
+TOPICS_DOMAIN_SLUGS = frozenset({TOPICS_DOMAIN_SLUG, "stands"})
+
 
 class Domain(models.Model):
     """Арендатор: свой набор аккаунтов и справочников под своим адресом.
@@ -737,6 +744,27 @@ class AutoRefreshPoint(models.Model):
         help_text="Дельты просмотров по платформам для этого прогона, например {'tiktok': 1200}.",
     )
 
+    # Ряд точек со временем есть только по сети целиком, поэтому живой счётчик
+    # внутри домена опирался на суточные снимки — а они появляются лишь после
+    # вечернего прогона, и до него прирост домена выходил нулевым (табло стояло).
+    # Здесь тот же итог, но в разрезе домена: ключ — id домена строкой, "none" —
+    # аккаунты без домена. У точек, записанных до этого поля, словарь пустой —
+    # для них расчёт по-прежнему падает на снимки.
+    domain_totals = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Суммарные просмотры по доменам на момент точки: {'3': 24077538, 'none': 512}.",
+    )
+    # Разбивка до аккаунта: по ней фронт считает прирост любого среза — фильтры
+    # комбинируются (владелец И площадка), а по суммам-маргиналам сочетание не
+    # восстановить. Ключ — id аккаунта строкой. ~15 КБ на точку, поэтому у точек
+    # старше VIEWS_ACCOUNT_TOTALS_KEEP_DAYS словарь чистится: якорям нужны только
+    # вчерашняя и сегодняшняя.
+    account_totals = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Просмотры по аккаунтам на момент точки: {'1635': 24077538}.",
+    )
     class Meta:
         ordering = ["measured_at"]
         indexes = [
@@ -787,3 +815,56 @@ class ExternalApiKey(models.Model):
 
     def has_scope(self, scope: str) -> bool:
         return scope in (self.scopes or [])
+
+
+class Topic(models.Model):
+    """Тема в домене AI: «Спорт», «Коты», «Новости»…
+
+    Связь с аккаунтами — многие-ко-многим. Добавление аккаунта в тему не
+    трогает ни его домен, ни группу, ни другие темы: один и тот же аккаунт
+    может лежать сразу в нескольких темах и в своём обычном домене.
+    """
+
+    name = models.CharField(max_length=120)
+    slug = models.SlugField(max_length=63, unique=True)
+    color = models.CharField(max_length=7, default="#6366f1")
+    emoji = models.CharField(max_length=8, blank=True, default="")
+    sort_order = models.IntegerField(default=0)
+    board = models.CharField(
+        max_length=63, default=TOPICS_DOMAIN_SLUG, db_index=True,
+        help_text="Slug домена, которому принадлежит тема: ai или stands.",
+    )
+    accounts = models.ManyToManyField(
+        "Account", blank=True, related_name="topics",
+        help_text="Аккаунты темы. Один аккаунт может быть в нескольких темах.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["sort_order", "name"]
+        verbose_name = "Тема (AI)"
+        verbose_name_plural = "Темы (AI)"
+
+    def __str__(self):
+        return self.name
+
+
+class TopicBoard(models.Model):
+    """Ручной порядок карточек на экране домена AI (перетаскивание).
+
+    Одна строка на доску (key="ai"): общий список id аккаунтов. Внутри темы
+    карточки идут в том же относительном порядке; аккаунты, которых в списке
+    ещё нет, показываются после, по просмотрам.
+    """
+
+    key = models.CharField(max_length=32, unique=True, default="ai")
+    account_ids = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Порядок карточек (AI)"
+        verbose_name_plural = "Порядок карточек (AI)"
+
+    def __str__(self):
+        return f"{self.key}: {len(self.account_ids or [])}"

@@ -205,6 +205,26 @@ def launch_args(profile: dict[str, Any] | None = None, *, channel: str | None = 
     )
 
 
+def resolve_browser_channel() -> str | None:
+    """
+    Канал браузера для Facebook.
+
+    По умолчанию системный Google Chrome (``channel=chrome``): Playwright Chromium
+    чаще ловит checkpoint/Arkose. Отключить: ``FACEBOOK_BROWSER_CHANNEL=chromium``.
+    """
+    raw = (os.environ.get("FACEBOOK_BROWSER_CHANNEL") or "chrome").strip().lower()
+    if raw in {"", "0", "none", "off", "chromium", "bundled", "playwright"}:
+        return None
+    return raw
+
+
+def use_native_chrome_user_agent(channel: str | None) -> bool:
+    """Не подменять UA у настоящего Chrome, если FACEBOOK_USER_AGENT не задан явно."""
+    if not (channel or "").strip():
+        return False
+    return not bool((os.environ.get("FACEBOOK_USER_AGENT") or "").strip())
+
+
 def context_options(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     p = profile or load_profile()
     return {

@@ -54,6 +54,49 @@ def clamp_platform_view_delta(platform: str, raw: int) -> int:
 
 def _current_views_total() -> int:
     return int(Account.objects.aggregate(total=Sum("view_count")).get("total") or 0)
+# Ключ для аккаунтов без домена: JSON не умеет null в ключах, а отдельный домен
+# «ничей» в базе заводить незачем.
+NO_DOMAIN_KEY = "none"
+
+
+# Сколько дней держим разбивку до аккаунта. Якорям нужны точки за сегодняшние и
+# вчерашние 10:00; запас на случай пропущенных прогонов.
+VIEWS_ACCOUNT_TOTALS_KEEP_DAYS = 3
+
+
+def _current_views_by_account() -> dict:
+    """Просмотры по каждому аккаунту — опора для точного прироста любого среза.
+
+    По суммам (домен, владелец, площадка) сочетание фильтров не восстановить:
+    маргиналы не дают совместного распределения. Разбивка до аккаунта даёт, и
+    весит ~15 КБ на точку.
+    """
+    return {
+        str(pk): int(v or 0)
+        for pk, v in Account.objects.values_list("id", "view_count")
+    }
+
+
+def _prune_account_totals(keep_days: int = VIEWS_ACCOUNT_TOTALS_KEEP_DAYS) -> None:
+    """Очистить разбивку до аккаунта у старых точек: нужны только свежие."""
+    cutoff = timezone.now() - timedelta(days=max(1, int(keep_days)))
+    AutoRefreshPoint.objects.filter(
+        measured_at__lt=cutoff,
+    ).exclude(account_totals={}).update(account_totals={})
+
+
+def _current_views_by_domain() -> dict:
+    """Суммарные просмотры в разрезе домена — для живого счётчика внутри домена."""
+    rows = (
+        Account.objects.values("domain_id")
+        .annotate(total=Sum("view_count"))
+        .order_by()
+    )
+    out = {}
+    for r in rows:
+        key = str(r["domain_id"]) if r["domain_id"] else NO_DOMAIN_KEY
+        out[key] = out.get(key, 0) + int(r["total"] or 0)
+    return out
 
 
 def _point_totals_at(finished, current_total: int) -> tuple[int, int]:
@@ -128,12 +171,16 @@ def _append_platform_delta(platform: str, delta: int, *, source: str) -> None:
         latest.view_count_total = current_total
         latest.view_delta_from_prev_point = d_prev
         latest.view_delta_from_day_start = d_day
+        latest.domain_totals = _current_views_by_domain()
+        latest.account_totals = _current_views_by_account()
         latest.save(
             update_fields=[
                 "platform_deltas",
                 "view_count_total",
                 "view_delta_from_prev_point",
                 "view_delta_from_day_start",
+                "domain_totals",
+                "account_totals",
             ],
         )
         return
@@ -147,6 +194,8 @@ def _append_platform_delta(platform: str, delta: int, *, source: str) -> None:
         view_delta_from_prev_point=d_prev,
         view_delta_from_day_start=d_day,
         platform_deltas={platform: int(delta)},
+        domain_totals=_current_views_by_domain(),
+        account_totals=_current_views_by_account(),
     )
 
 
@@ -256,12 +305,16 @@ def record_interval_pulse_snapshot(
         existing.view_delta_from_prev_point = d_prev
         existing.view_delta_from_day_start = d_day
         existing.slot_label = slot_label
+        existing.domain_totals = _current_views_by_domain()
+        existing.account_totals = _current_views_by_account()
         existing.save(
             update_fields=[
                 "view_count_total",
                 "view_delta_from_prev_point",
                 "view_delta_from_day_start",
                 "slot_label",
+                "domain_totals",
+                "account_totals",
             ],
         )
         return True
@@ -275,7 +328,12 @@ def record_interval_pulse_snapshot(
         view_delta_from_prev_point=d_prev,
         view_delta_from_day_start=d_day,
         platform_deltas={},
+        domain_totals=_current_views_by_domain(),
+        account_totals=_current_views_by_account(),
     )
+    # Чистим разбивку у старых точек здесь же: 30-минутный снимок — единственное,
+    # что идёт по расписанию независимо от прогонов.
+    _prune_account_totals()
     return True
 
 
@@ -309,4 +367,6 @@ def create_auto_refresh_point_from_report_rows(
         view_delta_from_prev_point=d_prev,
         view_delta_from_day_start=d_day,
         platform_deltas=platform_deltas,
+        domain_totals=_current_views_by_domain(),
+        account_totals=_current_views_by_account(),
     )

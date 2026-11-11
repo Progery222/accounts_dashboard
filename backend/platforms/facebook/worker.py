@@ -27,10 +27,12 @@ Runs headless=False with the window placed off-screen.
 На прямом ``/reel/…`` не берём max по aria-label соседних роликов в ленте. По умолчанию **включено**
 (``FACEBOOK_DETAIL_LIKES_ENABLED=0`` — выключить). Перед кликом по карточке при необходимости
 **возврат на URL с sk=reels_tab** — после модалки Facebook часто уводит со вкладки.
-Порог просмотров: ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS`` (по умолчанию **2000**): у постов с
-``view_count ≤`` порогу лайки с сетки сбрасываются (**0**). Detail-enrich по умолчанию только для
-постов со **строго большим** числом просмотров: ``view_count > MIN_VIEWS`` (без лавины modal на
-все низкие Reels). Опционально снова обогащать низкие Reels: ``FACEBOOK_DETAIL_ENRICH_LOW_VIEW_REELS=1``.
+Порог просмотров: ``FACEBOOK_DETAIL_LIKES_MIN_VIEWS`` (по умолчанию **2000**): detail-enrich
+по умолчанию только для постов со **строго большим** числом просмотров: ``view_count > MIN_VIEWS``
+(без лавины modal на все низкие Reels). Лайки с сетки у низких роликов **больше не
+обнуляем пачкой** — иначе аккаунты с роликами ≤ порога всегда остаются с 0 лайков;
+фантомы режут эвристики equals/dedupe/collision (confirmed detail не трогают).
+Опционально снова обогащать низкие Reels: ``FACEBOOK_DETAIL_ENRICH_LOW_VIEW_REELS=1``.
 Эвристика «лайки = просмотры» (обнуление): ``FACEBOOK_REEL_LIKE_VIEW_EQUAL_MAX_V`` (по умолчанию 12_000),
 раньше по сути действовало до 500k и могло сбрасывать лайки у роликов с ~16k просмотров при ошибочном совпадении парсера.
 До ``FACEBOOK_DETAIL_LIKES_MAX_OPENS`` постов за проход (по умолчанию 30, не более 50; ветка enrich
@@ -336,6 +338,41 @@ def _facebook_mbasic_fallback_enabled() -> bool:
     return os.getenv("FACEBOOK_MBASIC_FALLBACK", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+async def _facebook_try_continue_as(page) -> bool:
+    """
+    На части профилей cookies дают только виджет «Продолжить как …» /
+    «Continue as …» — без клика друзья и intro скрыты.
+    """
+    try:
+        clicked = await page.evaluate(
+            """() => {
+                const re = /продолжить\\s+как|continue\\s+as/i;
+                const nodes = Array.from(document.querySelectorAll(
+                    'div[role="button"], a[role="button"], button, span[role="button"], a'
+                ));
+                for (const el of nodes) {
+                    const t = ((el.innerText || el.textContent || '') + ' ' +
+                               (el.getAttribute('aria-label') || '')).trim();
+                    if (!re.test(t) || t.length > 80) continue;
+                    el.click();
+                    return t.slice(0, 60);
+                }
+                return '';
+            }"""
+        )
+        if clicked:
+            print(f"[facebook_worker] клик «Продолжить как»: {clicked!r}", file=sys.stderr)
+            await page.wait_for_timeout(2500)
+            return True
+    except Exception as exc:
+        print(f"[facebook_worker] continue-as: {exc}", file=sys.stderr)
+    return False
+
+
+def _facebook_is_numeric_personal_profile(username: str) -> bool:
+    return bool(re.fullmatch(r"\d{6,24}", str(username or "").strip()))
+
+
 def _facebook_daemon_should_close_browser_on_exit() -> bool:
     """Закрыть Chromium при завершении stdin только по явному env."""
     try:
@@ -428,12 +465,65 @@ def _parse_count(text: str) -> int:
     return int(digits) if digits else 0
 
 
+def _parse_facebook_page_like_count(page_likes: str, bio: str) -> int:
+    """Page-level likes, including Facebook's ``Отметки "Нравится": 7 224`` meta format."""
+    parsed = _parse_count(page_likes)
+    if parsed > 0 or not bio:
+        return parsed
+    match = re.search(
+        r'(?:отметки\s*[«"“„]?\s*нравится\s*[»"”]?|page\s+likes?|likes?)'
+        r'\s*[:：]\s*'
+        r'([\d][\d\s\u00a0\u202f.,]*(?:\s*(?:млрд|млн|тыс|[KMBTkmbt]))?)',
+        str(bio),
+        re.I,
+    )
+    return _parse_count(match.group(1)) if match else 0
+
+
+def _follower_count_with_friends_fallback(followers: int, friends: int) -> int:
+    """
+    Личные профили Facebook: публичных «подписчиков» часто нет, зато есть «друзья».
+    Если follower_count пустой/0 — считаем друзей подписчиками.
+    Публичные страницы с реальными подписчиками не трогаем (followers > 0).
+    """
+    fc = int(followers or 0)
+    fr = int(friends or 0)
+    if fc > 0:
+        return fc
+    if fr > 0:
+        return fr
+    return fc
+
+
+def _parse_friends_from_html(html: str) -> int:
+    """Запасной разбор числа друзей из HTML/встроенного JSON страницы."""
+    if not html:
+        return 0
+    best = 0
+    patterns = (
+        r'friend_count["\']?\s*[:=]\s*(\d+)',
+        r'friends_count["\']?\s*[:=]\s*(\d+)',
+        r'"friends"\s*:\s*\{\s*"count"\s*:\s*(\d+)',
+        r'([\d][\d\s\u00a0\u202f.,]*(?:\s*(?:млрд|млн|тыс|[KkMmBb]))?)\s*(?:друз\w*|friends?\b)',
+    )
+    for pat in patterns:
+        for match in re.finditer(pat, html, flags=re.I):
+            start = max(0, match.start() - 40)
+            around = html[start : match.end() + 20]
+            if re.search(r"общ\w*\s+друз|mutual\s+friends", around, flags=re.I):
+                continue
+            n = _parse_count(match.group(1))
+            if n > best:
+                best = n
+    return best
+
 def _facebook_zero_like_if_equals_views(posts: list[dict]) -> None:
     """
     Совпадение like_count и view_count на **небольших** числах — почти всегда артефакт DOM.
     Раньше верхняя граница была 500k — при ~16k просмотров ложное совпадение парсера
     обнуляло реальные лайки. Сейчас порог задаётся ``FACEBOOK_REEL_LIKE_VIEW_EQUAL_MAX_V``
     (по умолчанию 12_000); ``0`` — отключить эвристику.
+    Посты с ``like_count_confirmed`` (detail) не трогаем.
     """
     try:
         max_v = int(os.getenv("FACEBOOK_REEL_LIKE_VIEW_EQUAL_MAX_V", "12000") or "12000")
@@ -442,6 +532,8 @@ def _facebook_zero_like_if_equals_views(posts: list[dict]) -> None:
     if max_v <= 0:
         return
     for p in posts:
+        if p.get("like_count_confirmed"):
+            continue
         v = int(p.get("view_count") or 0)
         l = int(p.get("like_count") or 0)
         if l > 0 and l == v and v <= max_v:
@@ -452,11 +544,14 @@ def _facebook_dedupe_phantom_likes(posts: list[dict]) -> None:
     """
     Одинаковый положительный like_count у нескольких постов с сильно разными просмотрами —
     типичный «фантом» (DOM/GraphQL). Обнуляем такую группу.
+    Подтверждённые detail-лайки не трогаем.
     """
     from collections import defaultdict
 
     by_like: dict[int, list[dict]] = defaultdict(list)
     for p in posts:
+        if p.get("like_count_confirmed"):
+            continue
         lk = int(p.get("like_count") or 0)
         if lk > 0:
             by_like[lk].append(p)
@@ -476,6 +571,8 @@ def _facebook_zero_likes_if_like_is_other_post_view_count(posts: list[dict]) -> 
     этого поста) — типично «первое число на странице» подтянуло чужие просмотры; во время
     скрапа просмотры растут, поэтому совпадение не обязано быть точным (162 vs 163/166).
     Малые числа не трогаем (случайные совпадения).
+    Подтверждённые detail-лайки не трогаем: у соседних роликов часто похожие
+    просмотры (592 / 577), и реальное число реакций легко совпадает с чужим view_count.
     """
     floor = int(os.getenv("FACEBOOK_LIKE_VIEW_COLLISION_MIN", "30") or "30")
     drift = int(os.getenv("FACEBOOK_LIKE_VIEW_COLLISION_DRIFT", "8") or "8")
@@ -485,6 +582,8 @@ def _facebook_zero_likes_if_like_is_other_post_view_count(posts: list[dict]) -> 
     if not view_vals:
         return
     for p in posts:
+        if p.get("like_count_confirmed"):
+            continue
         v = int(p.get("view_count") or 0)
         l = int(p.get("like_count") or 0)
         if l < max(1, floor) or l <= 0:
@@ -1044,12 +1143,102 @@ _PROFILE_JS = """(username) => {
         }
     }
 
+    // ── Friends (друзья) — личные профили ─────────────────────────────────────
+    // На profile.php часто нет «подписчиков», зато есть «N друзей» / friends.
+    // В Python friends → follower_count, если followers пустые/0.
+    let friends = '';
+    function readFriendsFromLink(a) {
+        if (!a) return { ok: false, value: 0 };
+        const href = (a.getAttribute('href') || '').toLowerCase();
+        if (!(href.includes('friends') || href.includes('sk=friends'))) {
+            return { ok: false, value: 0 };
+        }
+        const chunks = [];
+        const aria = (a.getAttribute('aria-label') || '').trim();
+        const title = (a.getAttribute('title') || '').trim();
+        const txt = (a.innerText || a.textContent || '').trim();
+        if (aria) chunks.push(aria);
+        if (title) chunks.push(title);
+        if (txt) chunks.push(txt);
+        const joined = chunks.join(' | ');
+        if (/общ\\w*\\s+друз|mutual\\s+friends/i.test(joined)) {
+            return { ok: false, value: 0 };
+        }
+        const labelled = joined.match(
+            /([\\d][\\d\\s\\u00a0.,]*(?:\\s*(?:млрд|млн|тыс|[KkMmBb]))?)\\s*(?:друз\\w*|friends?)/i
+        );
+        if (labelled) {
+            const n = parseCompactNum(labelled[1]);
+            if (Number.isFinite(n) && n >= 0) return { ok: true, value: n };
+        }
+        for (const node of a.querySelectorAll('strong, span')) {
+            const t = (node.innerText || node.textContent || '').trim();
+            if (!t) continue;
+            const n = parseCompactNum(t);
+            if (Number.isFinite(n) && n >= 0) return { ok: true, value: n };
+        }
+        const anyNum = joined.match(/([\\d][\\d\\s\\u00a0.,]*(?:\\s*(?:млрд|млн|тыс|[KkMmBb]))?)/i);
+        if (anyNum) {
+            const n = parseCompactNum(anyNum[1]);
+            if (Number.isFinite(n) && n >= 0) return { ok: true, value: n };
+        }
+        return { ok: false, value: 0 };
+    }
+    const friendAnchors = document.querySelectorAll(
+        '[role="banner"] a[href*="friends"], [role="banner"] a[href*="sk=friends"], ' +
+        '[role="navigation"] a[href*="friends"], [role="navigation"] a[href*="sk=friends"], ' +
+        '[role="main"] a[href*="friends"], [role="main"] a[href*="sk=friends"], ' +
+        'a[href*="profile.php?id="][href*="sk=friends"], a[href*="/friends"]'
+    );
+    for (const a of friendAnchors) {
+        const got = readFriendsFromLink(a);
+        if (got.ok && got.value > 0) {
+            friends = String(got.value);
+            break;
+        }
+    }
+    if (!friends) {
+        const friendRe = [
+            /([\\d][\\d\\s,.]*)\\s*(млрд|млн|тыс)[.,]?\\s*(?:—\\s*)?друз/i,
+            /([\\d][\\d\\s]*)\\s*[-\u2013\u2014]\\s*друз/i,
+            /([\\d][\\d\\s]*)\\s+друз/i,
+            /([\\d][\\d,.]*\\s*[KkMmBb]?)\\s*friends?[\\s\\n·•,]/i,
+            /([\\d][\\d\\s]*)\\s*(?:friends?)\\b/i,
+        ];
+        for (const re of friendRe) {
+            const m = bodyText.match(re);
+            if (!m) continue;
+            const around = bodyText.slice(Math.max(0, (m.index || 0) - 20), (m.index || 0) + 40);
+            if (/общ\\w*\\s+друз|mutual\\s+friends/i.test(around)) continue;
+            friends = m[1].trim();
+            if (m[2] && !/(млн|тыс|млрд)/i.test(friends))
+                friends += ' ' + m[2];
+            break;
+        }
+    }
+    if (!friends) {
+        const selFr = '[role="banner"] a[href*="friends"],[role="banner"] a[href*="sk=friends"],' +
+            '[role="navigation"] a[href*="friends"],[role="navigation"] a[href*="sk=friends"]';
+        for (const a of document.querySelectorAll(selFr)) {
+            const lab = (a.getAttribute('aria-label') || a.getAttribute('title') || '').trim();
+            if (!lab || /общ\\w*\\s+друз|mutual/i.test(lab)) continue;
+            let m = lab.match(/([\\d][\\d\\s\\u00a0.,]*)\\s*(млрд|млн|тыс)?[^\\d\\w]{0,40}друз/i);
+            if (!m) m = lab.match(/([\\d][\\d\\s.,]*)\\s*(?:[KkMmBb])?\\s*friends?/i);
+            if (m) {
+                friends = m[1].trim();
+                if (m[2] && !/(млн|тыс|млрд)/i.test(friends))
+                    friends += ' ' + m[2];
+                break;
+            }
+        }
+    }
+
     // ── Bio ───────────────────────────────────────────────────────────────────
     let bio = '';
     const ogDesc = document.querySelector('meta[property="og:description"]');
     if (ogDesc) {
         bio = (ogDesc.getAttribute('content') || '').trim()
-            .replace(/[\\d][\\d\\s,.]*(?:млн|тыс|млрд|[KkMmBb])?\\s*(?:—\\s*)?(?:нравится|подписчик\\w*|followers?|likes?)/gi, '')
+            .replace(/[\\d][\\d\\s,.]*(?:млн|тыс|млрд|[KkMmBb])?\\s*(?:—\\s*)?(?:нравится|подписчик\\w*|followers?|likes?|друз\\w*|friends?)/gi, '')
             .replace(/\\s*[·\\-\\u2013,]\\s*/g, ' ')
             .replace(/\\s+/g, ' ')
             .trim();
@@ -1076,6 +1265,7 @@ _PROFILE_JS = """(username) => {
         bio,
         followers,
         followersConfirmed,
+        friends,
         pageLikes,
         dbg: bodyText.slice(0, 300),
         dbgLikes,
@@ -1083,7 +1273,6 @@ _PROFILE_JS = """(username) => {
         nravLines,
     };
 }"""
-
 # ── Posts extraction JS ───────────────────────────────────────────────────────
 
 _POSTS_JS = """(params) => {
@@ -1576,7 +1765,7 @@ _SK_PHOTOS_REELS_JS = """(params) => {
 _MBASIC_FALLBACK_JS = """(params) => {
     const username = String((params && params.username) || '');
     const maxPosts = Math.max(1, Number((params && params.maxPosts) || 8));
-    const out = { followers: '', pageLikes: '', posts: [] };
+    const out = { followers: '', friends: '', pageLikes: '', posts: [] };
     const bodyText = (document.body && document.body.innerText) ? document.body.innerText : '';
     const parseNum = (s) => (s || '').replace(/[\\u00a0\\u202f]/g, ' ').trim();
 
@@ -1585,11 +1774,20 @@ _MBASIC_FALLBACK_JS = """(params) => {
       bodyText.match(/(?:followers?|подписчик\\w*)\\s*[:\\-]?\\s*([\\d][\\d\\s,.]*[KkMmBb]?)/i);
     if (fMatch) out.followers = parseNum(fMatch[1]);
 
+    const frMatch =
+      bodyText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s+(?:friends?|друз\\w*)/i) ||
+      bodyText.match(/(?:friends?|друз\\w*)\\s*[:\\-]?\\s*([\\d][\\d\\s,.]*[KkMmBb]?)/i);
+    if (frMatch) {
+        const around = bodyText.slice(Math.max(0, (frMatch.index || 0) - 20), (frMatch.index || 0) + 40);
+        if (!/общ\\w*\\s+друз|mutual\\s+friends/i.test(around)) {
+            out.friends = parseNum(frMatch[1]);
+        }
+    }
+
     const lMatch =
       bodyText.match(/([\\d][\\d\\s,.]*[KkMmBb]?)\\s+(?:likes?|нравится)/i) ||
       bodyText.match(/(?:likes?|нравится)\\s*[:\\-]?\\s*([\\d][\\d\\s,.]*[KkMmBb]?)/i);
     if (lMatch) out.pageLikes = parseNum(lMatch[1]);
-
     const links = document.querySelectorAll('a[href*="story_fbid="], a[href*="/posts/"], a[href*="/videos/"], a[href*="/reel/"], a[href*="/permalink/"]');
     const seen = new Set();
     for (const a of links) {
@@ -1687,6 +1885,10 @@ def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
     pl_p = _parse_count(str(p.get("pageLikes") or ""))
     merged_likes = (p.get("pageLikes") or "").strip() if pl_p > pl_t else (t.get("pageLikes") or "").strip()
 
+    fr_t = _parse_count(str(t.get("friends") or ""))
+    fr_p = _parse_count(str(p.get("friends") or ""))
+    merged_friends = (p.get("friends") or "").strip() if fr_p > fr_t else (t.get("friends") or "").strip()
+
     dn_t = sanitize_facebook_display_name(t.get("displayName"))
     dn_p = sanitize_facebook_display_name(p.get("displayName"))
     merged_name = dn_p or dn_t
@@ -1724,6 +1926,7 @@ def _merge_facebook_profile_js(timeline: dict, photos: dict | None) -> dict:
         "bio": merged_bio,
         "followers": merged_followers,
         "followersConfirmed": merged_followers_confirmed,
+        "friends": merged_friends,
         "pageLikes": merged_likes,
         "dbg": merged_dbg,
         "dbgLikes": (p.get("dbgLikes") or t.get("dbgLikes") or ""),
@@ -2067,15 +2270,16 @@ async def _extract_mbasic_fallback(page, mbasic_timeline_url: str, *, profile_la
             _MBASIC_FALLBACK_JS, {"username": profile_label, "maxPosts": MAX_POSTS}
         )
         if not isinstance(data, dict):
-            return {"followers": "", "pageLikes": "", "posts": []}
+            return {"followers": "", "friends": "", "pageLikes": "", "posts": []}
         return {
             "followers": str(data.get("followers") or ""),
+            "friends": str(data.get("friends") or ""),
             "pageLikes": str(data.get("pageLikes") or ""),
             "posts": data.get("posts") or [],
         }
     except Exception as exc:
         print(f"[facebook_worker] mbasic fallback failed: {exc}", file=sys.stderr)
-        return {"followers": "", "pageLikes": "", "posts": []}
+        return {"followers": "", "friends": "", "pageLikes": "", "posts": []}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -2237,12 +2441,48 @@ async def _run_with_page_core(
     except Exception:
         pass
     await page.wait_for_timeout(2500)
+    await _facebook_try_continue_as(page)
 
     # Снимок с основной страницы до Reels — подписчики / «Нравится» часто только здесь.
     info_timeline = await page.evaluate(_PROFILE_JS, username_raw)
+    # HTML/JSON fallback для друзей (личные профили, когда ссылка friends без числа в DOM).
+    if not str(info_timeline.get("friends") or "").strip():
+        try:
+            html_friends = _parse_friends_from_html(await page.content())
+            if html_friends > 0:
+                info_timeline["friends"] = str(html_friends)
+                print(
+                    f"[facebook_worker] friends из HTML/JSON: {html_friends}",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(f"[facebook_worker] friends HTML parse: {exc}", file=sys.stderr)
+    # Числовой личный профиль без подписчиков/друзей — один заход на sk=friends.
+    if (
+        _facebook_is_numeric_personal_profile(username_raw)
+        and _parse_count(info_timeline.get("followers") or "") <= 0
+        and _parse_count(info_timeline.get("friends") or "") <= 0
+    ):
+        friends_sk = nav_url + ("&" if "?" in nav_url else "?") + "sk=friends"
+        try:
+            print(f"[facebook_worker] личный профиль: пробуем {friends_sk}", file=sys.stderr)
+            await page.goto(friends_sk, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            await page.wait_for_timeout(2000)
+            await _facebook_try_continue_as(page)
+            info_friends = await page.evaluate(_PROFILE_JS, username_raw)
+            if not str(info_friends.get("friends") or "").strip():
+                html_friends = _parse_friends_from_html(await page.content())
+                if html_friends > 0:
+                    info_friends["friends"] = str(html_friends)
+            info_timeline = _merge_facebook_profile_js(info_timeline, info_friends)
+            # Вернуться на основную страницу перед Reels.
+            await page.goto(nav_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+            await page.wait_for_timeout(1200)
+        except Exception as exc:
+            print(f"[facebook_worker] sk=friends probe: {exc}", file=sys.stderr)
     print(
         f"[facebook_worker] до Reels (sk=reels_tab): followers_raw={info_timeline.get('followers')!r} "
-        f"pageLikes_raw={info_timeline.get('pageLikes')!r}",
+        f"friends_raw={info_timeline.get('friends')!r} pageLikes_raw={info_timeline.get('pageLikes')!r}",
         file=sys.stderr,
     )
 
@@ -2273,7 +2513,7 @@ async def _run_with_page_core(
         info = _merge_facebook_profile_js(info_timeline, info_reels)
         print(
             f"[facebook_worker] после merge профиля: followers_raw={info.get('followers')!r} "
-            f"pageLikes_raw={info.get('pageLikes')!r}",
+            f"friends_raw={info.get('friends')!r} pageLikes_raw={info.get('pageLikes')!r}",
             file=sys.stderr,
         )
     else:
@@ -2297,14 +2537,25 @@ async def _run_with_page_core(
     dn_raw = sanitize_facebook_display_name(info.get("displayName"))
     display_name   = dn_raw or username_raw
     follower_count = _parse_count(info.get("followers") or "")
-    like_count_val = _parse_count(info.get("pageLikes") or "")
+    friends_count = _parse_count(info.get("friends") or "")
+    follower_before_friends = follower_count
+    follower_count = _follower_count_with_friends_fallback(follower_count, friends_count)
+    if follower_count > follower_before_friends and friends_count > 0:
+        print(
+            f"[facebook_worker] личный профиль: друзья {friends_count} → follower_count",
+            file=sys.stderr,
+        )
+    like_count_val = _parse_facebook_page_like_count(
+        info.get("pageLikes") or "",
+        info.get("bio") or "",
+    )
     avatar_url     = info.get("avatar") or ""
     if not is_usable_facebook_avatar_url(avatar_url):
         avatar_url = ""
     bio            = info.get("bio") or ""
     print(
         f"[facebook_worker] name={display_name!r} "
-        f"followers={follower_count} likes={like_count_val}",
+        f"followers={follower_count} friends={friends_count} likes={like_count_val}",
         file=sys.stderr,
     )
     print(f"[facebook_worker] page snippet: {(info.get('dbg') or '')[:250]!r}",
@@ -2368,7 +2619,7 @@ async def _run_with_page_core(
     u_after = (page.url or "").lower()
     on_www_reels_sk = _facebook_page_on_reels_sk(page.url) and "mbasic." not in u_after
 
-    mbasic_data = {"followers": "", "pageLikes": "", "posts": []}
+    mbasic_data = {"followers": "", "friends": "", "pageLikes": "", "posts": []}
     need_mbasic = (len(posts_raw) < 3) or (follower_count <= 0)
     if _facebook_mbasic_fallback_enabled() and need_mbasic:
         if on_www_reels_sk:
@@ -2382,9 +2633,13 @@ async def _run_with_page_core(
                 page, mbasic_url, profile_label=username_raw
             )
             fb_fallback = _parse_count(mbasic_data.get("followers", ""))
+            friends_fallback = _parse_count(mbasic_data.get("friends", ""))
             likes_fallback = _parse_count(mbasic_data.get("pageLikes", ""))
             if fb_fallback > follower_count:
                 follower_count = fb_fallback
+            follower_count = _follower_count_with_friends_fallback(
+                follower_count, friends_fallback
+            )
             if likes_fallback > like_count_val:
                 like_count_val = likes_fallback
             existing_ids = {str(p.get("id", "")).strip() for p in posts_raw if p.get("id")}
@@ -2437,25 +2692,10 @@ async def _run_with_page_core(
             "posted_at":     posted_at,
         })
 
-    min_detail_v = _facebook_detail_likes_min_views()
-    if min_detail_v > 0:
-        cleared = 0
-        for p in posts:
-            try:
-                v = int(p.get("view_count") or 0)
-            except (TypeError, ValueError):
-                v = 0
-            if v <= min_detail_v:
-                if int(p.get("like_count") or 0) != 0:
-                    cleared += 1
-                p["like_count"] = 0
-        if cleared:
-            print(
-                f"[facebook_worker] лайки с сетки сброшены (view_count ≤ {min_detail_v}): "
-                f"{cleared} пост(ов)",
-                file=sys.stderr,
-            )
-
+    # Раньше здесь обнуляли все лайки сетки при view_count ≤ MIN_VIEWS.
+    # У аккаунтов вроде bcs.arena почти все Reels ниже порога → сумма лайков
+    # всегда 0, а detail-enrich эти ролики не открывает. Оставляем лайки сетки;
+    # фантомы режут эвристики ниже; высокие ролики по-прежнему дообогащаем.
     _facebook_zero_like_if_equals_views(posts)
     _facebook_dedupe_phantom_likes(posts)
     reels_sk_url: str | None = (reels_sk_url_saved or "").strip() or None
@@ -2497,7 +2737,12 @@ async def _run_with_page_core(
         "_quality_flags": {
             "auth_wall_detected": state == "auth",
             "network_metrics_used": len(network_post_metrics) > 0,
-            "mbasic_fallback_used": bool(mbasic_data.get("posts") or mbasic_data.get("followers") or mbasic_data.get("pageLikes")),
+            "mbasic_fallback_used": bool(
+                mbasic_data.get("posts")
+                or mbasic_data.get("followers")
+                or mbasic_data.get("friends")
+                or mbasic_data.get("pageLikes")
+            ),
             "partial_posts": len(posts) < max(3, min(MAX_POSTS, 8)),
             "reel_detail_like_posts_updated": detail_like_updates,
         },
@@ -2558,11 +2803,15 @@ async def _collapse_extra_facebook_pages(context) -> None:
 
 async def _launch_facebook_context(pw, _wu):
     """
-    Один Chromium на демон: cookies из facebook_state.json, если файл есть.
+    Один браузер на демон: cookies из facebook_state.json, если файл есть.
+    По умолчанию системный Google Chrome (FACEBOOK_BROWSER_CHANNEL=chrome).
     force_persistent=True только без state — иначе «второе» окно без авторизации.
     """
+    from platforms.facebook.browser_profile import resolve_browser_channel
+
     sf = _facebook_state_path(_wu)
     force_persistent = not sf.exists()
+    channel = resolve_browser_channel()
     if sf.exists():
         print(
             f"[facebook_worker] сессия из {sf.name} (импорт в Настройках → Facebook)",
@@ -2576,11 +2825,17 @@ async def _launch_facebook_context(pw, _wu):
             file=sys.stderr,
             flush=True,
         )
+    print(
+        f"[facebook_worker] browser_channel={channel or 'chromium'}",
+        file=sys.stderr,
+        flush=True,
+    )
     context, browser = await _wu.launch_context(
         pw,
         platform="facebook",
         locale="ru-RU",
         force_persistent=force_persistent,
+        browser_channel=channel,
     )
     await _collapse_extra_facebook_pages(context)
     page = await _facebook_refresh_page(context)

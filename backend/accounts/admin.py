@@ -173,3 +173,18 @@ class ExternalApiKeyAdmin(admin.ModelAdmin):
     search_fields = ["name", "key_prefix"]
     readonly_fields = ["key_prefix", "key_hash", "last_used_at", "created_at", "updated_at"]
     raw_id_fields = ["domain"]
+
+
+from .models import Topic  # noqa: E402
+
+
+@admin.register(Topic)
+class TopicAdmin(admin.ModelAdmin):
+    list_display = ("name", "slug", "sort_order", "accounts_count")
+    prepopulated_fields = {"slug": ("name",)}
+    filter_horizontal = ("accounts",)
+    search_fields = ("name", "slug")
+
+    @admin.display(description="Аккаунтов")
+    def accounts_count(self, obj):
+        return obj.accounts.count()

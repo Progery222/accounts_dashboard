@@ -868,13 +868,20 @@ async def launch_context(
             context_options,
             launch_args,
             load_profile,
+            resolve_browser_channel,
+            use_native_chrome_user_agent,
         )
 
+        if browser_channel is None:
+            browser_channel = resolve_browser_channel()
         bp = load_profile()
         co = context_options(bp)
         locale = str(co.get("locale") or locale)
         viewport = dict(co.get("viewport") or viewport)
-        user_agent = str(co.get("user_agent") or user_agent)
+        if use_native_chrome_user_agent(browser_channel):
+            user_agent = None
+        else:
+            user_agent = str(co.get("user_agent") or user_agent)
         extra_args = list(extra_args or []) + list(launch_args(bp, channel=browser_channel))
         if bp.get("stealth_enabled", True):
             init_script = build_stealth_script(bp.get("languages") or [])
@@ -915,6 +922,9 @@ async def launch_context(
 
     use_storage_state = sf.exists() and not force_persistent and not ig_state_broken
 
+    def _ua_kw() -> dict:
+        return {"user_agent": user_agent} if user_agent else {}
+
     if use_storage_state and platform == "facebook":
         # Persistent-каталог в AccountsStats-профиле: его видит kill при пересоздании
         # демона (в отличие от временного user-data-dir у chromium.launch).
@@ -932,8 +942,8 @@ async def launch_context(
             args=all_args,
             locale=locale,
             viewport=viewport,
-            user_agent=user_agent,
             channel=browser_channel,
+            **_ua_kw(),
             **playwright_ignore_automation_defaults(enabled=hide_infobar),
         )
         await context.add_init_script(init_script)
@@ -963,7 +973,7 @@ async def launch_context(
             storage_state=str(sf),
             locale=locale,
             viewport=viewport,
-            user_agent=user_agent,
+            **_ua_kw(),
         )
         await context.add_init_script(init_script)
         return context, browser   # caller must close browser too
@@ -995,8 +1005,8 @@ async def launch_context(
                     args=all_args,
                     locale=locale,
                     viewport=viewport,
-                    user_agent=user_agent,
                     channel=browser_channel,
+                    **_ua_kw(),
                     **playwright_ignore_automation_defaults(enabled=hide_infobar),
                 )
                 await context.add_init_script(init_script)

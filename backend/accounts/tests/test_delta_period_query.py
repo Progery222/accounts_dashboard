@@ -12,3 +12,8 @@ class DeltaPeriodQueryParamTests(APITestCase):
         r = self.client.get("/api/accounts/summary/", {"delta_period_days": "30"})
         self.assertEqual(r.status_code, status.HTTP_200_OK)
         self.assertIn("follower_count", r.data)
+
+    def test_accounts_list_accepts_all_period(self):
+        r = self.client.get("/api/accounts/", {"delta_period_days": "0"})
+        self.assertEqual(r.status_code, status.HTTP_200_OK)
+        self.assertIsInstance(r.data, list)

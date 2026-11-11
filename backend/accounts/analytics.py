@@ -18,7 +18,7 @@ from .models import Platform, Post, PostSnapshot
 
 # ── constants ────────────────────────────────────────────────────────────────
 
-PERIOD_DAYS: dict[str, int] = {"1d": 1, "7d": 7, "30d": 30}
+PERIOD_DAYS: dict[str, int] = {"all": 0, "1d": 1, "7d": 7, "30d": 30}
 
 WEEKDAY_LABELS = {1: "Пн", 2: "Вт", 3: "Ср", 4: "Чт", 5: "Пт", 6: "Сб", 7: "Вс"}
 
@@ -39,6 +39,16 @@ def _snap_subq(field: str, period_start) -> Subquery:
             post=OuterRef("pk"),
             date__lte=period_start,
         ).order_by("-date").values(field)[:1],
+        output_field=IntegerField(),
+    )
+
+
+def _snap_subq_earliest(field: str) -> Subquery:
+    """Самый ранний снимок поста — опора для периода All."""
+    return Subquery(
+        PostSnapshot.objects.filter(post=OuterRef("pk"))
+        .order_by("date")
+        .values(field)[:1],
         output_field=IntegerField(),
     )
 
@@ -91,14 +101,20 @@ def _annotated_qs(
             pass
 
     days = PERIOD_DAYS.get(period, 7)
-    period_start = today - datetime.timedelta(days=days)
+    if days == 0:
+        view_snap = _snap_subq_earliest("view_count")
+        like_snap = _snap_subq_earliest("like_count")
+    else:
+        period_start = today - datetime.timedelta(days=days)
+        view_snap = _snap_subq("view_count", period_start)
+        like_snap = _snap_subq("like_count", period_start)
     qs = qs.annotate(
         view_delta_period=ExpressionWrapper(
-            F("view_count") - _snap_subq("view_count", period_start),
+            F("view_count") - view_snap,
             output_field=IntegerField(),
         ),
         like_delta_period=ExpressionWrapper(
-            F("like_count") - _snap_subq("like_count", period_start),
+            F("like_count") - like_snap,
             output_field=IntegerField(),
         ),
     )

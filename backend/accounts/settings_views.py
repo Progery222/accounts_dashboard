@@ -683,7 +683,7 @@ async def _launch_persistent_context(
     locale: str = "ru-RU",
     platform: str | None = None,
 ):
-    """Запуск Chromium с профилем; повтор при артефактах lock/CHROME_DELETE."""
+    """Запуск браузера с профилем; повтор при артефактах lock/CHROME_DELETE."""
     Path(profile_dir).mkdir(parents=True, exist_ok=True)
     last_exc: Exception | None = None
     from platforms.worker_utils import chromium_launch_args
@@ -700,16 +700,26 @@ async def _launch_persistent_context(
             context_options,
             launch_args,
             load_profile,
+            resolve_browser_channel,
+            use_native_chrome_user_agent,
         )
 
         bp = load_profile()
         co = context_options(bp)
+        channel = resolve_browser_channel()
         kwargs["locale"] = co.get("locale", locale)
         kwargs["args"] = chromium_launch_args(
+            channel=channel,
             hide_automation=bool(bp.get("hide_automation_flags", True)),
-            extra=list(launch_args(bp)),
+            extra=list(launch_args(bp, channel=channel)),
         )
-        kwargs["user_agent"] = co.get("user_agent")
+        if channel:
+            kwargs["channel"] = channel
+        if use_native_chrome_user_agent(channel):
+            # Настоящий Chrome — свой UA; кастомный только при FACEBOOK_USER_AGENT.
+            kwargs.pop("user_agent", None)
+        else:
+            kwargs["user_agent"] = co.get("user_agent")
         if not headless:
             kwargs["viewport"] = co.get("viewport") or {"width": 1366, "height": 900}
         if bp.get("stealth_enabled", True):
@@ -1672,16 +1682,70 @@ def threads_start_auth(request):
 
 # ── Facebook browser auth ─────────────────────────────────────────────────────
 
+def _facebook_auth_url_still_in_progress(url: str) -> bool:
+    u = (url or "").lower()
+    pending = (
+        "/login",
+        "/checkpoint",
+        "two_step_verification",
+        "/recover",
+        "login_attempt",
+        "captcha",
+        "arkose",
+        "challenge",
+        "security/checkpoint",
+    )
+    return any(s in u for s in pending)
+
+
+async def _facebook_login_fully_complete(context, page) -> bool:
+    """Сессия готова только после прохождения капчи/2FA и появления c_user."""
+    try:
+        url = page.url or ""
+    except Exception:
+        return False
+    if _facebook_auth_url_still_in_progress(url):
+        return False
+    try:
+        cookies = await context.cookies("https://www.facebook.com")
+    except Exception:
+        return False
+    has_c_user = any(
+        c.get("name") == "c_user" and str(c.get("value") or "").strip()
+        for c in cookies
+    )
+    if not has_c_user:
+        return False
+    try:
+        ok = await page.evaluate(
+            """() => {
+                if (document.querySelector('input[name="email"]') &&
+                    document.querySelector('input[name="pass"]')) return false;
+                return !!(
+                    document.querySelector('[role="navigation"]') ||
+                    document.querySelector('[aria-label="Facebook"]') ||
+                    document.querySelector('[data-pagelet="LeftRail"]') ||
+                    document.querySelector('[data-pagelet="Stories"]') ||
+                    document.querySelector('[role="main"]')
+                );
+            }"""
+        )
+        return bool(ok)
+    except Exception:
+        return has_c_user
+
+
 def _run_facebook_auth(job_id: str) -> None:
     profile_dir = _prepare_browser_for_headed_auth(job_id)
-    email    = _get_setting("FACEBOOK_EMAIL")
-    password = _get_setting("FACEBOOK_PASSWORD")
+    # Логин/пароль из настроек НЕ подставляем и ничего не кликаем:
+    # на checkpoint/Arkose автоклики мешают ручному прохождению.
 
     async def _async():
         from platforms.browser_engine import async_playwright
 
-        _set_job(job_id, "pending", "Запускаю браузер…")
+        _set_job(job_id, "pending", "Запускаю Google Chrome…")
         Path(profile_dir).mkdir(parents=True, exist_ok=True)
+        ctx = None
 
         async with async_playwright() as pw:
             ctx = await _launch_persistent_context(
@@ -1698,29 +1762,13 @@ def _run_facebook_auth(job_id: str) -> None:
                 )
                 await page.wait_for_timeout(2000)
 
-                # Check if already logged in
-                _IS_LOGGED_IN_JS = """
-                    () => {
-                        const url = window.location.href;
-                        if (url.includes('/login') || url.includes('/checkpoint')) return false;
-                        if (document.querySelector('input[name="email"]') &&
-                            document.querySelector('input[name="pass"]')) return false;
-                        return !!(
-                            document.querySelector('[role="navigation"]') ||
-                            document.querySelector('[aria-label="Facebook"]') ||
-                            document.querySelector('[data-pagelet="LeftRail"]') ||
-                            document.querySelector('[data-pagelet="Stories"]')
-                        );
-                    }
-                """
-
-                already_in = await page.evaluate(_IS_LOGGED_IN_JS)
+                already_in = await _facebook_login_fully_complete(ctx, page)
 
                 if not already_in:
-                    _set_job(job_id, "pending", "Открываю страницу входа…")
-
-                    # Navigate to login page if not already there
-                    if "/login" not in page.url:
+                    url_now = page.url or ""
+                    # Не уводим с checkpoint / 2FA / капчи на /login — иначе сбросится проверка.
+                    if not _facebook_auth_url_still_in_progress(url_now):
+                        _set_job(job_id, "pending", "Открываю страницу входа…")
                         await page.goto(
                             "https://www.facebook.com/login/",
                             wait_until="domcontentloaded",
@@ -1728,54 +1776,74 @@ def _run_facebook_auth(job_id: str) -> None:
                         )
                         await page.wait_for_timeout(1500)
 
-                    # Auto-fill credentials
-                    if email and password:
-                        try:
-                            await page.fill('input[name="email"]', email, timeout=5000)
-                            await page.wait_for_timeout(400)
-                            await page.fill('input[name="pass"]', password, timeout=5000)
-                            await page.wait_for_timeout(400)
-                            await page.click('button[name="login"], button[type="submit"]',
-                                             timeout=5000)
-                            _set_job(job_id, "pending",
-                                     "Вхожу в Facebook… (если появится капча — пройдите её)")
-                        except Exception:
-                            _set_job(job_id, "pending",
-                                     "Войдите в Facebook в открытом окне браузера…")
-                    else:
-                        _set_job(job_id, "pending",
-                                 "Войдите в Facebook в открытом окне браузера…")
+                    _set_job(
+                        job_id,
+                        "pending",
+                        "Войдите вручную в открытом окне (капча/2FA). "
+                        "Ничего не нажимаю сам — закройте браузер, когда закончите.",
+                    )
 
-                    # Poll for up to 3 minutes until logged in
-                    for _ in range(180):
+                    # До 2 часов или пока пользователь сам не закроет окно.
+                    for _ in range(7200):
                         await asyncio.sleep(1)
                         try:
-                            if await page.evaluate(_IS_LOGGED_IN_JS):
+                            if not ctx.pages:
+                                raise RuntimeError("Окно браузера закрыто до завершения входа.")
+                            if await _facebook_login_fully_complete(ctx, page):
                                 break
+                        except RuntimeError:
+                            raise
                         except Exception:
-                            pass
+                            # Страница могла перезагрузиться / target closed mid-check.
+                            try:
+                                if not ctx.pages:
+                                    raise RuntimeError("Окно браузера закрыто до завершения входа.")
+                                page = ctx.pages[0]
+                            except RuntimeError:
+                                raise
+                            except Exception:
+                                pass
                     else:
-                        raise TimeoutError("Время ожидания входа истекло (3 мин).")
+                        raise TimeoutError(
+                            "Время ожидания входа истекло (2 ч). Закройте окно и нажмите «Войти» снова."
+                        )
 
-                # Give Facebook a moment to set all auth cookies
                 await page.wait_for_timeout(2000)
 
-                # Verify the key auth cookies are present
                 if not _facebook_has_session():
-                    raise RuntimeError(
-                        "Куки Facebook (c_user) не обнаружены после входа. "
-                        "Попробуйте войти ещё раз."
+                    # Ещё раз проверить cookies контекста (state может быть только в RAM).
+                    cookies = await ctx.cookies("https://www.facebook.com")
+                    has_c_user = any(
+                        c.get("name") == "c_user" and str(c.get("value") or "").strip()
+                        for c in cookies
                     )
+                    if not has_c_user:
+                        raise RuntimeError(
+                            "Куки Facebook (c_user) не обнаружены после входа. "
+                            "Попробуйте войти ещё раз."
+                        )
 
                 state_path = Path(profile_dir) / "facebook_state.json"
                 await ctx.storage_state(path=str(state_path))
-                _set_job(job_id, "done", "Вход в Facebook выполнен успешно!")
+                _set_job(
+                    job_id,
+                    "done",
+                    "Вход в Facebook выполнен. Сессия сохранена. "
+                    "Закройте окно браузера сами — само оно не закроется.",
+                )
+                try:
+                    await ctx.wait_for_event("close", timeout=0)
+                except Exception:
+                    pass
 
             except Exception as e:
                 _set_job(job_id, "error", f"Ошибка: {_format_headed_browser_error(e)}")
             finally:
                 if ctx is not None:
-                    await ctx.close()
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

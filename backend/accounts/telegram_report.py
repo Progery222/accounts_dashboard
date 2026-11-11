@@ -6,7 +6,6 @@ import io
 import logging
 import re
 from collections import defaultdict
-from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -96,19 +95,26 @@ def telegram_bot_configured() -> bool:
 
 
 def _delta_period_days(config=None) -> int:
-    if config is not None:
-        raw = int(getattr(config, "account_delta_period_days", 1) or 1)
-        return raw if raw in (1, 7, 30) else 1
-    try:
-        from .models import RefreshScheduleConfig
+    """
+    Период прироста в ежедневном Telegram-отчёте всегда 1 сутки.
 
-        raw = int(getattr(RefreshScheduleConfig.get(), "account_delta_period_days", 1) or 1)
-        return raw if raw in (1, 7, 30) else 1
-    except Exception:
-        return 1
+    ``account_delta_period_days`` в расписании — настройка дашборда (1/7/30),
+    её нельзя тащить в ночной отчёт: иначе при периоде 7 в «прирост»
+    попадает вся недельная дельта и она почти не меняется день ото дня.
+    """
+    _ = config
+    return 1
 
 
-def _accounts_qs_for_telegram_stats(config=None):
+def _run_day(started_at=None):
+    """Календарный день прогона (МСК): дата начала, не окончания (через полночь)."""
+    if started_at is None:
+        return timezone.localdate()
+    return timezone.localtime(started_at).date()
+
+
+def _accounts_qs_for_telegram_stats(config=None, *, started_at=None):
+    from .auto_refresh_scope import apply_auto_refresh_scope
     from .models import Account, AccountSnapshot
     from .views import _apply_visibility_filters
 
@@ -128,11 +134,16 @@ def _accounts_qs_for_telegram_stats(config=None):
             getattr(config, "include_hidden_profile_accounts", False),
         ) if config else False,
     )
-    period = _delta_period_days(config)
-    cutoff = timezone.localdate() - timedelta(days=period)
+    # Как в автообновлении: пустой список доменов = все; иначе только выбранные
+    # (без «none» — аккаунты «Без домена» в отчёт не попадают).
+    if config is not None:
+        qs = apply_auto_refresh_scope(qs, config)
+    # Опора — последний снимок до дня старта прогона (не до дня окончания).
+    # Иначе прогон 18:00→00:30 берёт уже обновлённый «вчерашний» снимок и прирост≈0.
+    run_day = _run_day(started_at)
     prev = AccountSnapshot.objects.filter(
         account=OuterRef("pk"),
-        date__lte=cutoff,
+        date__lt=run_day,
     ).order_by("-date")
     return qs.annotate(
         _prev_view_count=Coalesce(
@@ -158,16 +169,16 @@ def _accounts_qs_for_telegram_stats(config=None):
     )
 
 
-def collect_domain_stats(config=None) -> list[tuple[str, dict]]:
+def collect_domain_stats(config=None, *, started_at=None) -> list[tuple[str, dict]]:
     """
     Агрегаты «всего / прирост» по доменам.
-    Прирост — как на дашборде (опорный снимок за account_delta_period_days).
+    Прирост — суточный относительно снимка до дня начала прогона.
     """
     empty = {"views": 0, "likes": 0, "followers": 0, "posts": 0,
              "views_d": 0, "likes_d": 0, "followers_d": 0, "posts_d": 0}
     by_domain: dict[str, dict] = defaultdict(lambda: dict(empty))
 
-    for a in _accounts_qs_for_telegram_stats(config).iterator(chunk_size=500):
+    for a in _accounts_qs_for_telegram_stats(config, started_at=started_at).iterator(chunk_size=500):
         dname = (a.domain.name if a.domain_id else _NO_DOMAIN).strip() or _NO_DOMAIN
         cur = {
             "views": int(a.view_count or 0),
@@ -258,7 +269,7 @@ def build_auto_refresh_telegram_text(
     _ = owner_stats
     if domain_stats is None:
         try:
-            domain_stats = collect_domain_stats(config)
+            domain_stats = collect_domain_stats(config, started_at=started_at)
         except Exception:
             logger.exception("telegram_report.collect_domain_stats_failed")
             domain_stats = []

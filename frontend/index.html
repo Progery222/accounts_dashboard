@@ -262,6 +262,10 @@ svg { flex-shrink: 0; }
 .btn.ico { width: 32px; padding: 0; justify-content: center; }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.ghost:hover { background: var(--chip); border-color: transparent; }
+.btn:disabled { opacity: .55; cursor: default; pointer-events: none; }
+.btn .spin-ico { animation: btnSpin .75s linear infinite; }
+@keyframes btnSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .btn .spin-ico { animation: none; } }
 
 .seg { display: flex; background: var(--chip); border-radius: 8px; padding: 2px; gap: 2px; }
 .seg button {
@@ -622,6 +626,20 @@ button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, trans
 /* Полоса ошибки */
 .errbar { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-radius: 10px; border: 1px solid var(--neg); background: var(--neg-soft); color: var(--ink); font-size: 12px; }
 
+/* Разбор списка в «Добавить аккаунты» и окно итога */
+.addprev { font-size: 12px; color: var(--ink-2); margin-top: 8px; line-height: 1.5; }
+.addbad { margin-top: 8px; border: 1px solid var(--warn); background: var(--warn-soft); border-radius: 8px; padding: 8px 10px 2px; font-size: 12px; }
+.addbad-hd { font-weight: 600; color: var(--warn); margin-bottom: 2px; }
+.addlist { max-height: 30vh; overflow-y: auto; }
+.addsec .addlist { border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; }
+.addsec h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ink); }
+.addsec h3 .c { color: var(--ink-3); font-weight: 500; }
+.addrow { display: grid; grid-template-columns: 64px minmax(0,1fr); gap: 2px 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.addrow:first-child { border-top: 0; }
+.addrow .n { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.addrow .t { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; overflow-wrap: anywhere; color: var(--ink); }
+.addrow .w { grid-column: 2; color: var(--ink-2); }
+
 /* ============================================================
    ЭФИР TV — всегда тёмный, палитра своя
    ============================================================ */
@@ -757,6 +775,78 @@ button.pill.open { outline: 1px solid color-mix(in srgb, currentColor 35%, trans
   .tv-bar { padding: 0 18px; }
   .tv-scene { inset: 60px 18px 18px; }
 }
+
+/* ============================================================
+   ДОМЕН AI — свои темы и карточки-аватары
+   ============================================================ */
+.kpis.k4 { grid-template-columns: repeat(4, minmax(0,1fr)); }
+@media (max-width: 760px) { .kpis.k4 { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+.ai-card { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.ai-card img { -webkit-user-drag: none; }
+.ai-grid { position: relative; }
+body.ai-dragging .ai-card:hover { transform: none; box-shadow: none; border-color: var(--line); }
+body.ai-dragging .ai-card { transition: none; }
+.ai-card.ai-drag-src { opacity: .35; border-style: dashed; box-shadow: none; transform: none; }
+.ai-ghost { position: fixed; left: 0; top: 0; z-index: 90; pointer-events: none; margin: 0;
+  box-shadow: var(--shadow-lg, 0 18px 40px -12px rgba(0,0,0,.35)); border-color: var(--accent) !important; transition: none !important; }
+body.ai-dragging, body.ai-dragging * { cursor: grabbing !important; }
+@media (hover: hover) { .ai-grid > .ai-card { cursor: grab; } }
+.ai-plats { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.ai-chip { display: inline-flex; align-items: center; gap: 6px; height: 32px; white-space: nowrap; flex-shrink: 0; padding: 0 11px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font-size: 12px; font-weight: 500; }
+.ai-chip:hover { border-color: var(--line-2); color: var(--ink); }
+.ai-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.ai-chip .n { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-3); }
+.ai-chip.on .n { color: var(--accent); }
+.ai-chip:focus-visible, .ai-card:focus-visible, .ai-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ai-topics-m { display: none; gap: 6px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 2px; }
+@media (max-width: 1080px) { .ai-topics-m { display: flex; } }
+.ai-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 14px; }
+.ai-card { position: relative; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px;
+  padding: 20px 12px 16px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; cursor: pointer;
+  transition: transform .16s ease-out, box-shadow .16s ease-out, border-color .16s ease-out; }
+.ai-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md); border-color: var(--line-2); }
+.ai-card:active { transform: translateY(0); }
+.ai-ava { position: relative; width: 96px; height: 96px; border-radius: 50%; padding: 3px;
+  background: conic-gradient(from 210deg, var(--pl), color-mix(in srgb, var(--pl) 35%, var(--surface)), var(--pl)); }
+.ai-ava .av { width: 100% !important; height: 100% !important; border-radius: 50% !important; border: 3px solid var(--surface);
+  display: flex; align-items: center; justify-content: center; font-size: 22px !important; font-weight: 600; box-sizing: border-box; }
+.ai-ava .pmark { position: absolute; right: 0; bottom: 2px; box-shadow: 0 0 0 2px var(--surface); background: var(--surface) !important; }
+.ai-nick { font-size: 14px; font-weight: 600; color: var(--ink); max-width: 100%; }
+.ai-meta { font-size: 11px; color: var(--ink-3); margin-top: -6px; display: flex; gap: 6px; align-items: center; justify-content: center; }
+.ai-dots { display: flex; gap: 4px; justify-content: center; min-height: 8px; }
+.ai-dots i { width: 7px; height: 7px; border-radius: 50%; display: block; }
+.ai-x { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  color: var(--ink-3); background: var(--surface); border: 1px solid var(--line); opacity: 0; transition: opacity .12s ease-out; }
+.ai-card:hover .ai-x, .ai-card:focus-within .ai-x, .ai-x:focus-visible { opacity: 1; }
+@media (hover: none) { .ai-x { opacity: 1; } }
+.ai-x:hover { color: var(--neg); border-color: var(--neg); }
+.ai-empty { padding: 48px 16px; text-align: center; color: var(--ink-3); font-size: 13px; }
+.ai-empty b { display: block; color: var(--ink); font-size: 15px; margin-bottom: 6px; }
+.ai-pick-list { display: flex; flex-direction: column; gap: 2px; max-height: 52vh; overflow-y: auto; margin-top: 10px; }
+.ai-pick-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 8px; }
+.ai-pick-row:hover { background: var(--chip); }
+.ai-pick-row .grow { min-width: 0; }
+.ai-pick-row .u { font-size: 13px; font-weight: 500; }
+.ai-pick-row .d { font-size: 11px; color: var(--ink-3); }
+@media (prefers-reduced-motion: reduce) { .ai-card, .ai-x { transition: none; } .ai-card:hover { transform: none; } }
+.ait-row { flex-wrap: wrap; }
+.ait-emo { width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2);
+  font-size: 20px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.ait-emo:hover, .ait-emo.on { border-color: var(--accent); background: var(--accent-soft); }
+.ait-name { flex: 1 1 180px; min-width: 140px; }
+.ait-name input { font-size: 13px !important; }
+.ait-cols { display: flex; gap: 5px; flex-wrap: wrap; }
+.ait-col { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--surface); box-shadow: 0 0 0 1px var(--line); }
+.ait-col.on { box-shadow: 0 0 0 2px var(--ink); }
+.ait-n { font-size: 12px; color: var(--ink-3); min-width: 72px; text-align: right; }
+.ait-pick { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; padding: 8px; margin-top: 2px;
+  border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line-soft); }
+.ait-pick button { width: 34px; height: 34px; border-radius: 8px; font-size: 18px; }
+.ait-pick button:hover { background: var(--chip); }
+.ait-pick .field { width: 150px; margin-left: 6px; }
+.ait-emo:focus-visible, .ait-col:focus-visible, .ait-pick button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 760px) { .ai-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; } .ai-ava { width: 80px; height: 80px; } }
 </style>
 </head>
 <body>
@@ -1036,10 +1126,10 @@ const state = {
   // Фильтры живут в рельсе и все с мультивыбором: значения — массивы строк.
   f: { status: [], platform: [], profileId: [], ownerId: [], groupId: [], countryId: [] },
   railOpen: [],          // какие секции фильтров раскрыты
-  route: 'accounts', detailId: null, detailTab: 'overview', runTab: 'run',
-  theme: 'light', period: 1, view: 'table',
+  route: 'accounts', detailId: null, detailTab: 'posts', runTab: 'run',
+  theme: 'light', period: 0, view: 'table',
   q: '',
-  sort: { key: 'vd', dir: 'desc' },
+  sort: { key: 'v', dir: 'desc' },
   page: 1, pageSize: 25,
   selected: new Set(),
   modal: null,
@@ -1053,6 +1143,8 @@ const state = {
       on: !!DEMO && total > 0, total: total, done: DEMO ? Math.round(total * 0.36) : 0,
       cur: '@' + ((pool[3] || ACCOUNTS[0] || {}).username || '—'), timer: null,
       startedAt: 0,       // начало последнего прогона, см. staleAccounts
+      source: '',         // откуда прогон: refresh_all — свой CSV, остальные — CSV автообновления
+      hasReport: null,
     };
   })(),
   paletteQ: '', paletteI: 0,
@@ -1074,6 +1166,9 @@ const state = {
   edit: null,          // форма «Изменить» на карточке аккаунта
   cookiesFor: '', cookiesText: '',   // окно импорта куков в настройках
   catalog: null,   // форма создания/правки профиля, владельца, группы, страны
+  refreshing: {},  // id аккаунта → true, пока идёт POST …/refresh/
+  // Домен AI: выбранная тема, фильтр площадок, темы с сервера, окно «Добавить в тему».
+  ai: { topic: 'all', plats: [], topics: null, pick: null, emojiFor: null, newEmoji: '✨', newName: '', busy: false, drafts: {}, order: null },
 };
 function isNarrow() { return window.matchMedia('(max-width: 760px)').matches; }
 function effView() { return isNarrow() ? 'cards' : state.view; }
@@ -1102,6 +1197,30 @@ function saveUi() {
     if (!Array.isArray(state.cols) || !state.cols.length) state.cols = DEFAULT_COLS.slice();
     state.cols = state.cols.filter(function (k) { return COLUMNS.some(function (c) { return c.k === k; }); });
     state.selected = new Set();
+    // Раньше дефолт был 1 («24ч»). Один раз переключаем на All (весь период).
+    if (!localStorage.getItem('as_period_all_default')) {
+      state.period = 0;
+      localStorage.setItem('as_period_all_default', '1');
+      saveUi();
+    } else if ([0, 1, 7, 30].indexOf(+state.period) < 0) {
+      state.period = 0;
+    } else {
+      state.period = +state.period;
+    }
+    // Сортировка по умолчанию — просмотры ↓; старые ключи прироста (vd/fd/ld)
+    // совпадают с колонками, т.к. метрика теперь зависит от периода.
+    if (!localStorage.getItem('as_sort_views_default')) {
+      state.sort = { key: 'v', dir: 'desc' };
+      localStorage.setItem('as_sort_views_default', '1');
+      saveUi();
+    } else if (state.sort && state.sort.key) {
+      const map = { vd: 'v', fd: 'f', ld: 'l' };
+      if (map[state.sort.key]) state.sort.key = map[state.sort.key];
+    }
+    // «Без профиля/группы/…» больше не фильтр — сбрасываем старые id=0.
+    ['profileId', 'ownerId', 'groupId', 'countryId'].forEach(function (k) {
+      state.f[k] = (state.f[k] || []).filter(function (id) { return String(id) !== '0'; });
+    });
   } catch (e) {}
 })();
 
@@ -1240,6 +1359,15 @@ function ownerOf(a)   { return OWNERS.find(function (o) { return o.id === a.owne
 function groupOf(a)   { return GROUPS.find(function (g) { return g.id === a.groupId; })   || { name: '—' }; }
 function countryOf(a) { return COUNTRIES.find(function (c) { return c.id === a.countryId; }) || { name: '—' }; }
 function delta(a, key) { const d = a.d && a.d[state.period]; return d ? (d[key] || 0) : 0; }
+/* Подписи сегмента периода: 0 = весь период (All), иначе N дней. */
+const PERIOD_OPTS = [0, 1, 7, 30];
+function periodBtnLabel(p) { return p === 0 ? 'All' : (p + 'д'); }
+function periodTitle(p) {
+  if (p === 0) return 'весь период';
+  if (p === 1) return '1 день';
+  return p + ' дней';
+}
+const AN_PERIOD_OPTS = [['all', 'All'], ['1d', '1д'], ['7d', '7д'], ['30d', '30д']];
 
 /* Аватар: с живого API — картинка через прокси, без него — инициалы */
 /* Заглушка аватарки красится детерминированно по имени — так список
@@ -1270,11 +1398,38 @@ function avatarEl(a, px, radius) {
   }
   return '<div class="av" style="' + box + ';' + plain + '">' + esc(letters) + '</div>';
 }
+function postGrad(p) {
+  return 'linear-gradient(135deg,hsl(' + p.hue + ',42%,72%),hsl(' + ((p.hue + 40) % 360) + ',38%,58%))';
+}
+/* Превью поста: через наш прокси (CDN TikTok/IG часто недоступен из браузера). */
+function postThumbEl(p, kind) {
+  const grad = postGrad(p);
+  const cls = kind === 'grid' ? 'ph' : 'thumb';
+  const style = kind === 'grid'
+    ? 'width:100%;height:118px;display:block;object-fit:cover;background:' + grad
+    : 'object-fit:cover;background:' + grad;
+  const src = (LIVE && p.id && !p.thumbMissing)
+    ? (API_BASE + '/api/posts/' + p.id + '/thumbnail/')
+    : (p.thumb || '');
+  if (src) {
+    return '<img class="' + cls + '" src="' + esc(src) + '" alt="" loading="lazy" decoding="async" ' +
+      'data-fb-thumb="1" data-fbs="' + esc(grad) + '" data-fb-cls="' + cls + '" style="' + style + '">';
+  }
+  return '<div class="' + cls + '" style="background:' + grad + '"></div>';
+}
 /* Аватарки грузятся не у всех: у кого нет — показываем инициалы.
    Событие error у картинок не всплывает, поэтому слушаем на перехвате. */
 document.addEventListener('error', function (e) {
   const img = e.target;
-  if (!img || img.tagName !== 'IMG' || !img.dataset || img.dataset.fb === undefined) return;
+  if (!img || img.tagName !== 'IMG' || !img.dataset) return;
+  if (img.dataset.fbThumb) {
+    const d = document.createElement('div');
+    d.className = img.dataset.fbCls || 'thumb';
+    d.setAttribute('style', 'background:' + (img.dataset.fbs || 'var(--line-soft)'));
+    img.replaceWith(d);
+    return;
+  }
+  if (img.dataset.fb === undefined) return;
   const d = document.createElement('div');
   d.className = 'av';
   d.textContent = img.dataset.fb;
@@ -1354,6 +1509,17 @@ function deltaEl(n, compact) {
   const arrow = n === 0 ? '' : tri(n > 0);
   return '<span class="delta ' + cls + '">' + arrow + (n === 0 ? '0' : (compact ? comp(Math.abs(n)) : fmt(Math.abs(n)))) + '</span>';
 }
+/* All — абсолют; 1д/7д/30д — прирост как основная цифра (без зелёной строки). */
+function metricMain(total, d, compact) {
+  if (state.period === 0) {
+    return compact ? comp(total) : fmt(total);
+  }
+  if (LIVE && !DEMO && !deltaLoaded[state.period]) {
+    return '<span class="sk" style="display:inline-block;height:12px;width:42px;vertical-align:middle"></span>';
+  }
+  if (d === null || d === undefined) return '—';
+  return compact ? comp(d) : fmt(d);
+}
 function spark(series, positive, tone) {
   if (!series || series.length < 2) return '';
   const w = 62, h = 20, min = Math.min.apply(null, series), max = Math.max.apply(null, series);
@@ -1372,14 +1538,15 @@ function spark(series, positive, tone) {
 /* Все фильтры — мультивыбор из рельса. Внутри одной секции значения
    складываются (ИЛИ), между секциями пересекаются (И). */
 const FILTERS = [
+  // Группы — первыми: ими пользуются чаще всего при разборе списка.
+  { k: 'groupId',   n: 'Группы',    items: function () { return GROUPS; } },
   { k: 'platform', n: 'Платформы', items: function () {
       return PLATFORMS.map(function (p) { return { id: p.v, name: p.l, mark: p.v }; });
     } },
-  { k: 'profileId', n: 'Профили', items: function () {
+  { k: 'profileId', n: 'Профили',   items: function () {
       return PROFILES.map(function (p) { return { id: p.id, name: p.name, color: p.color }; });
     } },
   { k: 'ownerId',   n: 'Владельцы', items: function () { return OWNERS; } },
-  { k: 'groupId',   n: 'Группы',    items: function () { return GROUPS; } },
   { k: 'countryId', n: 'Страны',    items: function () { return COUNTRIES; } },
   // «Состояние» последним: им пользуются реже остальных
   { k: 'status', n: 'Состояние', items: function () {
@@ -1387,6 +1554,21 @@ const FILTERS = [
               { id: 'banned', name: 'Забаненные' }];
     } },
 ];
+const FILTER_ALL_ID = '__all__';
+
+function filterRailItems(c) {
+  const rows = [{ id: FILTER_ALL_ID, name: 'Все', special: 'all' }];
+  if (c.empty) {
+    rows.push({ id: '0', name: c.empty, color: '#8A857C', special: 'empty' });
+  }
+  (c.items() || []).forEach(function (it) {
+    rows.push(it);
+  });
+  return rows;
+}
+function filterPickableCount(c) {
+  return filterRailItems(c).filter(function (it) { return it.special !== 'all'; }).length;
+}
 function filterDef(k) {
   return FILTERS.filter(function (f) { return f.k === k; })[0];
 }
@@ -1400,6 +1582,10 @@ function matchesStatus(a) {
          (st.indexOf('banned') >= 0 && a.banned);
 }
 function countFor(k, id) {
+  if (String(id) === FILTER_ALL_ID) {
+    if (k === 'status') return ACCOUNTS.length;
+    return ACCOUNTS.filter(matchesStatus).length;
+  }
   return ACCOUNTS.filter(function (a) {
     if (k !== 'status' && !matchesStatus(a)) return false;
     if (k === 'status') {
@@ -1409,9 +1595,12 @@ function countFor(k, id) {
   }).length;
 }
 
-function visible() {
+const RAIL_FILTER_KEYS = ['platform', 'profileId', 'ownerId', 'groupId', 'countryId'];
+/* Отбор без сортировки: им живут и список, и эфир — чтобы на табло попадало
+   ровно то же, что в таблице, включая любой фильтр, добавленный позже. */
+function filteredAccounts() {
   let list = ACCOUNTS.filter(matchesStatus);
-  ['platform', 'profileId', 'ownerId', 'groupId', 'countryId'].forEach(function (k) {
+  RAIL_FILTER_KEYS.forEach(function (k) {
     const sel = state.f[k];
     if (!sel.length) return;
     list = list.filter(function (a) { return sel.indexOf(String(a[k])) >= 0; });
@@ -1422,18 +1611,43 @@ function visible() {
       return a.username.toLowerCase().indexOf(q) >= 0 || a.display.toLowerCase().indexOf(q) >= 0;
     });
   }
+  return list;
+}
+/* Сужен ли набор относительно «весь домен, живые». Нужно эфиру: якоря живого
+   счётчика бэкенд считает по домену целиком, и на срезе из них можно брать
+   только долю прироста, а не абсолют. Пустой статус и явный ['live'] — одно
+   и то же, поэтому такой выбор срезом не считаем. */
+function railNarrowed() {
+  if (state.q.trim()) return true;
+  const st = state.f.status || [];
+  if (st.length && !(st.length === 1 && st[0] === 'live')) return true;
+  return RAIL_FILTER_KEYS.some(function (k) { return (state.f[k] || []).length > 0; });
+}
+
+function visible() {
+  // На досках (Стенды, AI) «видимые» — аккаунты выбранного стенда/темы
+  // с фильтром площадок: их рисует таблица, их же выделяют и выгружают.
+  const list = isAi() ? aiFiltered() : filteredAccounts();
   const k = state.sort.key, dir = state.sort.dir === 'asc' ? 1 : -1;
+  // Числовые колонки сортируем по тому же, что на экране:
+  // All → абсолют, 1д/7д/30д → прирост за период.
+  function metricSort(a, totalKey, deltaKey) {
+    if (state.period === 0) return +a[totalKey] || 0;
+    const d = delta(a, deltaKey);
+    return d == null ? 0 : +d;
+  }
   const get = {
     name: function (a) { return a.username; },
-    f:    function (a) { return a.followers; },
-    v:    function (a) { return a.views; },
-    l:    function (a) { return a.likes; },
-    p:    function (a) { return a.posts; },
+    f:    function (a) { return metricSort(a, 'followers', 'f'); },
+    v:    function (a) { return metricSort(a, 'views', 'v'); },
+    l:    function (a) { return metricSort(a, 'likes', 'l'); },
+    p:    function (a) { return metricSort(a, 'posts', 'p'); },
+    c:    function (a) { return metricSort(a, 'clicks', 'c'); },
     u:    function (a) { return -a.updated; },
-    fd:   function (a) { return delta(a, 'f'); },
-    vd:   function (a) { return delta(a, 'v'); },
-    ld:   function (a) { return delta(a, 'l'); },
-  }[k] || function (a) { return a.views; };
+    fd:   function (a) { return metricSort(a, 'followers', 'f'); },
+    vd:   function (a) { return metricSort(a, 'views', 'v'); },
+    ld:   function (a) { return metricSort(a, 'likes', 'l'); },
+  }[k] || function (a) { return metricSort(a, 'views', 'v'); };
   list.sort(function (a, b) {
     const x = get(a), y = get(b);
     if (typeof x === 'string') return x.localeCompare(y) * dir;
@@ -1495,8 +1709,8 @@ function appbar() {
         '<span class="kbd hide-sm">Ctrl K</span>' +
       '</button>' +
     '</div>' +
-    '<div class="seg hide-sm">' + [1,7,30].map(function (p) {
-      return '<button data-act="period" data-v="' + p + '" class="' + (state.period === p ? 'on' : '') + '">' + (p === 1 ? '24ч' : p + 'д') + '</button>';
+    '<div class="seg hide-sm">' + PERIOD_OPTS.map(function (p) {
+      return '<button data-act="period" data-v="' + p + '" class="' + (state.period === p ? 'on' : '') + '">' + periodBtnLabel(p) + '</button>';
     }).join('') + '</div>' +
     '<div class="seg ico" title="Вид списка">' +
       '<button class="' + (state.view === 'table' ? 'on' : '') + '" data-act="viewmode" data-v="table" title="Таблица" aria-label="Таблица">' + ic('rows', 14) + '</button>' +
@@ -1530,6 +1744,7 @@ function ribbon() {
 }
 
 function rail() {
+  if (isAi()) return aiRail();
   const live = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; }).length;
 
   const nav = [
@@ -1558,7 +1773,8 @@ function rail() {
           : '') +
       '</div>' +
       FILTERS.map(function (c) {
-        const items = c.items();
+        const items = filterRailItems(c);
+        const pickable = filterPickableCount(c);
         const sel = state.f[c.k];
         const open = state.railOpen.indexOf(c.k) >= 0;
         const active = sel.length > 0;
@@ -1569,13 +1785,23 @@ function rail() {
                  '<span class="grow trunc" style="text-align:left">' + c.n + '</span>' +
                  (active
                    ? '<span class="mono" style="font-size:11px;font-weight:600;color:var(--accent)">' +
-                       sel.length + ' из ' + items.length + '</span>'
-                   : '<span class="mono" style="font-size:11px;color:var(--ink-3)">' + items.length + '</span>') +
+                       sel.length + ' из ' + pickable + '</span>'
+                   : '<span class="mono" style="font-size:11px;color:var(--ink-3)">' + pickable + '</span>') +
                '</button>' +
                (open
                  ? '<div class="rail-sub">' + (items.length
                      ? items.map(function (it) {
-                         const on = sel.indexOf(String(it.id)) >= 0;
+                         const isAll = String(it.id) === FILTER_ALL_ID;
+                         let on;
+                         if (isAll) {
+                           if (c.k === 'status') {
+                             on = sel.indexOf('live') >= 0 && sel.indexOf('archived') >= 0 && sel.indexOf('banned') >= 0;
+                           } else {
+                             on = !active;
+                           }
+                         } else {
+                           on = sel.indexOf(String(it.id)) >= 0;
+                         }
                          return '<button class="rail-item ' + (on ? 'on' : '') + '" data-act="fpick" ' +
                            'role="checkbox" aria-checked="' + on + '" data-v="' + c.k + '|' + it.id + '">' +
                            '<span class="cbx ' + (on ? 'on' : '') + '" style="width:13px;height:13px;border-radius:3px">' +
@@ -1605,26 +1831,17 @@ function kpiCard(label, value, d, series, compact, total, tone, icon) {
   if (state.booting) {
     return '<div class="card kpi" aria-busy="true" style="' + style + '"><div class="lbl">' + label + '</div>' +
       '<div class="val"><span class="sk" style="display:block;height:24px;width:78%"></span></div>' +
-      '<div class="ft"><span class="sk" style="display:block;height:12px;width:64px"></span></div></div>';
+      '<div class="ft"></div></div>';
   }
-  // процент считаем от значения до прироста, иначе «+100%» на любом старте с нуля
-  let pct = '';
-  if (d && total != null) {
-    const base = total - d;
-    if (base > 0) {
-      const v = d / base * 100;
-      const s = (Math.abs(v) >= 10 ? Math.round(v) : Math.round(v * 10) / 10);
-      pct = '<span style="font-size:11px;color:var(--ink-3)">' + (v > 0 ? '+' : '−') +
-            String(Math.abs(s)).replace('.', ',') + '%</span>';
-    }
-  }
+  // Та же логика, что у колонок таблицы: All = итог, иначе прирост; без зелёной строки.
+  const main = metricMain(total != null ? total : value, d, compact);
   return '<div class="card kpi" style="' + style + '">' +
     '<div class="hd"><span class="ico">' + ic(icon || 'users', 13) + '</span>' +
       '<span class="lbl">' + label + '</span></div>' +
-    '<div class="val">' + value + '</div>' +
-    '<div class="ft"><span style="display:flex;align-items:baseline;gap:6px;min-width:0">' +
-      deltaEl(d, compact) + pct + '</span>' +
-      (series ? spark(series, d >= 0, 'var(--tone)') : '') + '</div></div>';
+    '<div class="val">' + main + '</div>' +
+    '<div class="ft">' +
+      (series ? spark(series, d == null || d >= 0, 'var(--tone)') : '') +
+    '</div></div>';
 }
 
 function screenAccounts() {
@@ -1653,8 +1870,8 @@ function screenAccounts() {
       '<div class="grow"></div>' +
       // «Действия» рядом с обновлением: массовые операции над выделенным,
       // включая перенос в домен, без ухода в нижнюю панель.
-      '<button class="btn' + (state.menu === 'acts:' ? ' on' : '') + '" data-act="menu" data-v="acts:" ' +
-        'aria-haspopup="listbox" aria-expanded="' + (state.menu === 'acts:') + '">' +
+      '<button class="btn' + (state.menu && String(state.menu).indexOf('acts') === 0 ? ' on' : '') + '" data-act="menu" data-v="acts:" ' +
+        'aria-haspopup="listbox" aria-expanded="' + (state.menu && String(state.menu).indexOf('acts') === 0 ? 'true' : 'false') + '">' +
         ic('dots', 13) + 'Действия' +
         (state.selected.size ? '<span class="count">' + state.selected.size + '</span>' : '') +
       '</button>' +
@@ -1797,16 +2014,33 @@ function sortTh(key, label, right) {
    поэтому все списки — свои, на fixed-слое (иначе их режет overflow).
    ============================================================ */
 const SORT_OPTIONS = [
-  ['vd', 'Прирост просмотров'], ['fd', 'Прирост подписчиков'], ['ld', 'Прирост лайков'],
-  ['f', 'Подписчики'], ['v', 'Просмотры'], ['l', 'Лайки'], ['p', 'Посты'],
+  ['v', 'Просмотры'], ['f', 'Подписчики'], ['l', 'Лайки'], ['p', 'Посты'],
   ['u', 'Обновлён'], ['name', 'Имя'],
 ];
 /* Меню строки и «Действия» в шапке — это списки команд, а не выбор одного
    значения. Отличаются от остальных меню тем, что у пунктов есть своё
-   действие; галочку в них не рисуем. Ключи составные: 'row:12', 'rowdom:12'. */
+   действие; галочку в них не рисуем. Ключи составные: 'row:12', 'rowdom:12',
+   'rowgroup:12', 'actsgroup:' и т.п. */
 function menuKind(key) { return String(key).split(':')[0]; }
 function menuArg(key)  { return String(key).split(':')[1] || ''; }
-const ACTION_MENUS = { row: 1, rowdom: 1, acts: 1, actsdom: 1 };
+const ACTION_MENUS = {
+  row: 1, rowdom: 1, rowgroup: 1, rowowner: 1, rowprofile: 1, rowcountry: 1,
+  acts: 1, actsdom: 1, actsgroup: 1, actsowner: 1, actsprofile: 1, actscountry: 1,
+};
+/* Подменю «Перенести в …» для каталогов (как домен). */
+const MOVE_SUBMENUS = {
+  rowgroup: 'group', rowowner: 'owner', rowprofile: 'profile', rowcountry: 'country',
+  actsgroup: 'group', actsowner: 'owner', actsprofile: 'profile', actscountry: 'country',
+};
+const MOVE_TITLES = {
+  group: 'Перенести в группу',
+  owner: 'Перенести во владельца',
+  profile: 'Перенести в профиль',
+  country: 'Перенести в страну',
+};
+const MOVE_MENU_OPEN = {
+  group: 'group', owner: 'owner', profile: 'profile', country: 'country',
+};
 /* Мультивыбор в расписании: меню остаётся открытым, галочки по i.on. */
 const MULTI_MENUS = {
   'sched-plat': 1, 'sched-domain': 1, 'sched-profile': 1,
@@ -1837,6 +2071,37 @@ function domainItems(curId) {
   });
   if (items.length) items.push({ v: 'dom|0', l: 'Убрать домен', on: !curId });
   return items;
+}
+/* Группа / владелец / профиль / страна — тот же шаблон, что у домена. */
+function catalogMoveItems(catalogKey, curId) {
+  const meta = catalogOf(catalogKey);
+  if (!meta) return [];
+  const list = meta.list() || [];
+  const items = list.map(function (row) {
+    return {
+      v: 'mv|' + catalogKey + '|' + row.id,
+      l: row.name,
+      dot: row.color,
+      on: +curId === +row.id,
+    };
+  });
+  return items;
+}
+function accountCatalogId(a, catalogKey) {
+  if (!a) return 0;
+  if (catalogKey === 'group') return a.groupId || 0;
+  if (catalogKey === 'owner') return a.ownerId || 0;
+  if (catalogKey === 'profile') return a.profileId || 0;
+  if (catalogKey === 'country') return a.countryId || 0;
+  return 0;
+}
+function pushMoveMenuItems(items, prefix) {
+  if (domainItems(null).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
+  ['group', 'owner', 'profile', 'country'].forEach(function (cat) {
+    const meta = catalogOf(cat);
+    if (!meta) return;
+    items.push({ v: 'move-' + cat, l: (MOVE_TITLES[cat] || meta.many) + '…' });
+  });
 }
 
 /* Ссылка на профиль у площадки. Адрес нигде не хранился: mapAccount его не
@@ -1876,6 +2141,20 @@ function openAccountSite(a) {
 
 function menuDef(key) {
   const kind = menuKind(key);
+  if (MOVE_SUBMENUS[kind]) {
+    const cat = MOVE_SUBMENUS[kind];
+    const isRow = kind.indexOf('row') === 0;
+    let curId = 0;
+    if (isRow) {
+      const a = ACCOUNTS.filter(function (x) { return x.id === +menuArg(key); })[0];
+      curId = accountCatalogId(a, cat);
+    }
+    return {
+      title: MOVE_TITLES[cat] || 'Перенести',
+      cur: '',
+      items: catalogMoveItems(cat, curId),
+    };
+  }
   if (kind === 'row' || kind === 'rowdom') {
     const a = ACCOUNTS.filter(function (x) { return x.id === +menuArg(key); })[0];
     if (!a) return { cur: '', items: [] };
@@ -1887,7 +2166,7 @@ function menuDef(key) {
       { v: 'refresh', l: 'Обновить сейчас' },
     ];
     if (accountUrl(a)) items.push({ v: 'site', l: 'Открыть на площадке' });
-    if (domainItems(a.domainId).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
+    pushMoveMenuItems(items);
     items.push({ v: 'archive', l: a.archived ? 'Вернуть из архива' : 'Архивировать' });
     items.push({ v: 'ban', l: a.banned ? 'Снять бан' : 'Забанить' });
     items.push({ v: 'delete', l: 'Удалить', danger: true });
@@ -1906,7 +2185,7 @@ function menuDef(key) {
     const items = [{ v: 'refresh', l: 'Обновить выбранные (' + n + ')' }];
     const stale = staleAccounts();
     if (stale.length) items.push({ v: 'pick-stale', l: 'Выделить необновившиеся (' + stale.length + ')' });
-    if (domainItems(null).length) items.push({ v: 'domain', l: 'Перенести в домен…' });
+    pushMoveMenuItems(items);
     items.push({ v: 'archive', l: 'В архив' });
     items.push({ v: 'unarchive', l: 'Вернуть из архива' });
     items.push({ v: 'ban', l: 'Забанить' });
@@ -1915,8 +2194,20 @@ function menuDef(key) {
     items.push({ v: 'delete', l: 'Удалить выбранные', danger: true });
     return { title: 'Действия · выбрано ' + n, cur: '', items: items };
   }
-  // Списки формы добавления. «—» значит «не задавать»: аккаунт создастся
-  // без этого поля, а не с первым попавшимся значением.
+  // Списки формы добавления/правки. Профиль, владелец, группа и страна —
+  // обязательные: без пункта «Без …», пока не выбрано — «Выберите…».
+  function catalogPickMenu(title, curId, list, createLabel) {
+    const cur = curId ? String(curId) : '';
+    const items = (list || []).map(function (row) {
+      return { v: String(row.id), l: row.name, dot: row.color };
+    });
+    if (createLabel) items.push({ v: '__new__', l: createLabel, create: true });
+    return { title: title, cur: cur, placeholder: 'Выберите…', items: items };
+  }
+  if (kind === 'add-stand') return {
+    title: aiW().title, cur: String(state.add.standId || ''),
+    items: aiTopics().map(function (t) { return { v: String(t.id), l: t.name, dot: t.color }; }),
+  };
   if (kind === 'add-domain') return {
     title: 'Домен', cur: String(state.add.domainId || 0),
     items: [{ v: '0', l: 'Без домена' }].concat(((state.domains && state.domains.list) || [])
@@ -1928,59 +2219,19 @@ function menuDef(key) {
       return { v: p.v, l: p.l, mark: p.v };
     })),
   };
-  if (kind === 'add-profile') return {
-    title: 'Профиль', cur: String(state.add.profileId || 0),
-    items: [{ v: '0', l: 'Без профиля' }].concat(PROFILES.map(function (p) {
-      return { v: String(p.id), l: p.name, dot: p.color };
-    })).concat([{ v: '__new__', l: 'Добавить профиль…', create: true }]),
-  };
-  if (kind === 'add-owner') return {
-    title: 'Владелец', cur: String(state.add.ownerId || 0),
-    items: [{ v: '0', l: 'Без владельца' }].concat(OWNERS.map(function (o) {
-      return { v: String(o.id), l: o.name, dot: o.color };
-    })).concat([{ v: '__new__', l: 'Добавить владельца…', create: true }]),
-  };
-  if (kind === 'add-group') return {
-    title: 'Группа', cur: String(state.add.groupId || 0),
-    items: [{ v: '0', l: 'Без группы' }].concat(GROUPS.map(function (g) {
-      return { v: String(g.id), l: g.name, dot: g.color };
-    })).concat([{ v: '__new__', l: 'Добавить группу…', create: true }]),
-  };
-  if (kind === 'add-country') return {
-    title: 'Страна', cur: String(state.add.countryId || 0),
-    items: [{ v: '0', l: 'Без страны' }].concat(COUNTRIES.map(function (c) {
-      return { v: String(c.id), l: c.name, dot: c.color };
-    })).concat([{ v: '__new__', l: 'Добавить страну…', create: true }]),
-  };
+  if (kind === 'add-profile') return catalogPickMenu('Профиль', state.add.profileId, PROFILES, 'Добавить профиль…');
+  if (kind === 'add-owner') return catalogPickMenu('Владелец', state.add.ownerId, OWNERS, 'Добавить владельца…');
+  if (kind === 'add-group') return catalogPickMenu('Группа', state.add.groupId, GROUPS, 'Добавить группу…');
+  if (kind === 'add-country') return catalogPickMenu('Страна', state.add.countryId, COUNTRIES, 'Добавить страну…');
   if (kind === 'edit-domain') return {
     title: 'Домен', cur: String((state.edit && state.edit.domainId) || 0),
     items: [{ v: '0', l: 'Без домена' }].concat(((state.domains && state.domains.list) || [])
       .map(function (d) { return { v: String(d.id), l: d.name, dot: d.color }; })),
   };
-  if (kind === 'edit-profile') return {
-    title: 'Профиль', cur: String((state.edit && state.edit.profileId) || 0),
-    items: [{ v: '0', l: 'Без профиля' }].concat(PROFILES.map(function (p) {
-      return { v: String(p.id), l: p.name, dot: p.color };
-    })).concat([{ v: '__new__', l: 'Добавить профиль…', create: true }]),
-  };
-  if (kind === 'edit-owner') return {
-    title: 'Владелец', cur: String((state.edit && state.edit.ownerId) || 0),
-    items: [{ v: '0', l: 'Без владельца' }].concat(OWNERS.map(function (o) {
-      return { v: String(o.id), l: o.name, dot: o.color };
-    })).concat([{ v: '__new__', l: 'Добавить владельца…', create: true }]),
-  };
-  if (kind === 'edit-group') return {
-    title: 'Группа', cur: String((state.edit && state.edit.groupId) || 0),
-    items: [{ v: '0', l: 'Без группы' }].concat(GROUPS.map(function (g) {
-      return { v: String(g.id), l: g.name, dot: g.color };
-    })).concat([{ v: '__new__', l: 'Добавить группу…', create: true }]),
-  };
-  if (kind === 'edit-country') return {
-    title: 'Страна', cur: String((state.edit && state.edit.countryId) || 0),
-    items: [{ v: '0', l: 'Без страны' }].concat(COUNTRIES.map(function (c) {
-      return { v: String(c.id), l: c.name, dot: c.color };
-    })).concat([{ v: '__new__', l: 'Добавить страну…', create: true }]),
-  };
+  if (kind === 'edit-profile') return catalogPickMenu('Профиль', state.edit && state.edit.profileId, PROFILES, 'Добавить профиль…');
+  if (kind === 'edit-owner') return catalogPickMenu('Владелец', state.edit && state.edit.ownerId, OWNERS, 'Добавить владельца…');
+  if (kind === 'edit-group') return catalogPickMenu('Группа', state.edit && state.edit.groupId, GROUPS, 'Добавить группу…');
+  if (kind === 'edit-country') return catalogPickMenu('Страна', state.edit && state.edit.countryId, COUNTRIES, 'Добавить страну…');
   if (kind === 'cat-domain' || key === 'cat-domain') return {
     title: 'Домен', cur: String((state.catalog && state.catalog.domainId) || 0),
     items: [{ v: '0', l: 'Без домена' }].concat(((state.domains && state.domains.list) || [])
@@ -2223,11 +2474,36 @@ function schedDd(key) {
 }
 /* Команды меню строки и «Действий». Необратимое спрашиваем тем же
    подтверждением, что и массовые действия, — иначе удалить можно случайно. */
+function applyCatalogMove(ids, v) {
+  const parts = String(v || '').split('|');
+  if (parts[0] !== 'mv' || parts.length < 3) return false;
+  const catalogKey = parts[1];
+  const valueId = +parts[2] || null;
+  if (!valueId) {
+    toast('Нужно выбрать значение');
+    return false;
+  }
+  state.menu = null;
+  A.setCatalogField(ids, catalogKey, valueId);
+  return true;
+}
+function openMoveSubmenu(prefix, catalogKey, rowId) {
+  // 'move-group' → strip optional 'move-' prefix, then map to menu suffix.
+  const key = String(catalogKey || '').replace(/^move-/, '');
+  const suffix = MOVE_MENU_OPEN[key];
+  if (!suffix) return false;
+  state.menu = prefix + suffix + ':' + (rowId != null && rowId !== '' ? rowId : '');
+  return true;
+}
 function applyRowMenu(key, v) {
   const kind = menuKind(key);
   const id = +menuArg(key);
   const a = ACCOUNTS.filter(function (x) { return x.id === id; })[0];
   if (!a) { state.menu = null; return; }
+  if (MOVE_SUBMENUS[kind] || String(v).indexOf('mv|') === 0) {
+    applyCatalogMove([id], v);
+    return;
+  }
   if (kind === 'rowdom' || v.indexOf('dom|') === 0) {
     const domId = +v.split('|')[1] || null;
     state.menu = null;
@@ -2236,10 +2512,16 @@ function applyRowMenu(key, v) {
   }
   state.menu = null;
   switch (v) {
-    case 'open':    state.route = 'detail'; state.detailId = id; state.detailTab = 'overview'; break;
+    case 'open':    state.route = 'detail'; state.detailId = id; state.detailTab = 'posts'; break;
     case 'refresh': A.refreshOne(id); return;
     case 'site':    openAccountSite(a); return;
     case 'domain':  state.menu = 'rowdom:' + id; return;
+    case 'move-group':
+    case 'move-owner':
+    case 'move-profile':
+    case 'move-country':
+      openMoveSubmenu('row', v, id);
+      return;
     case 'archive': A.bulkUpdate([id], { is_archived: !a.archived },
                       a.archived ? 'Вернули из архива' : 'В архиве'); return;
     case 'ban':     A.bulkUpdate([id], { is_banned: !a.banned },
@@ -2254,7 +2536,12 @@ function applyRowMenu(key, v) {
 }
 function applyActsMenu(key, v) {
   const ids = Array.from(state.selected);
-  if (menuKind(key) === 'actsdom' || v.indexOf('dom|') === 0) {
+  const kind = menuKind(key);
+  if (MOVE_SUBMENUS[kind] || String(v).indexOf('mv|') === 0) {
+    applyCatalogMove(ids, v);
+    return;
+  }
+  if (kind === 'actsdom' || v.indexOf('dom|') === 0) {
     const domId = +v.split('|')[1] || null;
     state.menu = null;
     A.setDomain(ids, domId);
@@ -2272,6 +2559,12 @@ function applyActsMenu(key, v) {
   switch (v) {
     case 'refresh':   A.bulkRefresh(ids); return;
     case 'domain':    state.menu = 'actsdom:'; return;
+    case 'move-group':
+    case 'move-owner':
+    case 'move-profile':
+    case 'move-country':
+      openMoveSubmenu('acts', v, '');
+      return;
     case 'archive':   A.bulkUpdate(ids, { is_archived: true }, 'В архиве'); return;
     case 'unarchive': A.bulkUpdate(ids, { is_archived: false }, 'Вернули из архива'); return;
     case 'ban':       A.bulkUpdate(ids, { is_banned: true }, 'Забанены'); return;
@@ -2288,8 +2581,12 @@ function applyActsMenu(key, v) {
 }
 function applyMenu(key, v) {
   const kind = menuKind(key);
-  if (kind === 'row' || kind === 'rowdom') { applyRowMenu(key, v); return; }
-  if (kind === 'acts' || kind === 'actsdom') { applyActsMenu(key, v); return; }
+  if (kind === 'row' || kind === 'rowdom' || (MOVE_SUBMENUS[kind] && kind.indexOf('row') === 0)) {
+    applyRowMenu(key, v); return;
+  }
+  if (kind === 'acts' || kind === 'actsdom' || (MOVE_SUBMENUS[kind] && kind.indexOf('acts') === 0)) {
+    applyActsMenu(key, v); return;
+  }
   // Выбор в форме добавления не должен терять набранный текст: снимаем его
   // с живого поля до того, как слой модалки пересоберётся.
   if (kind.indexOf('add-') === 0) {
@@ -2303,6 +2600,7 @@ function applyMenu(key, v) {
     }
     if (kind === 'add-platform') state.add.platform = v;
     else if (kind === 'add-domain')  state.add.domainId  = +v || 0;
+    else if (kind === 'add-stand')   state.add.standId   = +v || 0;
     else if (kind === 'add-profile') state.add.profileId = +v || 0;
     else if (kind === 'add-owner')   state.add.ownerId   = +v || 0;
     else if (kind === 'add-group')   state.add.groupId   = +v || 0;
@@ -2348,7 +2646,9 @@ function dd(key, active, extra) {
   const d = menuDef(key);
   let cur = null;
   d.items.forEach(function (i) { if (i.v === d.cur) cur = i; });
-  if (!cur) cur = d.items[0] || { l: '—' };
+  if (!cur) cur = d.placeholder
+    ? { l: d.placeholder, muted: true }
+    : (d.items[0] || { l: '—' });
   const open = state.menu === key;
   return '<button class="sel' + (active ? ' on' : '') + (open ? ' open' : '') + '"' +
     (extra ? ' style="' + extra + '"' : '') +
@@ -2356,7 +2656,7 @@ function dd(key, active, extra) {
     (d.title ? ' aria-label="' + d.title + ': ' + esc(cur.l) + '"' : '') + '>' +
     (cur.dot ? '<span class="dot" style="background:' + cur.dot + '"></span>' : '') +
     (cur.mark ? pmark(cur.mark) : '') +
-    '<span class="trunc">' + esc(cur.l) + '</span>' + ic('cdown', 11) + '</button>';
+    '<span class="trunc' + (cur.muted ? '" style="color:var(--ink-3)' : '') + '">' + esc(cur.l) + '</span>' + ic('cdown', 11) + '</button>';
 }
 /* Три точки в строке. Ключ меню несёт id аккаунта, поэтому позиционирование
    находит именно ту кнопку, по которой кликнули. */
@@ -2398,8 +2698,11 @@ function positionMenu() {
   const m = document.querySelector('.menu');
   if (!m) return;
   // У подменю своей кнопки нет — оно висит на той же, из которой открылось.
-  const anchor = state.menu.indexOf('rowdom:') === 0 ? 'row:' + menuArg(state.menu)
-               : state.menu.indexOf('actsdom:') === 0 ? 'acts:'
+  const mk = menuKind(state.menu);
+  const anchor = mk === 'rowdom' || (MOVE_SUBMENUS[mk] && mk.indexOf('row') === 0)
+               ? 'row:' + menuArg(state.menu)
+               : (mk === 'actsdom' || (MOVE_SUBMENUS[mk] && mk.indexOf('acts') === 0))
+               ? 'acts:'
                : state.menu;
   const t = document.querySelector('[data-act="menu"][data-v="' + anchor + '"]');
   if (!t) { state.menu = null; m.remove(); return; }
@@ -2432,16 +2735,23 @@ function gridStyle() {
   const min = 44 + 200 + cs.reduce(function (s, c) { return s + c.w; }, 0) + 38 + 32;
   return 'grid-template-columns:' + tpl + ';min-width:' + min + 'px';
 }
-function isRunning(a) { return state.run.on && ('@' + a.username) === state.run.cur; }
-function numCell(main, d, compact) {
-  if (state.dense) {
-    const inline = d === 0 ? '' : ' <span style="font-size:11px;color:' + dcol(d) + '">' + signed(d, compact) + '</span>';
-    return '<div class="num">' + main + inline + '</div>';
-  }
-  const sub = d === 0
-    ? '<div class="num sub" style="color:var(--ink-3)">—</div>'
-    : '<div class="num sub" style="color:' + dcol(d) + '">' + signed(d, compact) + '</div>';
-  return '<div><div class="num">' + main + '</div>' + sub + '</div>';
+function isRunning(a) {
+  if (!a) return false;
+  if (state.refreshing && state.refreshing[a.id]) return true;
+  return state.run.on && ('@' + a.username) === state.run.cur;
+}
+
+function setRefreshing(ids, on) {
+  const map = state.refreshing || (state.refreshing = {});
+  (Array.isArray(ids) ? ids : [ids]).forEach(function (id) {
+    const n = +id;
+    if (!n) return;
+    if (on) map[n] = true;
+    else delete map[n];
+  });
+}
+function numCell(main) {
+  return '<div class="num">' + main + '</div>';
 }
 function textCell(s) { return '<div class="trunc" style="font-size:12px;color:var(--ink-2)">' + esc(s) + '</div>'; }
 function cell(k, a) {
@@ -2455,11 +2765,11 @@ function cell(k, a) {
     case 'owner':     return textCell(ownerOf(a).name);
     case 'group':     return textCell(groupOf(a).name);
     case 'country':   return textCell(countryOf(a).name);
-    case 'followers': return numCell(fmt(a.followers), delta(a, 'f'), false);
-    case 'views':     return numCell(comp(a.views), delta(a, 'v'), true);
-    case 'likes':     return numCell(comp(a.likes), delta(a, 'l'), true);
-    case 'clicks':    return numCell(fmt(a.clicks), delta(a, 'c'), false);
-    case 'posts':     return '<div class="num">' + fmt(a.posts) + '</div>';
+    case 'followers': return numCell(metricMain(a.followers, delta(a, 'f'), false));
+    case 'views':     return numCell(metricMain(a.views, delta(a, 'v'), true));
+    case 'likes':     return numCell(metricMain(a.likes, delta(a, 'l'), true));
+    case 'clicks':    return numCell(metricMain(a.clicks, delta(a, 'c'), false));
+    case 'posts':     return numCell(metricMain(a.posts, delta(a, 'p'), false));
     case 'updated':   return '<div class="num sub" style="color:' +
       (isRunning(a) ? 'var(--accent)' : (a.updated > 2880 ? 'var(--warn)' : 'var(--ink-2)')) + '">' +
       (isRunning(a) ? 'сейчас' : ago(a.updated)) + '</div>';
@@ -2512,18 +2822,21 @@ function cardsView(slice, list, pages) {
       '<div style="display:flex;align-items:center;gap:10px">' +
         '<span class="cbx ' + (sel ? 'on' : '') + '" data-act="sel" data-v="' + a.id + '" role="checkbox" aria-checked="' + sel + '">' + (sel ? ic('check', 11) : '') + '</span>' +
         avatarEl(a, 30, 9) +
-        '<div style="min-width:0;flex-grow:1"><div class="trunc" style="font-size:13px;font-weight:600">' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) + '</div>' +
+        '<div style="min-width:0;flex-grow:1"><div class="trunc" style="font-size:13px;font-weight:600">' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) +
+          (isRunning(a) ? ' <span class="pill" style="background:var(--accent-soft);color:var(--accent)">обновляется</span>' : '') +
+        '</div>' +
         '<div class="trunc" style="font-size:11px;color:var(--ink-3);margin-top:1px">' + pr.name + ' · ' + ownerOf(a).name + '</div></div>' +
         pmark(a.platform) +
       '</div>' +
       '<div style="display:flex;align-items:baseline;gap:8px">' +
-        '<span class="mono" style="font-size:23px;font-weight:500;letter-spacing:-.03em">' + fmt(a.followers) + '</span>' +
-        deltaEl(delta(a, 'f')) +
+        '<span class="mono" style="font-size:23px;font-weight:500;letter-spacing:-.03em">' +
+          metricMain(a.followers, delta(a, 'f'), false) + '</span>' +
       '</div>' +
       spark(a.series, delta(a, 'f') >= 0).replace('width="62"', 'width="100%"').replace('viewBox="0 0 62 20"', 'viewBox="0 0 62 20" preserveAspectRatio="none"') +
       '<div class="row3">' +
         ['Просмотры', 'Лайки', 'Посты'].map(function (lb, i) {
-          const v = [comp(a.views), comp(a.likes), fmt(a.posts)][i];
+          const keys = [['views', 'v', true], ['likes', 'l', true], ['posts', 'p', false]][i];
+          const v = metricMain(a[keys[0]], delta(a, keys[1]), keys[2]);
           return '<div><div class="lbl">' + lb + '</div><div class="mono" style="font-size:13px;margin-top:3px">' + v + '</div></div>';
         }).join('') +
       '</div></div>';
@@ -2627,9 +2940,16 @@ function screenDetail() {
             '<span style="font-size:14px;font-weight:600">Лучшие посты</span>' +
             '<span class="count">' + PL.length + '</span><div class="grow"></div>' +
             '<button class="btn sm ghost" data-act="tab" data-v="posts" style="color:var(--accent)">Все посты' + ic('cright', 12) + '</button></div>' +
-          '<div class="plist">' + PL.slice(0, 5).map(function (p) {
+          '<div class="plist">' +
+            '<div class="prow" style="border-bottom:1px solid var(--line);background:var(--surface-2)">' +
+              '<div></div><div class="lbl">Пост</div>' +
+              '<div class="lbl" style="text-align:right">Просмотры</div>' +
+              '<div class="lbl" style="text-align:right">Прирост</div>' +
+              '<div class="lbl" style="text-align:right">Лайки</div>' +
+              '<div class="lbl" style="text-align:right">Комменты</div></div>' +
+            PL.slice(0, 5).map(function (p) {
             return '<div class="prow">' +
-              '<div class="thumb" style="background:linear-gradient(135deg,hsl(' + p.hue + ',42%,72%),hsl(' + ((p.hue + 40) % 360) + ',38%,58%))"></div>' +
+              postThumbEl(p) +
               '<div style="min-width:0"><div class="trunc" style="font-size:13px;font-weight:500">' + esc(p.title) + '</div>' +
                 '<div style="font-size:11px;color:var(--ink-3);margin-top:2px">' + p.hashtag + ' · ' + (p.daysAgo === 0 ? 'сегодня' : p.daysAgo + ' дн назад') + '</div></div>' +
               '<div class="num">' + comp(p.views) + '</div>' +
@@ -2655,7 +2975,7 @@ function screenDetail() {
           }).join('') +
         '</div>' +
         '<div class="card" style="padding:14px">' +
-          '<div class="lbl" style="margin-bottom:10px">За ' + (state.period === 1 ? 'сутки' : state.period + ' дней') + '</div>' +
+          '<div class="lbl" style="margin-bottom:10px">За ' + periodTitle(state.period) + '</div>' +
           [['Подписчики','f',false],['Просмотры','v',true],['Лайки','l',true],['Посты','p',false],['Клики','c',false]].map(function (r) {
             return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;font-size:12px">' +
                    '<span style="color:var(--ink-3);flex-grow:1">' + r[0] + '</span>' + deltaEl(delta(a, r[1]), r[2]) + '</div>';
@@ -2675,9 +2995,6 @@ function screenDetail() {
     if (state.postSort === 'new')   return x.daysAgo - y.daysAgo;
     return y.viewDelta - x.viewDelta;
   });
-  const grad = function (p) {
-    return 'linear-gradient(135deg,hsl(' + p.hue + ',42%,72%),hsl(' + ((p.hue + 40) % 360) + ',38%,58%))';
-  };
   const postsView =
     '<div class="card">' +
       '<div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line);flex-wrap:wrap">' +
@@ -2691,7 +3008,7 @@ function screenDetail() {
       '</div>' +
       (state.postView === 'grid'
         ? '<div class="pgrid">' + sortedPosts.map(function (p) {
-            return '<div class="pcard"><div class="ph" style="background:' + grad(p) + '"></div>' +
+            return '<div class="pcard">' + postThumbEl(p, 'grid') +
               '<div class="pb"><div class="trunc" style="font-size:12px;font-weight:600">' + esc(p.title) + '</div>' +
               '<div style="font-size:11px;color:var(--ink-3)">' + p.hashtag + ' · ' + (p.daysAgo === 0 ? 'сегодня' : p.daysAgo + ' дн назад') + '</div>' +
               '<div style="display:flex;align-items:center;gap:12px;font-family:\'IBM Plex Mono\',monospace;font-size:11px;color:var(--ink-2)">' +
@@ -2707,7 +3024,7 @@ function screenDetail() {
               '<div class="lbl" style="text-align:right">Комменты</div></div>' +
             sortedPosts.map(function (p) {
               return '<div class="prow">' +
-                '<div class="thumb" style="background:' + grad(p) + '"></div>' +
+                postThumbEl(p) +
                 '<div style="min-width:0"><div class="trunc" style="font-size:13px;font-weight:500">' + esc(p.title) + '</div>' +
                   '<div style="font-size:11px;color:var(--ink-3);margin-top:2px">' + p.hashtag + ' · ' + (p.daysAgo === 0 ? 'сегодня' : p.daysAgo + ' дн назад') + '</div></div>' +
                 '<div class="num">' + comp(p.views) + '</div>' +
@@ -2718,18 +3035,33 @@ function screenDetail() {
           '</div>') +
     '</div>';
 
+  const refreshing = isRunning(a);
   return '<div class="main">' +
     '<button class="btn ghost" data-act="nav" data-v="accounts" style="align-self:flex-start;margin-bottom:12px;padding-left:0">' + ic('back', 14) + 'Все аккаунты</button>' +
     '<div class="page-hd" style="align-items:flex-start">' +
       avatarEl(a, 44, 12) +
       '<div><div style="display:flex;align-items:center;gap:8px">' +
         '<h1>' + (a.username.indexOf('r/') === 0 ? '' : '@') + esc(a.username) + '</h1>' + pmark(a.platform) +
+        (refreshing ? '<span class="pill" style="background:var(--accent-soft);color:var(--accent)">обновляется</span>' : '') +
         (a.unavailable ? '<span class="pill" style="background:var(--warn-soft);color:var(--warn)">профиль недоступен</span>' : '') +
       '</div>' +
-      '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' + esc(a.display) + ' · ' + pr.name + ' · ' + ow.name + '</div></div>' +
+      '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">' + esc(a.display) + '</div>' +
+      /* Метки с подписями: раньше здесь шло «имя · AM · ATM» без пояснений,
+         и профиль принимали за страну, а группы и страны не было вовсе. */
+      '<div style="display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12px;margin-top:6px">' +
+        [['Профиль', pr.name], ['Владелец', ow.name],
+         ['Группа', groupOf(a).name], ['Страна', countryOf(a).name]].map(function (r) {
+          return '<span><span style="color:var(--ink-3)">' + r[0] + ':</span> ' +
+                 '<span style="color:var(--ink);font-weight:500">' + esc(r[1]) + '</span></span>';
+        }).join('') +
+      '</div></div>' +
       '<div class="grow"></div>' +
       '<button class="btn" data-act="site-open" data-v="' + a.id + '"' + (accountUrl(a) ? '' : ' disabled title="Для этой площадки нет публичной ссылки"') + '>' + ic('link', 13) + 'На площадке</button>' +
-      '<button class="btn" data-act="refresh-one" data-v="' + a.id + '">' + ic('refresh', 13) + 'Обновить</button>' +
+      '<button class="btn' + (refreshing ? ' on' : '') + '" data-act="refresh-one" data-v="' + a.id + '"' +
+        (refreshing ? ' disabled aria-busy="true"' : '') + '>' +
+        '<span class="' + (refreshing ? 'spin-ico' : '') + '" style="display:inline-flex">' + ic('refresh', 13) + '</span>' +
+        (refreshing ? 'Обновляется…' : 'Обновить') +
+      '</button>' +
       '<button class="btn pri" data-act="edit-open" data-v="' + a.id + '">Изменить</button>' +
     '</div>' +
 
@@ -2741,12 +3073,7 @@ function screenDetail() {
       kpiCard('Клики', fmt(a.clicks), delta(a, 'c'), null, false, a.clicks, 5, 'link') +
     '</div>' +
 
-    '<div class="tabs">' +
-      [['overview','Обзор'],['posts','Посты']].map(function (t) {
-        return '<button class="' + (state.detailTab === t[0] ? 'on' : '') + '" data-act="tab" data-v="' + t[0] + '">' + t[1] + '</button>';
-      }).join('') +
-    '</div>' +
-    (state.detailTab === 'posts' ? postsView : overview) +
+    postsView +
   '</div>';
 }
 
@@ -2764,7 +3091,7 @@ function screenAnalytics() {
       '<div class="page-hd"><h1>Аналитика</h1><div class="grow"></div>' +
         dd('an-platform', state.an.platform !== 'all') +
         dd('an-sort') +
-        '<div class="seg">' + [['1d','24ч'],['7d','7д'],['30d','30д']].map(function (p) {
+        '<div class="seg">' + AN_PERIOD_OPTS.map(function (p) {
           return '<button class="' + (state.an.period === p[0] ? 'on' : '') + '" data-act="an-period" data-v="' + p[0] + '">' + p[1] + '</button>';
         }).join('') + '</div>' +
       '</div>' + analyticsSkeleton() + '</div>';
@@ -2855,7 +3182,7 @@ function screenAnalytics() {
     '<div class="page-hd"><h1>Аналитика</h1><div class="grow"></div>' +
       dd('an-platform', state.an.platform !== 'all') +
       dd('an-sort') +
-      '<div class="seg">' + [['1d','24ч'],['7d','7д'],['30d','30д']].map(function (p) {
+      '<div class="seg">' + AN_PERIOD_OPTS.map(function (p) {
         return '<button class="' + (state.an.period === p[0] ? 'on' : '') + '" data-act="an-period" data-v="' + p[0] + '">' + p[1] + '</button>';
       }).join('') + '</div>' +
     '</div>' +
@@ -2867,12 +3194,9 @@ function screenAnalytics() {
       (top.length === 0
         ? '<div class="empty"><span style="color:var(--ink-3)">' + (state.an.loading ? 'Загружаем топ постов…' : 'За этот период постов нет') + '</span></div>'
         : '<div class="plist">' + top.map(function (o, i) {
-        const grad = 'linear-gradient(135deg,hsl(' + o.p.hue + ',42%,72%),hsl(' + ((o.p.hue + 40) % 360) + ',38%,58%))';
         return '<div class="prow" style="grid-template-columns:24px 56px minmax(0,1fr) 96px 88px 88px">' +
           '<div class="mono" style="font-size:12px;color:var(--ink-3)">' + (i + 1) + '</div>' +
-          (o.p.thumb
-            ? '<img class="thumb" src="' + esc(o.p.thumb) + '" alt="" loading="lazy" style="object-fit:cover;background:' + grad + '">'
-            : '<div class="thumb" style="background:' + grad + '"></div>') +
+          postThumbEl(o.p) +
           '<div style="min-width:0"><div class="trunc" style="font-size:13px;font-weight:500">' + esc(o.p.title) + '</div>' +
             '<div class="trunc" style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--ink-3);margin-top:3px">' +
             pmark(o.a.platform) + '<span class="trunc">@' + esc(o.a.username) + (o.p.hashtag ? ' · ' + esc(o.p.hashtag) : '') + '</span></div></div>' +
@@ -2940,6 +3264,8 @@ function screenSettings() {
   return '<div class="main" style="--page-max:960px">' +
     '<div class="page-hd"><h1>Настройки</h1></div>' +
 
+    (isAi() ? aiTopicsSettings() : '') +
+
     '<div class="sect"><div class="hd">' + ic('bolt', 17) + '<h2>Внешний вид</h2></div>' +
       '<div class="card">' +
         '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Тема оформления</div>' +
@@ -2950,8 +3276,8 @@ function screenSettings() {
           }).join('') + '</div></div>' +
         '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Период дельт по умолчанию</div>' +
           '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Применяется ко всем экранам и к отчётам</div></div>' +
-          '<div class="seg">' + [1,7,30].map(function (p) {
-            return '<button data-act="period" data-v="' + p + '" class="' + (state.period === p ? 'on' : '') + '">' + (p === 1 ? '24ч' : p + 'д') + '</button>';
+          '<div class="seg">' + PERIOD_OPTS.map(function (p) {
+            return '<button data-act="period" data-v="' + p + '" class="' + (state.period === p ? 'on' : '') + '">' + periodBtnLabel(p) + '</button>';
           }).join('') + '</div></div>' +
         '<div class="srow"><div style="flex-grow:1"><div style="font-size:13px;font-weight:500">Вид списка по умолчанию</div>' +
           '<div style="font-size:12px;color:var(--ink-3);margin-top:2px">Таблица плотнее, карточки нагляднее</div></div>' +
@@ -3161,18 +3487,57 @@ function screenTV() {
           }).join('') +
         '</div></div></div>';
   }
-  const live = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
+  /* Эфир показывает ровно тот же набор, что и список: домен накладывает бэкенд
+     по адресу, всё остальное — рельс фильтров (площадка, профиль, владелец,
+     группа, страна, статус, поиск) и период в шапке. Фильтры лежат в state.f и
+     переживают перезагрузку, так что на стене достаточно один раз настроить
+     список и открыть /efir. */
+  const live = filteredAccounts();
   const t = totals(live);
   const now = new Date();
   const clock = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
 
+  /* Период из шапки: All — абсолют, 1д/7д/30д — прирост за период, ровно как
+     в списке. Абсолют набора нужен и при периоде: по нему считается доля
+     набора в домене для живого счётчика. */
+  const byPeriod = state.period !== 0;
+  function tvBase(absKey, dKey) { return byPeriod ? t[dKey] : t[absKey]; }
+
+  /* Якоря живого счётчика бэкенд считает по домену целиком — ни по фильтрам,
+     ни по периодам разбивки у них нет. Абсолют из якорей годится только когда
+     на экране весь домен за всё время; в любом срезе берём долю набега —
+     сколько домен набрал за окно, столько же прибавляем набору пропорционально
+     его весу (см. vcApportion). Цифра своя, темп общий. */
+  const whole = !railNarrowed() && !byPeriod;
+  /* Измеренный прирост просмотров ровно по тем аккаунтам, что на экране. Пока
+     у опорных точек нет разбивки (сутки после выкладки) — null, и остаётся
+     прежний разнос прироста домена по весу набора. */
+  const setGrowth = whole ? null : vcSetGrowth(live);
+  function tvNum(key, base, abs) {
+    if (whole) { const n = vcTotal(key); return fmt(n === null ? base : n); }
+    if (key === 'views' && setGrowth !== null) {
+      const pr = vcProgress();
+      return fmt(pr === null ? base : Math.round(base + setGrowth * pr));
+    }
+    const n = vcApportion(base, abs, key);
+    return fmt(n === null ? base : n);
+  }
+  function tvVc(key, base, abs) {
+    const head = ' data-vc="' + key + '" data-vc-fmt="full"';
+    if (whole) return head;
+    if (key === 'views' && setGrowth !== null) {
+      return head + ' data-vc-base="' + base + '" data-vc-growth="' + setGrowth + '"';
+    }
+    return head + ' data-vc-base="' + base + '" data-vc-abs="' + abs + '"';
+  }
+
   /* Внизу — остальные показатели, помельче. Только подпись и число:
      приросты под цифрами убраны, на стене они читались как шум. */
   const sub = [
-    ['Followers', fmt(vcOr(t.f, 'followers')), 'var(--tvaccent)', 'followers'],
-    ['Likes', fmt(vcOr(t.l, 'likes')), 'var(--tvm2)', 'likes'],
-    ['Posts', fmt(vcOr(t.p, 'posts')), 'var(--tvm3)', 'posts'],
-    ['Accounts', fmt(live.length), 'var(--tvm1)'],
+    ['Followers', 'followers', tvBase('f', 'fd'), t.f, 'var(--tvaccent)'],
+    ['Likes', 'likes', tvBase('l', 'ld'), t.l, 'var(--tvm2)'],
+    ['Posts', 'posts', tvBase('p', 'pd'), t.p, 'var(--tvm3)'],
+    ['Accounts', '', live.length, 0, 'var(--tvm1)'],
   ];
 
   return '<div class="tv">' +
@@ -3180,7 +3545,9 @@ function screenTV() {
       '<div style="width:24px;height:24px;border-radius:7px;background:var(--tvaccent);display:flex;align-items:center;justify-content:center">' +
         '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="var(--tvbg)" stroke-width="1.8" stroke-linecap="round"><path d="M2 12.5 5.5 7l3 2.5L14 3"></path></svg></div>' +
       '<span style="font-size:13px;font-weight:600;letter-spacing:.02em">AccountsStats</span>' +
-      '<span class="tv-lbl">Эфир</span>' +
+      /* При периоде на табло не абсолют, а прирост — без пометки цифра просто
+         выглядит меньше, чем должна, и объяснить это на стене нечем. */
+      '<span class="tv-lbl">Broadcast' + (byPeriod ? ' · ' + state.period + 'd' : '') + '</span>' +
       '<div class="grow"></div>' +
       (state.run.on
         ? '<span style="display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 12px;border-radius:15px;background:var(--tvsurf);font-size:12px">' +
@@ -3192,23 +3559,25 @@ function screenTV() {
       '<button class="tv-btn" data-act="nav" data-v="accounts" aria-label="Выйти из эфира">' + ic('close', 16) + '</button>' +
     '</div>' +
 
-    /* Один экран, без ротации. Над главной цифрой нет ничего: ни слова
-       «просмотры», ни имени эфира — чьё это табло, видно в верхней панели.
+    /* Один экран, без ротации. Главная цифра — просмотры, над ней подпись.
        Остальные показатели — отдельной группой у нижнего края. */
     '<div class="tv-scene on" data-scene="net" ' +
       'style="display:flex;flex-direction:column;align-items:center;justify-content:space-between;' +
       'text-align:center;padding:clamp(20px,8vh,104px) 0 clamp(14px,6vh,72px)">' +
       '<div style="max-width:100%">' +
-        '<div class="tv-num tv-hero-xl" data-vc="views" data-vc-fmt="full" ' +
-          'style="color:var(--tvink)">' + fmt(vcOr(t.v, 'views')) + '</div>' +
+        '<div class="tv-lbl" style="margin-bottom:clamp(6px,1.6vh,18px)">We were checked out:</div>' +
+        '<div class="tv-num tv-hero-xl"' + tvVc('views', tvBase('v', 'vd'), t.v) +
+          ' style="color:var(--tvink)">' + tvNum('views', tvBase('v', 'vd'), t.v) + '</div>' +
       '</div>' +
       '<div style="display:flex;justify-content:center;align-items:flex-start;' +
         'gap:clamp(20px,5vw,88px);flex-wrap:wrap;width:100%">' +
         sub.map(function (m) {
+          const key = m[1], base = m[2], abs = m[3];
           return '<div style="min-width:0">' +
             '<div class="tv-lbl">' + m[0] + '</div>' +
-            '<div class="tv-num tv-mid-xl"' + (m[3] ? ' data-vc="' + m[3] + '" data-vc-fmt="full"' : '') +
-              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[2] + '">' + m[1] + '</div>' +
+            '<div class="tv-num tv-mid-xl"' + (key ? tvVc(key, base, abs) : '') +
+              ' style="margin-top:clamp(4px,1.2vh,12px);color:' + m[4] + '">' +
+              (key ? tvNum(key, base, abs) : fmt(base)) + '</div>' +
           '</div>';
         }).join('') +
       '</div>' +
@@ -3432,45 +3801,166 @@ function addDefaultDomainId() {
   const d = state.domains && state.domains.current;
   return d ? d.id : 0;
 }
-/* Что уедет на сервер вместе с каждым именем. Пустое не шлём, чтобы не
-   перетирать значения по умолчанию на стороне бэкенда. */
+/* Что уедет на сервер вместе с каждым именем. */
 function addExtra() {
   const a = state.add, out = {};
   if (a.domainId)  out.domain_id  = a.domainId;
-  if (a.profileId) out.profile_id = a.profileId;
-  if (a.ownerId)   out.owner_id   = a.ownerId;
-  if (a.groupId)   out.group_id   = a.groupId;
-  if (a.countryId) out.country_id = a.countryId;
+  out.profile_id = a.profileId;
+  out.owner_id   = a.ownerId;
+  out.group_id   = a.groupId;
+  out.country_id = a.countryId;
   return out;
+}
+const REQUIRED_ACCOUNT_LABELS = [
+  { key: 'profileId', name: 'профиль' },
+  { key: 'ownerId',   name: 'владелец' },
+  { key: 'groupId',   name: 'группа' },
+  { key: 'countryId', name: 'страна' },
+];
+function missingRequiredLabels(obj) {
+  return REQUIRED_ACCOUNT_LABELS.filter(function (f) {
+    return !obj || !obj[f.key];
+  }).map(function (f) { return f.name; });
 }
 function modalAdd() {
   const a = state.add;
+  if (aiCreates() && a.mode === 'remove') return modalAddRemove(a);
   // Раньше здесь были три вкладки и четыре подписи, не подключённые ни к чему:
   // «Списком/По одному/Импорт CSV» были кнопками без действия, а «Платформа»,
   // «Профиль» и «Владелец» — вообще <span> с жёстко вписанным первым элементом
   // списка. Отправлялся только текст. Теперь это настоящая форма.
   const body =
-    '<div><div class="lbl" style="margin-bottom:8px">Ссылки или @имена, по одному в строке</div>' +
+    '<div><div class="lbl" style="margin-bottom:8px">Ссылки или @имена · в строке может быть несколько ссылок</div>' +
       '<textarea id="addlist" rows="7" placeholder="@mobilefarm.ru&#10;https://www.tiktok.com/@kuhnya_doma&#10;@atomic.media" ' +
       'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none">' +
-      esc(a.text) + '</textarea></div>' +
-    '<div class="frow"><span class="lb">Куда добавить</span>' + dd('add-domain') +
+      esc(a.text) + '</textarea><div id="addprev">' + addPreviewHtml() + '</div></div>' +
+    (aiCreates()
+      ? '<div class="frow"><span class="lb">Куда добавить</span>' + dd('add-stand') + '</div>'
+      : '<div class="frow"><span class="lb">Куда добавить</span>' + dd('add-domain') +
       '<span style="font-size:12px;color:var(--ink-3)">' +
         (a.domainId ? 'аккаунты появятся в этом домене'
           : 'без домена — видны в All вместе со всеми доменами') +
-      '</span></div>' +
+      '</span></div>') +
     '<div class="frow"><span class="lb">Площадка</span>' + dd('add-platform') +
       '<span style="font-size:12px;color:var(--ink-3)">по ссылке определяется сама</span></div>' +
-    '<div class="frow"><span class="lb">Профиль и владелец</span>' +
+    '<div class="frow"><span class="lb">Профиль и владелец *</span>' +
       dd('add-profile') + dd('add-owner') + '</div>' +
-    '<div class="frow"><span class="lb">Группа и страна</span>' +
+    '<div class="frow"><span class="lb">Группа и страна *</span>' +
       dd('add-group') + dd('add-country') + '</div>' +
-    '<div style="font-size:12px;color:var(--ink-3)">Уже существующий аккаунт не задваивается: у него обновятся ' +
-      'заполненные здесь поля (домен, профиль, владелец, группа, страна), а архив или бан снимутся. ' +
-      'Пустые поля («Без …») не трогают текущие значения.</div>';
+    '<div style="font-size:12px;color:var(--ink-3)">Профиль, владелец, группа и страна обязательны. ' +
+      (aiCreates()
+        ? 'Если аккаунт уже есть на дашборде, он просто встанет ' + aiW().prep + ' ' + aiW().acc + ': его домен и метки не изменятся.</div>'
+        : 'Уже существующий аккаунт не задваивается: у него обновятся эти поля, а архив или бан снимутся.</div>');
   const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
     '<button class="btn pri" data-act="add-save">Добавить</button>';
-  return modalShell('Добавить аккаунты', body, ft);
+  return modalShell(aiCreates() ? 'Аккаунты по ссылкам' : 'Добавить аккаунты', (aiCreates() ? addModeTabs(a) : '') + body, ft);
+}
+
+/* На стендах форма в два режима: завести/поставить и убрать по тем же ссылкам. */
+function addModeTabs(a) {
+  return '<div class="tabs" style="margin:-4px 0 4px">' +
+    [['add', 'Добавить'], ['remove', 'Убрать']].map(function (x) {
+      const on = (a.mode || 'add') === x[0];
+      return '<button class="' + (on ? 'on' : '') + '" data-act="add-mode" data-v="' + x[0] + '" aria-pressed="' + on + '">' + x[1] + '</button>';
+    }).join('') + '</div>';
+}
+function modalAddRemove(a) {
+  const body = addModeTabs(a) +
+    '<div><div class="lbl" style="margin-bottom:8px">Ссылки или @имена, по одному в строке</div>' +
+      '<textarea id="addlist" rows="7" placeholder="https://www.tiktok.com/@kuhnya_doma&#10;@atomic.media" ' +
+      'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none">' +
+      esc(a.text) + '</textarea></div>' +
+    '<div class="frow"><span class="lb">Площадка</span>' + dd('add-platform') +
+      '<span style="font-size:12px;color:var(--ink-3)">по ссылке определяется сама</span></div>' +
+    '<div style="font-size:12px;color:var(--ink-3)">Аккаунты уберутся со всех ' + aiW().forms[2] + '. Заведённые здесь же уйдут в архив и перестанут обновляться — ' +
+      'их можно вернуть. Аккаунты из других веток останутся там, где были. Насовсем ничего не удаляется.</div>';
+  const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
+    '<button class="btn dgr" data-act="add-remove">Убрать</button>';
+  return modalShell('Аккаунты по ссылкам', body, ft);
+}
+/* Строки «что не так»: стр./площадка · фрагмент · причина. */
+function addRowsHtml(rows) {
+  return rows.map(function (r) {
+    return '<div class="addrow"><span class="n">' + esc(r.n || '') + '</span>' +
+      '<span class="t">' + esc(r.t) + '</span><span class="w">' + esc(r.w) + '</span></div>';
+  }).join('');
+}
+/* Живой разбор под полем: сколько и каких аккаунтов прочитаем и что — нет. */
+function addPreviewHtml() {
+  const a = state.add;
+  if (!a || !(a.text || '').trim()) return '';
+  const p = parseAccountInput(a.text, a.platform);
+  const by = {};
+  p.items.forEach(function (it) { by[it.platform] = (by[it.platform] || 0) + 1; });
+  const plats = Object.keys(by).map(function (k) { return esc(plabel(k)) + ' ' + by[k]; }).join(' · ');
+  let h = '<div class="addprev">' + (p.items.length
+    ? 'Прочитано ' + p.items.length + ' ' + plural(p.items.length, ['аккаунт', 'аккаунта', 'аккаунтов']) + ': ' + plats
+    : 'Пока ни одного аккаунта') +
+    (p.dup ? ' · повторов ' + p.dup + ', возьму по разу' : '') + '</div>';
+  if (p.bad.length) {
+    h += '<div class="addbad"><div class="addbad-hd">Не прочитано ' + p.bad.length + ' — эти не добавятся:</div>' +
+      '<div class="addlist">' + addRowsHtml(p.bad) + '</div></div>';
+  }
+  return h;
+}
+let addPrevTimer = null;
+function paintAddPreview() {
+  const el = document.getElementById('addprev');
+  if (el) el.innerHTML = addPreviewHtml();
+}
+/* Итог добавления. Окно — только если есть что показать: непрочитанные
+   строки, ошибки сервера или аккаунты на другом стенде. Иначе хватает тоста. */
+function showAddResult(r) {
+  if (r.bad.length || r.errors.length || r.elsewhere.length) {
+    const retry = r.bad.map(function (x) { return x.t; }).concat(r.errors.map(function (x) { return x.t; }));
+    r.retry = retry.join('\n');
+    state.addResult = r;
+    state.modal = 'addResult';
+  }
+  return r.head;
+}
+function modalAddResult() {
+  const r = state.addResult;
+  if (!r) return '';
+  const sec = function (title, rows) {
+    if (!rows.length) return '';
+    return '<div class="addsec"><h3>' + title + ' <span class="c">' + rows.length + '</span></h3>' +
+      '<div class="addlist">' + addRowsHtml(rows) + '</div></div>';
+  };
+  const body = '<div style="font-size:13px;color:var(--ink)">' + esc(r.head) + '</div>' +
+    sec('Не прочитано — в список не попали', r.bad) +
+    sec('Не добавились — сервер отказал', r.errors) +
+    sec('Уже стоят на другом стенде — оставлены там', r.elsewhere);
+  const ft = '<button class="btn" data-act="addres-copy">Скопировать список</button>' +
+    '<div class="grow"></div>' +
+    (r.retry ? '<button class="btn" data-act="addres-retry">Исправить и добавить снова</button>' : '') +
+    '<button class="btn pri" data-act="close">Готово</button>';
+  return modalShell('Что не добавилось', body, ft);
+}
+/* Сервер отвечает строкой «имя: причина» (или «имя — стенд») без площадки.
+   Находим, какую ссылку из списка это касается, чтобы показать её целиком. */
+function addServerRow(s, items, sep) {
+  s = String(s || '');
+  const at = s.indexOf(sep);
+  const name = at >= 0 ? s.slice(0, at) : s;
+  const why = at >= 0 ? s.slice(at + sep.length) : '';
+  const low = name.replace(/^@/, '').toLowerCase();
+  const same = items.filter(function (it) { return it.username.toLowerCase() === low; });
+  const it = same.length === 1 ? same[0] : null;
+  return { n: it ? plabel(it.platform) : '', t: it ? it.src : name, w: why || 'без пояснения' };
+}
+function addResultText(r) {
+  const out = [];
+  const put = function (title, rows) {
+    if (!rows.length) return;
+    out.push(title + ':');
+    rows.forEach(function (x) { out.push((x.n ? x.n + ' · ' : '') + x.t + ' — ' + x.w); });
+    out.push('');
+  };
+  put('Не прочитано', r.bad);
+  put('Не добавились', r.errors);
+  put('На другом стенде', r.elsewhere);
+  return out.join('\n').trim();
 }
 
 function modalEdit() {
@@ -3482,11 +3972,12 @@ function modalEdit() {
       esc(e.username) + '</b> · ' + esc(plabel(e.platform)) +
     '</div>' +
     '<div class="frow"><span class="lb">Домен</span>' + dd('edit-domain') + '</div>' +
-    '<div class="frow"><span class="lb">Профиль и владелец</span>' +
+    '<div class="frow"><span class="lb">Профиль и владелец *</span>' +
       dd('edit-profile') + dd('edit-owner') + '</div>' +
-    '<div class="frow"><span class="lb">Группа и страна</span>' +
+    '<div class="frow"><span class="lb">Группа и страна *</span>' +
       dd('edit-group') + dd('edit-country') + '</div>' +
-    '<div style="font-size:12px;color:var(--ink-3)">Статистика и дата «Обновлён» не меняются — только домен и метки.</div>';
+    '<div style="font-size:12px;color:var(--ink-3)">Профиль, владелец, группа и страна обязательны. ' +
+      'Статистика и дата «Обновлён» не меняются — только домен и метки.</div>';
   const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
     '<button class="btn pri" data-act="edit-save">Сохранить</button>';
   return modalShell('Изменить аккаунт', body, ft);
@@ -3681,13 +4172,508 @@ function screenUnknownDomain() {
       '</div>' +
     '</div></div>';
 }
+/* ============================================================
+   ДОМЕН AI
+   Аккаунты здесь собираются по темам (многие-ко-многим), а не по полю
+   «домен». Добавление в тему ничего не переносит: аккаунт остаётся в своём
+   домене и может лежать сразу в нескольких темах.
+   ============================================================ */
+/* Ветки-доски: один экран и один код, у каждой свой набор тем, порядок
+   карточек, площадки и слова. У «Стендов» темы называются стендами. */
+const AI_BOARDS = {
+  ai: {
+    plats: ['instagram', 'tiktok', 'youtube', 'facebook'],
+    w: { many: 'Темы', all: 'Все темы', title: 'Тема', low: 'тема', gen: 'темы', acc: 'тему', prep: 'в', from: 'из', inOne: 'В теме', inAll: 'В темах',
+         none: 'ни в одной теме', sorted: 'разложены по темам', forms: ['тема', 'темы', 'тем'], ph: 'Например, Путешествия',
+         added: 'добавлена', removed: 'удалена', renamed: 'Тема переименована', head: 'Темы ветки AI', others: 'других темах', fresh: 'новой темы', ofIt: 'темы', empty: 'Тема пустая, аккаунтов в ней нет.' },
+  },
+  stands: {
+    plats: ['instagram', 'tiktok', 'youtube', 'facebook', 'threads'],
+    create: true,   // здесь заводят аккаунты с нуля, а не только берут готовые
+    refresh: true,  // своя кнопка «Обновить» — сбор только по аккаунтам на экране
+    w: { many: 'Стенды', all: 'Все стенды', title: 'Стенд', low: 'стенд', gen: 'стенда', acc: 'стенд', prep: 'на', from: 'со', inOne: 'На стенде', inAll: 'На стендах',
+         none: 'ни на одном стенде', sorted: 'разложены по стендам', forms: ['стенд', 'стенда', 'стендов'], ph: 'Например, Стенд 6',
+         added: 'добавлен', removed: 'удалён', renamed: 'Стенд переименован', head: 'Стенды', others: 'других стендах', fresh: 'нового стенда', ofIt: 'стенда', empty: 'Стенд пустой, аккаунтов на нём нет.' },
+  },
+};
+function aiW() { return (AI_BOARDS[DOMAIN] || AI_BOARDS.ai).w; }
+function aiCreates() { return isAi() && !!AI_BOARDS[DOMAIN].create; }
+function aiRefreshes() { return isAi() && !!AI_BOARDS[DOMAIN].refresh; }
+function isAi() { return typeof DOMAIN !== 'undefined' && Object.prototype.hasOwnProperty.call(AI_BOARDS, DOMAIN); }
+function aiTopics() { return (state.ai && state.ai.topics) || []; }
+function aiTopic(id) { return aiTopics().filter(function (t) { return String(t.id) === String(id); })[0] || null; }
+function aiTopicsOf(accId) { return aiTopics().filter(function (t) { return t.account_ids.indexOf(accId) >= 0; }); }
+async function loadAiTopics() {
+  if (!isAi() || DEMO) return;
+  const ord = api('/api/accounts/topics/order/').then(function (r) { return r.account_ids || []; }, function () { return []; });
+  try { state.ai.topics = await api('/api/accounts/topics/'); }
+  catch (e) { state.ai.topics = []; toast('Не загрузился список: ' + (e.message || e)); }
+  state.ai.order = await ord;
+}
+/* Аккаунты темы без фильтра площадок — для счётчиков на чипах. */
+function aiInTopic() {
+  let list = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
+  if (state.ai.topic !== 'all') {
+    const t = aiTopic(state.ai.topic);
+    const ids = t ? t.account_ids : [];
+    list = list.filter(function (a) { return ids.indexOf(a.id) >= 0; });
+  }
+  if (state.q.trim()) {
+    const q = state.q.trim().toLowerCase();
+    list = list.filter(function (a) {
+      return a.username.toLowerCase().indexOf(q) >= 0 || a.display.toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  return list;
+}
+function aiFiltered() {
+  let list = aiInTopic();
+  if (state.ai.plats.length) list = list.filter(function (a) { return state.ai.plats.indexOf(a.platform) >= 0; });
+  return list;
+}
+function aiVisible() { return aiFiltered().sort(aiCmp()); }
+/* Ручной порядок (перетаскивание) — общий для всей ветки; кого в нём нет —
+   в конце, по просмотрам. */
+function aiCmp() {
+  const rank = {};
+  (state.ai.order || []).forEach(function (id, i) { rank[id] = i; });
+  return function (a, b) {
+    const ra = rank[a.id], rb = rank[b.id];
+    if (ra != null && rb != null) return ra - rb;
+    if (ra != null) return -1;
+    if (rb != null) return 1;
+    return (b.views || 0) - (a.views || 0);
+  };
+}
+function aiTopicCount(t) {
+  if (t === 'all') return ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; }).length;
+  return t.account_ids.filter(function (id) {
+    return ACCOUNTS.some(function (a) { return a.id === id && !a.archived && !a.banned; });
+  }).length;
+}
+function aiTopicBtn(t, cls) {
+  const all = t === 'all';
+  const on = String(state.ai.topic) === (all ? 'all' : String(t.id));
+  const name = all ? aiW().all : t.name;
+  if (cls === 'chip') {
+    return '<button class="ai-chip' + (on ? ' on' : '') + '" data-act="ai-topic" data-v="' + (all ? 'all' : t.id) + '" aria-pressed="' + on + '">' +
+      (all ? '' : '<span aria-hidden="true">' + esc(t.emoji || '') + '</span>') + esc(name) +
+      '<span class="n">' + aiTopicCount(t) + '</span></button>';
+  }
+  return '<button class="rail-item ' + (on ? 'on' : '') + '" data-act="ai-topic" data-v="' + (all ? 'all' : t.id) + '" aria-pressed="' + on + '">' +
+    (all ? '<span style="display:flex;color:var(--ink-3)">' + ic('grid', 12) + '</span>'
+         : '<span class="dot" style="background:' + esc(t.color) + '"></span>') +
+    '<span class="grow trunc" style="text-align:left">' + (all ? '' : '<span aria-hidden="true">' + esc(t.emoji || '') + '</span> ') + esc(name) + '</span>' +
+    '<span class="mono" style="font-size:11px;color:var(--ink-3)">' + aiTopicCount(t) + '</span></button>';
+}
+function aiRail() {
+  const nav = [['accounts','users','Аккаунты'], ['analytics','chart','Аналитика'], ['tv','tv','Эфир TV'], ['settings','gear','Настройки']];
+  return '<div class="rail">' +
+    '<div class="nav">' + nav.map(function (n) {
+      const on = state.route === n[0] || (n[0] === 'accounts' && state.route === 'detail');
+      return '<button class="' + (on ? 'on' : '') + '" data-act="nav" data-v="' + n[0] + '">' +
+        '<span style="display:flex">' + ic(n[1]) + '</span><span class="grow">' + n[2] + '</span></button>';
+    }).join('') + '</div>' +
+    '<div class="rail-sec">' +
+      '<div class="hd"><span class="lbl">' + aiW().many + '</span></div>' +
+      (state.ai.topics === null && !state.booting
+        ? '<div style="font-size:12px;color:var(--ink-3);padding:6px 10px">загрузка…</div>'
+        : aiTopicBtn('all') + aiTopics().map(function (t) { return aiTopicBtn(t); }).join('')) +
+    '</div></div>';
+}
+function aiCard(a, topicId) {
+  const tps = aiTopicsOf(a.id);
+  const nick = (a.username.indexOf('r/') === 0 ? '' : '@') + a.username;
+  return '<div class="ai-card" style="--pl:' + platHue(a.platform) + '" data-act="open" data-v="' + a.id + '" tabindex="0" role="button" ' +
+      'aria-label="Открыть ' + esc(nick) + ', ' + esc(plabel(a.platform)) + '. Переставить: Alt и стрелки" title="Перетащите, чтобы переставить">' +
+    (topicId
+      ? '<button class="ai-x" data-act="ai-remove" data-v="' + topicId + '|' + a.id + '" title="Убрать ' + aiW().from + ' ' + aiW().gen + '" aria-label="Убрать ' + esc(nick) + ' ' + aiW().from + ' ' + aiW().gen + '">' + ic('close', 12) + '</button>'
+      : '') +
+    '<div class="ai-ava">' + avatarEl(a, 96, 48) + pmark(a.platform) + '</div>' +
+    '<div class="ai-nick trunc" title="' + esc(nick) + '">' + esc(nick) + '</div>' +
+    '<div class="ai-meta"><span class="mono">' + comp(a.followers) + '</span><span>подписчиков</span></div>' +
+    '<div class="ai-dots" aria-label="' + aiW().many + ': ' + esc(tps.map(function (t) { return t.name; }).join(', ')) + '">' +
+      tps.map(function (t) { return '<i style="background:' + esc(t.color) + '" title="' + esc(t.name) + '"></i>'; }).join('') +
+    '</div></div>';
+}
+function screenAi() {
+  const t = state.ai.topic === 'all' ? null : aiTopic(state.ai.topic);
+  if (state.ai.topic !== 'all' && !t && state.ai.topics) state.ai.topic = 'all';
+  const base = aiInTopic();
+  const list = aiVisible();
+  const k = totals(list);
+  const plats = '<div class="ai-plats" role="group" aria-label="Площадки">' +
+    '<button class="ai-chip' + (state.ai.plats.length ? '' : ' on') + '" data-act="ai-plat" data-v="" aria-pressed="' + !state.ai.plats.length + '">Все<span class="n">' + base.length + '</span></button>' +
+    AI_BOARDS[DOMAIN].plats.map(function (pv) {
+      const on = state.ai.plats.indexOf(pv) >= 0;
+      const n = base.filter(function (a) { return a.platform === pv; }).length;
+      return '<button class="ai-chip' + (on ? ' on' : '') + '" data-act="ai-plat" data-v="' + pv + '" aria-pressed="' + on + '">' +
+        pmark(pv) + esc(plabel(pv)) + '<span class="n">' + n + '</span></button>';
+    }).join('') + '</div>';
+  let body;
+  if (state.booting || state.ai.topics === null) {
+    body = '<div class="ai-grid" aria-busy="true">' + [0,1,2,3,4,5].map(function () {
+      return '<div class="ai-card" style="cursor:default"><span class="sk" style="width:96px;height:96px;border-radius:50%"></span>' +
+        '<span class="sk" style="height:12px;width:70%"></span></div>';
+    }).join('') + '</div>';
+  } else if (!list.length) {
+    body = '<div class="card ai-empty"><b>' + (base.length ? 'Нет аккаунтов на выбранных площадках' : (t ? aiW().inOne + ' «' + esc(t.name) + '» пока пусто' : aiW().inAll + ' пока нет аккаунтов')) + '</b>' +
+      (base.length ? 'Снимите фильтр площадок или выберите другие.' : 'Добавьте аккаунты — они останутся и в своих доменах.') +
+      (base.length ? '' : '<div style="margin-top:14px"><button class="btn pri" data-act="ai-pick-open">' + ic('plus', 13) + 'Добавить ' + aiW().prep + ' ' + aiW().acc + '</button></div>') +
+      '</div>';
+  } else if (effView() === 'table') {
+    // Таблица — как на «Аккаунтах»: сортировка по колонкам, страницы, выделение.
+    // Ручной порядок (перетаскивание) живёт только в карточках.
+    const tl = visible();
+    const pages = Math.max(1, Math.ceil(tl.length / state.pageSize));
+    if (state.page > pages) state.page = pages;
+    body = table(tl.slice((state.page - 1) * state.pageSize, state.page * state.pageSize), tl, pages);
+  } else {
+    body = '<div class="ai-grid">' + list.map(function (a) { return aiCard(a, t ? t.id : 0); }).join('') + '</div>';
+  }
+  return '<div class="main" style="--page-max:1720px">' +
+    '<div class="kpis k4">' +
+      // Суммы по аккаунтам ветки AI с учётом темы, площадок и поиска.
+      kpiCard('Подписчики', fmt(k.f), k.fd, null, false, k.f, 1, 'users') +
+      kpiCard('Просмотры', fmt(k.v), k.vd, null, true, k.v, 2, 'eye') +
+      kpiCard('Лайки', fmt(k.l), k.ld, null, true, k.l, 3, 'heart') +
+      kpiCard('Посты', fmt(k.p), k.pd, null, false, k.p, 4, 'rows') +
+    '</div>' +
+    '<div class="ai-topics-m" role="group" aria-label="' + aiW().many + '">' + aiTopicBtn('all', 'chip') +
+      aiTopics().map(function (x) { return aiTopicBtn(x, 'chip'); }).join('') + '</div>' +
+    '<div class="filters">' +
+      '<div class="field" style="width:190px">' + ic('search', 14) +
+        '<input id="q" placeholder="Фильтр по имени" aria-label="Фильтр по имени" value="' + esc(state.q) + '">' +
+      '</div>' + plats +
+      '<div class="grow"></div>' +
+      (effView() === 'table'
+        ? dd('sort') +
+          '<button class="btn ico ghost' + (state.dense ? ' on' : '') + '" data-act="dense" title="Плотность строк" aria-label="Плотность строк" aria-pressed="' + state.dense + '">' +
+            ic(state.dense ? 'rows' : 'sort', 14) + '</button>' +
+          '<button class="btn ico ghost" data-act="modal" data-v="cols" title="Колонки" aria-label="Настроить колонки">' + ic('cols', 14) + '</button>'
+        : '') +
+      (aiRefreshes() ? '<button class="btn" data-act="ai-refresh" title="Собрать свежую статистику по аккаунтам на экране">' + ic('refresh', 13) + 'Обновить</button>' : '') +
+      (aiCreates() ? '<button class="btn" data-act="modal" data-v="add">' + ic('plus', 13) + 'Новый аккаунт</button>' : '') +
+      '<button class="btn pri" data-act="ai-pick-open">' + ic('plus', 13) + 'Добавить ' + aiW().prep + ' ' + aiW().acc + '</button>' +
+    '</div>' + body +
+  '</div>';
+}
+/* ---- перетаскивание карточек (как в канбане) ----
+   Мышь: зажать и потянуть. Палец: подержать ~0,3 с и потянуть.
+   Клавиатура: Alt + ←/→ (↑/↓ — на ряд). Соседи плавно сдвигаются,
+   порядок сразу сохраняется на сервере для всех. */
+var aiDrag = null;   // var: paintBody смотрит на него ещё до этой строки
+var aiDragClickBlock = false;
+const aiReduceMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+
+/* Новый общий порядок: видимые карточки встают на места, которые они и
+   занимали в общем списке, — скрытые фильтром аккаунты остаются на своих. */
+function aiCommitOrder(visibleIds) {
+  const seq = ACCOUNTS.slice().sort(aiCmp()).map(function (a) { return a.id; });
+  const vis = {};
+  visibleIds.forEach(function (id) { vis[id] = true; });
+  let k = 0;
+  const next = seq.map(function (id) { return vis[id] ? visibleIds[k++] : id; });
+  if (next.join(',') === seq.join(',') && state.ai.order && state.ai.order.length) return;
+  const prev = state.ai.order;
+  state.ai.order = next;
+  apiSend('/api/accounts/topics/order/', { account_ids: next }, 'PUT')
+    .catch(function (err) {
+      state.ai.order = prev;
+      toast('Порядок не сохранился: ' + (err.message || err));
+      paintBody();
+    });
+}
+function aiGridIds(grid) {
+  return Array.prototype.map.call(grid.querySelectorAll(':scope > .ai-card[data-v]'), function (c) { return +c.dataset.v; });
+}
+function aiFlip(cards, before) {
+  if (aiReduceMotion.matches) return;
+  cards.forEach(function (c) {
+    const a = before.get(c);
+    if (!a) return;
+    const b = c.getBoundingClientRect();
+    const dx = a.left - b.left, dy = a.top - b.top;
+    if (!dx && !dy) return;
+    c.style.transition = 'none';
+    c.style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+    c.getBoundingClientRect();
+    c.style.transition = 'transform .2s cubic-bezier(.2,.8,.2,1)';
+    c.style.transform = '';
+    clearTimeout(c._flipT);
+    c._flipT = setTimeout(function () { c.style.transition = ''; }, 220);
+  });
+}
+function aiMoveCard(card, ref, after) {
+  const grid = card.parentNode;
+  const cards = Array.prototype.slice.call(grid.children);
+  const before = new Map(cards.map(function (c) { return [c, c.getBoundingClientRect()]; }));
+  grid.insertBefore(card, after ? ref.nextSibling : ref);
+  aiFlip(cards.filter(function (c) { return c !== card || !aiDrag; }), before);
+}
+function aiDragStart(x, y) {
+  const d = aiDrag;
+  if (!d.card.isConnected) { aiDrag = null; return; }
+  const r = d.card.getBoundingClientRect();
+  d.started = true;
+  d.offX = x - r.left; d.offY = y - r.top;
+  const g = d.card.cloneNode(true);
+  g.classList.add('ai-ghost');
+  g.removeAttribute('data-act'); g.removeAttribute('tabindex'); g.removeAttribute('id');
+  g.querySelectorAll('[data-act],[id]').forEach(function (n) { n.removeAttribute('data-act'); n.removeAttribute('id'); });
+  g.setAttribute('aria-hidden', 'true');
+  g.style.width = r.width + 'px'; g.style.height = r.height + 'px';
+  document.body.appendChild(g);
+  d.ghost = g;
+  d.card.classList.add('ai-drag-src');
+  document.body.classList.add('ai-dragging');
+  if (navigator.vibrate && d.touch) { try { navigator.vibrate(12); } catch (e) {} }
+  aiDragMove(x, y);
+  aiDragLoop();
+}
+function aiDragMove(x, y) {
+  const d = aiDrag;
+  d.x = x; d.y = y;
+  d.ghost.style.transform = 'translate(' + (x - d.offX) + 'px,' + (y - d.offY) + 'px) rotate(1.5deg) scale(1.04)';
+  // Ищем карточку по её конечному месту в сетке (offset* не видят transform),
+  // а не по тому, где она сейчас едет в анимации: иначе соседка, проезжая под
+  // курсором, «ловится» снова и карточки дёргаются туда-обратно.
+  const grid = d.card.parentNode, gr = grid.getBoundingClientRect();
+  const px = x - gr.left, py = y - gr.top;
+  let over = null;
+  for (let i = 0; i < grid.children.length; i++) {
+    const c = grid.children[i];
+    if (c === d.card) continue;
+    if (px >= c.offsetLeft && px < c.offsetLeft + c.offsetWidth && py >= c.offsetTop && py < c.offsetTop + c.offsetHeight) { over = c; break; }
+  }
+  if (!over) return;
+  const sibs = Array.prototype.slice.call(grid.children);
+  const from = sibs.indexOf(d.card), to = sibs.indexOf(over);
+  aiMoveCard(d.card, over, from < to);
+}
+/* Автопрокрутка у краёв, пока карточку держат. */
+function aiDragLoop() {
+  const d = aiDrag;
+  if (!d || !d.started) return;
+  const main = d.card.closest('.main');
+  const sc = main && main.scrollHeight > main.clientHeight + 2 ? main : (document.scrollingElement || document.documentElement);
+  const box = sc === main ? main.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+  const edge = 70;
+  let dy = 0;
+  if (d.y < box.top + edge) dy = -Math.ceil((box.top + edge - d.y) / 5);
+  else if (d.y > box.bottom - edge) dy = Math.ceil((d.y - (box.bottom - edge)) / 5);
+  if (dy) { sc.scrollTop += dy; aiDragMove(d.x, d.y); }
+  requestAnimationFrame(aiDragLoop);
+}
+function aiDragEnd(commit) {
+  const d = aiDrag;
+  aiDrag = null;
+  if (!d) return;
+  clearTimeout(d.timer);
+  if (!d.started) return;
+  d.ghost.remove();
+  d.card.classList.remove('ai-drag-src');
+  document.body.classList.remove('ai-dragging');
+  aiDragClickBlock = true;
+  setTimeout(function () { aiDragClickBlock = false; }, 60);
+  if (commit && d.card.parentNode) aiCommitOrder(aiGridIds(d.card.parentNode));
+  if (!commit || d.repaint) paintBody();
+}
+document.addEventListener('pointerdown', function (e) {
+  if (aiDrag || e.button !== 0 || !isAi()) return;
+  const card = e.target.closest('.ai-grid:not([aria-busy]) > .ai-card[data-v]');
+  if (!card || e.target.closest('.ai-x')) return;
+  aiDrag = { card: card, pid: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY,
+             touch: e.pointerType !== 'mouse', started: false };
+  if (aiDrag.touch) {
+    const d = aiDrag;
+    d.timer = setTimeout(function () { if (aiDrag === d && !d.started) aiDragStart(d.x, d.y); }, 300);
+  }
+});
+document.addEventListener('pointermove', function (e) {
+  const d = aiDrag;
+  if (!d || e.pointerId !== d.pid) return;
+  if (!d.started) {
+    const dist = Math.abs(e.clientX - d.x0) + Math.abs(e.clientY - d.y0);
+    d.x = e.clientX; d.y = e.clientY;
+    if (d.touch) { if (dist > 10) aiDragEnd(false); return; }   // это прокрутка, а не перенос
+    if (dist < 6) return;
+    aiDragStart(e.clientX, e.clientY);
+    if (!aiDrag) return;
+  }
+  aiDragMove(e.clientX, e.clientY);
+});
+document.addEventListener('pointerup', function (e) { if (aiDrag && e.pointerId === aiDrag.pid) aiDragEnd(true); });
+document.addEventListener('pointercancel', function (e) { if (aiDrag && e.pointerId === aiDrag.pid) aiDragEnd(aiDrag.started); });
+// Палец уже «взял» карточку — страница под ним не прокручивается.
+document.addEventListener('touchmove', function (e) { if (aiDrag && aiDrag.started) e.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', function (e) { if (aiDrag && aiDrag.touch) e.preventDefault(); });
+document.addEventListener('dragstart', function (e) { if (e.target.closest && e.target.closest('.ai-grid')) e.preventDefault(); });
+// После переноса отпущенная кнопка не должна открывать аккаунт.
+document.addEventListener('click', function (e) {
+  if (aiDragClickBlock) { aiDragClickBlock = false; e.stopPropagation(); e.preventDefault(); }
+}, true);
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && aiDrag && aiDrag.started) { aiDragEnd(false); return; }
+  if (!e.altKey || !isAi()) return;
+  const card = document.activeElement && document.activeElement.closest && document.activeElement.closest('.ai-grid > .ai-card[data-v]');
+  if (!card) return;
+  const grid = card.parentNode, cards = Array.prototype.slice.call(grid.children);
+  const i = cards.indexOf(card);
+  const cols = Math.max(1, Math.round(grid.clientWidth / (card.getBoundingClientRect().width + 14)));
+  const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -cols, ArrowDown: cols }[e.key];
+  if (!step) return;
+  e.preventDefault();
+  const j = Math.max(0, Math.min(cards.length - 1, i + step));
+  if (j === i) return;
+  aiMoveCard(card, cards[j], j > i);
+  card.focus();
+  aiCommitOrder(aiGridIds(grid));
+});
+/* ---- настройки: управление темами ---- */
+const AI_EMOJIS = ['⚽','🏀','🥊','🏋️','🏎️','🤖','🧠','💻','📱','🐱','🐶','🦊','🐾','📰','📈','💰','🎮','🎬','🎵','🍔','✈️','💄','👗','🚗','🔥','⭐','😂','❤️','🌍','🎓'];
+const AI_COLORS = ['#16A34A', '#7C3AED', '#EA580C', '#0EA5E9', '#DB2777', '#4B38B8', '#0F7080', '#A15C00', '#B0342A', '#8A857C'];
+function aiEmojiPicker(forId) {
+  return '<div class="ait-pick" role="group" aria-label="Выбор смайлика">' +
+    AI_EMOJIS.map(function (e) {
+      return '<button type="button" data-act="ait-emoji-pick" data-v="' + forId + '|' + e + '" aria-label="Смайлик ' + e + '">' + e + '</button>';
+    }).join('') +
+    '<div class="field">' + '<input id="ait-emo-own-' + forId + '" data-emo-for="' + forId + '" maxlength="8" placeholder="Свой смайлик" aria-label="Свой смайлик"></div>' +
+  '</div>';
+}
+function aiTopicsSettings() {
+  const ts = aiTopics();
+  const st = state.ai;
+  const rows = ts.map(function (t) {
+    const n = t.account_ids.length;
+    return '<div class="srow ait-row">' +
+      '<button type="button" class="ait-emo' + (st.emojiFor === t.id ? ' on' : '') + '" data-act="ait-emoji-open" data-v="' + t.id + '" ' +
+        'title="Сменить смайлик" aria-label="Смайлик ' + aiW().ofIt + ' ' + esc(t.name) + ': ' + esc(t.emoji || 'нет') + '. Сменить">' + esc(t.emoji || '·') + '</button>' +
+      '<div class="field ait-name"><input id="ait-name-' + t.id + '" data-topic-name="' + t.id + '" value="' + esc(st.drafts[t.id] != null ? st.drafts[t.id] : t.name) + '" maxlength="120" aria-label="Название ' + aiW().ofIt + '"></div>' +
+      '<div class="ait-cols" role="group" aria-label="Цвет ' + aiW().ofIt + '">' + AI_COLORS.map(function (c) {
+        const on = String(t.color).toLowerCase() === c.toLowerCase();
+        return '<button type="button" class="ait-col' + (on ? ' on' : '') + '" style="background:' + c + '" data-act="ait-color" data-v="' + t.id + '|' + c + '" aria-label="Цвет ' + c + '" aria-pressed="' + on + '"></button>';
+      }).join('') + '</div>' +
+      '<span class="ait-n mono">' + n + ' ' + plural(n, ['аккаунт', 'аккаунта', 'аккаунтов']) + '</span>' +
+      '<button type="button" class="btn sm ghost" data-act="ait-del" data-v="' + t.id + '" title="Удалить ' + aiW().acc + '" aria-label="Удалить ' + aiW().acc + ' ' + esc(t.name) + '" style="color:var(--neg)">' + ic('trash', 13) + '</button>' +
+      (st.emojiFor === t.id ? aiEmojiPicker(t.id) : '') +
+    '</div>';
+  }).join('');
+  const add = '<div class="srow ait-row">' +
+    '<button type="button" class="ait-emo' + (st.emojiFor === 'new' ? ' on' : '') + '" data-act="ait-emoji-open" data-v="new" title="Смайлик ' + aiW().fresh + '" aria-label="Смайлик ' + aiW().fresh + ': ' + esc(st.newEmoji) + '. Сменить">' + esc(st.newEmoji || '·') + '</button>' +
+    '<div class="field ait-name"><input id="ait-new-name" value="' + esc(st.newName) + '" maxlength="120" placeholder="' + aiW().ph + '" aria-label="Название ' + aiW().fresh + '"></div>' +
+    '<button type="button" class="btn pri" data-act="ait-add"' + (st.busy ? ' disabled' : '') + '>' + ic('plus', 13) + 'Добавить ' + aiW().acc + '</button>' +
+    (st.emojiFor === 'new' ? aiEmojiPicker('new') : '') +
+  '</div>';
+  return '<div class="sect"><div class="hd">' + ic('grid', 17) + '<h2>' + aiW().head + '</h2>' +
+      '<div class="grow"></div><span class="lbl">' + ts.length + ' ' + plural(ts.length, aiW().forms) + '</span></div>' +
+    '<div style="font-size:12px;color:var(--ink-3);margin:-4px 0 0">Название сохраняется, когда уходите из поля или жмёте Enter. Удаление ' + aiW().ofIt + ' не удаляет аккаунты.</div>' +
+    '<div class="card">' + (ts.length ? rows : '<div class="srow" style="color:var(--ink-3);font-size:12px">Тем пока нет — добавьте первую</div>') + add + '</div>' +
+  '</div>';
+}
+function aiReplaceTopic(row) {
+  delete state.ai.drafts[row.id];
+  state.ai.topics = aiTopics().map(function (t) { return t.id === row.id ? row : t; });
+}
+function aiTopicPatch(id, body, okMsg) {
+  return apiSend('/api/accounts/topics/' + id + '/', body, 'PATCH')
+    .then(function (row) { aiReplaceTopic(row); if (okMsg) toast(okMsg); })
+    .catch(function (err) { toast('Не сохранилось: ' + (err.message || err)); })
+    .finally(function () { paintBody(); });
+}
+function aiTopicCreate() {
+  const st = state.ai;
+  const inp = document.getElementById('ait-new-name');
+  if (inp) st.newName = inp.value;
+  const name = st.newName.trim();
+  if (!name) { toast('Введите название ' + aiW().ofIt); if (inp) inp.focus(); return; }
+  st.busy = true; paintBody();
+  apiSend('/api/accounts/topics/', { name: name, emoji: st.newEmoji, color: AI_COLORS[aiTopics().length % AI_COLORS.length] })
+    .then(function (row) {
+      state.ai.topics = aiTopics().concat([row]);
+      st.newName = ''; st.newEmoji = '✨'; st.emojiFor = null;
+      toast(aiW().title + ' «' + row.name + '» ' + aiW().added);
+    })
+    .catch(function (err) { toast('Не получилось: ' + (err.message || err)); })
+    .finally(function () { st.busy = false; paintBody(); });
+}
+function aiSetEmoji(forId, emoji) {
+  state.ai.emojiFor = null;
+  if (forId === 'new') { state.ai.newEmoji = emoji; paintBody(); return; }
+  aiTopicPatch(+forId, { emoji: emoji });
+}
+
+/* ---- окно «Добавить в тему» ---- */
+// В окне «Добавить в тему» — все аккаунты, которые ещё не лежат ни в одной теме:
+// аккаунт живёт в одной теме, повторно добавить его в другую отсюда нельзя.
+async function aiPickOpen() {
+  const first = aiTopics()[0];
+  state.ai.pick = { topicId: state.ai.topic !== 'all' ? state.ai.topic : (first ? first.id : 0), q: '', rows: null, busy: {} };
+  state.modal = 'aiPick';
+  paintOverlay();
+  try {
+    const rows = await api('/api/accounts/?include_hidden=1', { allDomains: true });
+    rows.sort(function (a, b) { return (b.view_count || 0) - (a.view_count || 0); });
+    if (state.ai.pick) state.ai.pick.rows = rows;
+  } catch (e) {
+    if (state.ai.pick) state.ai.pick.rows = [];
+    toast('Не загрузился список аккаунтов: ' + (e.message || e));
+  }
+  if (state.modal === 'aiPick') paintOverlay();
+}
+function modalAiPick() {
+  const p = state.ai.pick;
+  if (!p) return '';
+  const t = aiTopic(p.topicId);
+  const ids = t ? t.account_ids : [];
+  const q = p.q.trim().toLowerCase().replace(/^@/, '');
+  let rows = (p.rows || []).filter(function (r) {
+    // Уже разложенные по любым темам прячем; пока идёт запрос — строка остаётся с «…».
+    if (!p.busy[r.id] && aiTopics().some(function (x) { return x.account_ids.indexOf(r.id) >= 0; })) return false;
+    return !q || String(r.username).toLowerCase().indexOf(q) >= 0 || String(r.display_name || '').toLowerCase().indexOf(q) >= 0;
+  });
+  const total = rows.length;
+  rows = rows.slice(0, 60);
+  const topics = '<div class="ai-plats" role="group" aria-label="' + aiW().title + '">' + aiTopics().map(function (x) {
+    const on = String(x.id) === String(p.topicId);
+    return '<button class="ai-chip' + (on ? ' on' : '') + '" data-act="ai-pick-topic" data-v="' + x.id + '" aria-pressed="' + on + '">' +
+      '<span aria-hidden="true">' + esc(x.emoji || '') + '</span>' + esc(x.name) + '<span class="n">' + x.account_ids.length + '</span></button>';
+  }).join('') + '</div>';
+  const list = p.rows === null
+    ? '<div style="padding:16px;color:var(--ink-3);font-size:12px">Загружаем аккаунты…</div>'
+    : (!rows.length ? '<div style="padding:16px;color:var(--ink-3);font-size:12px">' + (q ? 'Ничего не нашлось' : 'Все аккаунты уже ' + aiW().sorted) + '</div>'
+      : rows.map(function (r) {
+          const busy = !!p.busy[r.id];
+          const a = { id: r.id, username: r.username };
+          return '<div class="ai-pick-row">' + avatarEl(a, 32, 16) +
+            '<div class="grow"><div class="u trunc">@' + esc(r.username) + '</div>' +
+            '<div class="d trunc">' + esc(plabel(r.platform)) + (r.domain_name ? ' · ' + esc(r.domain_name) : '') + ' · ' + comp(r.view_count || 0) + ' просм. · ' + comp(r.follower_count || 0) + ' подп.</div></div>' +
+            '<button class="btn sm pri" data-act="ai-pick-toggle" data-v="' + r.id + '"' + (busy ? ' disabled' : '') + '>' +
+              (busy ? '…' : ic('plus', 11) + 'Добавить') + '</button></div>';
+        }).join('') +
+        (total > rows.length ? '<div style="padding:8px;color:var(--ink-3);font-size:11px">Показаны первые 60 из ' + total + ' — уточните поиск</div>' : ''));
+  return modalShell('Добавить ' + aiW().prep + ' ' + aiW().acc + (t ? ' «' + esc(t.name) + '»' : ''),
+    topics +
+    '<div class="field" style="margin-top:12px">' + ic('search', 14) +
+      '<input id="aipq" placeholder="Ник или имя аккаунта" aria-label="Поиск аккаунта" value="' + esc(p.q) + '" autocomplete="off"></div>' +
+    '<div style="font-size:11px;color:var(--ink-3);margin-top:8px">Аккаунты, которых ещё нет ' + aiW().none + '. Добавленный пропадёт из списка и вернётся, если убрать его ' + aiW().from + ' ' + aiW().gen + '. В своём домене он остаётся.</div>' +
+    '<div class="ai-pick-list">' + list + '</div>',
+    '<div class="grow"></div><button class="btn" data-act="close">Готово</button>', true);
+}
+async function aiToggle(topicId, accId, action) {
+  const res = await apiSend('/api/accounts/topics/' + topicId + '/accounts/', { account_ids: [accId], action: action });
+  state.ai.topics = aiTopics().map(function (t) { return t.id === res.id ? res : t; });
+  // Новый аккаунт в AI ещё не загружен — перечитываем список домена.
+  if (action === 'add' && !ACCOUNTS.some(function (a) { return a.id === accId; })) await reloadAccounts();
+}
+
 function screen() {
   if (state.domains && state.domains.unknown) return screenUnknownDomain();
   switch (state.route) {
     case 'detail':    return screenDetail();
     case 'analytics': return screenAnalytics();
     case 'settings':  return screenSettings();
-    default:          return screenAccounts();
+    default:          return isAi() ? screenAi() : screenAccounts();
   }
 }
 /* ============================================================
@@ -3701,13 +4687,15 @@ function screen() {
 function modalsHtml() {
   return (state.modal === 'refreshAll' ? modalRefreshAll() : '') +
     (state.modal === 'add'      ? modalAdd()      : '') +
+    (state.modal === 'addResult' ? modalAddResult() : '') +
     (state.modal === 'edit'     ? modalEdit()     : '') +
     (state.modal === 'compare'  ? modalCompare()  : '') +
     (state.modal === 'cols'     ? modalCols()     : '') +
     (state.modal === 'confirm'  ? modalConfirm()  : '') +
     (state.modal === 'catalog'  ? modalCatalog()  : '') +
     (state.modal === 'palette'  ? modalPalette()  : '') +
-    (state.modal === 'cookies'  ? modalCookies()  : '');
+    (state.modal === 'cookies'  ? modalCookies()  : '') +
+    (state.modal === 'aiPick'   ? modalAiPick()   : '');
 }
 
 let mountedModal = null;   // чтобы не проигрывать анимацию появления на каждом клике внутри окна
@@ -3751,6 +4739,8 @@ function restoreScroll(snap) {
   });
 }
 function paintBody() {
+  // Пока тянут карточку, не пересобираем экран — иначе она выскользнет из-под курсора.
+  if (aiDrag && aiDrag.started) { aiDrag.repaint = true; return; }
   const el = document.getElementById('body');
   if (!el) { render(); return; }
   const scroll = captureScroll();
@@ -3795,6 +4785,7 @@ function paintSelection() {
   }
   paintOverlay();
 }
+let menuPaintLock = false;
 function paintOverlay() {
   const el = document.getElementById('overlay');
   if (!el) { render(); return; }
@@ -3802,10 +4793,22 @@ function paintOverlay() {
   const at = document.activeElement && document.activeElement.selectionStart;
   const same = mountedModal === state.modal && state.modal !== null;
   el.className = same ? 'no-anim' : '';
+  // Перерисовка окна не должна сбрасывать прокрутку его списков
+  // (клик «Добавить» внизу списка выкидывал наверх).
+  const SCROLLERS = ['.scrim', '.modal-bd', '.ai-pick-list'];
+  const keep = same ? SCROLLERS.map(function (sel) { const n = el.querySelector(sel); return n ? n.scrollTop : 0; }) : null;
+  menuPaintLock = true;
   el.innerHTML = bulkBar() + modalsHtml() + menuLayer() + toastEl();
   mountedModal = state.modal;
   positionMenu();
+  menuPaintLock = false;
   restoreFocus(focus, at);
+  if (keep) {
+    const put = function () {
+      SCROLLERS.forEach(function (sel, i) { const n = el.querySelector(sel); if (n && keep[i]) n.scrollTop = keep[i]; });
+    };
+    put(); requestAnimationFrame(put);
+  }
 }
 function paintMain() { paintBody(); paintOverlay(); }
 
@@ -3894,10 +4897,10 @@ document.addEventListener('click', function (e) {
     case 'retry-api': state.apiError = null; state.booting = true; render(); bootLive(); return;
     case 'open':
       if (e.target.closest('[data-act="sel"]')) return;
-      state.route = 'detail'; state.detailId = +v; state.detailTab = 'overview';
+      state.route = 'detail'; state.detailId = +v; state.detailTab = 'posts';
       break;
     case 'tab':
-      state.detailTab = (v === 'posts' ? 'posts' : 'overview');
+      state.detailTab = 'posts';
       break;
     case 'post-view': state.postView = v; break;
     case 'theme':      toggleTheme(); break;
@@ -3926,8 +4929,16 @@ document.addEventListener('click', function (e) {
       const cut = v.indexOf('|');
       const key = v.slice(0, cut), id = v.slice(cut + 1);
       const sel = state.f[key];
-      const at = sel.indexOf(id);
-      if (at >= 0) sel.splice(at, 1); else sel.push(id);
+      if (id === FILTER_ALL_ID) {
+        if (key === 'status') {
+          state.f.status = ['live', 'archived', 'banned'];
+        } else {
+          sel.length = 0;
+        }
+      } else {
+        const at = sel.indexOf(id);
+        if (at >= 0) sel.splice(at, 1); else sel.push(id);
+      }
       state.route = 'accounts'; state.page = 1; state.selected.clear();
       break;
     }
@@ -3949,6 +4960,14 @@ document.addEventListener('click', function (e) {
       }
       state.menu = null;
       applyMenu(key, v.slice(cut + 1));
+      // Подменю (домен / группа / …) — только оверлей. Полный render()
+      // пересобирает таблицу и ловит scroll-listener, из‑за чего меню
+      // мгновенно закрывается («моргание»).
+      if (state.menu) {
+        syncUrl();
+        paintOverlay();
+        return;
+      }
       break;
     }
     case 'run-tab':      state.runTab = v; if (v === 'schedule') loadSchedule(); break;
@@ -4024,12 +5043,57 @@ document.addEventListener('click', function (e) {
       if (state.sched) state.sched.skip_recent_hours = +v;
       break;
     case 'sched-save':  A.saveSchedule(collectSchedule()); state.modal = null; break;
+    case 'add-mode': {
+      const el = document.getElementById('addlist');
+      if (el) state.add.text = el.value;
+      state.add.mode = v;
+      break;
+    }
+    case 'add-remove': {
+      const el = document.getElementById('addlist');
+      if (el) state.add.text = el.value;
+      if (!(state.add.text || '').trim()) { toast('Вставьте хотя бы одну ссылку или @имя'); return; }
+      A.removeFromBoard(state.add.text, state.add.platform);
+      state.modal = null;
+      break;
+    }
     case 'add-save': {
       const el = document.getElementById('addlist');
       if (el) state.add.text = el.value;
-      A.addAccounts(state.add.text, addExtra(), state.add.platform);
+      const miss = missingRequiredLabels(state.add);
+      if (miss.length) {
+        toast('Укажите: ' + miss.join(', '));
+        return;
+      }
+      if (!(state.add.text || '').trim()) {
+        toast('Добавьте хотя бы одну ссылку или @имя');
+        return;
+      }
+      if (aiCreates() && !state.add.standId) { toast('Выберите, куда добавить'); return; }
+      // Закрываем форму ДО запуска: итог может сразу открыть окно «Что не добавилось».
       state.modal = null;
+      state.addResult = null;
+      if (aiCreates()) A.addToStand(state.add.text, addExtra(), state.add.platform, state.add.standId);
+      else A.addAccounts(state.add.text, addExtra(), state.add.platform);
       break;
+    }
+    case 'addres-retry': {
+      // Назад в форму с теми же метками — только проблемные ссылки, чтобы поправить их.
+      const r = state.addResult;
+      state.add.text = (r && r.retry) || '';
+      state.addResult = null;
+      state.modal = 'add';
+      break;
+    }
+    case 'addres-copy': {
+      const txt = state.addResult ? addResultText(state.addResult) : '';
+      const done = function () { toast('Список скопирован'); };
+      const fail = function () { toast('Не вышло скопировать — выделите текст в окне вручную'); };
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fail);
+        else fail();
+      } catch (err) { fail(); }
+      return;
     }
     case 'dense':      state.dense = !state.dense; break;
     case 'cols-reset': state.cols = DEFAULT_COLS.slice(); break;
@@ -4106,6 +5170,11 @@ document.addEventListener('click', function (e) {
     }
     case 'edit-save': {
       if (!state.edit) break;
+      const miss = missingRequiredLabels(state.edit);
+      if (miss.length) {
+        toast('Укажите: ' + miss.join(', '));
+        return;
+      }
       A.saveEdit(state.edit);
       return;
     }
@@ -4116,6 +5185,10 @@ document.addEventListener('click', function (e) {
       if (v === 'add') {
         state.add = { text: '', platform: '', domainId: addDefaultDomainId(),
                       profileId: 0, ownerId: 0, groupId: 0, countryId: 0 };
+        if (aiCreates()) {
+          const first = aiTopics()[0];
+          state.add.standId = state.ai.topic !== 'all' ? +state.ai.topic : (first ? first.id : 0);
+        }
       }
       break;
     // Кнопка в шапке открывает центр обновления. Запуск прогона —
@@ -4143,7 +5216,12 @@ document.addEventListener('click', function (e) {
       break;
     case 'run-report':
       if (DEMO || !LIVE) { toast('Демо-режим: отчёта нет'); return; }
-      window.open(API_BASE + '/api/accounts/refresh-all-report/', '_blank');
+      if (state.run.source === 'refresh_all') {
+        window.open(API_BASE + '/api/accounts/refresh-all-report/', '_blank');
+        return;
+      }
+      if (state.run.hasReport === false) { toast('Отчёт по последнему прогону ещё не сформирован'); return; }
+      window.open(API_BASE + '/api/accounts/auto-refresh-report/', '_blank');
       return;
     case 'scrape-reload':
       loadScrapeBackend(true);
@@ -4233,7 +5311,7 @@ document.addEventListener('click', function (e) {
       const it = PALETTE_ITEMS[+v];
       if (!it) break;
       if (it.kind === 'a') it.d.go();
-      else { state.route = 'detail'; state.detailId = it.d.id; state.detailTab = 'overview'; state.modal = null; }
+      else { state.route = 'detail'; state.detailId = it.d.id; state.detailTab = 'posts'; state.modal = null; }
       break;
     }
     case 'run-pause':
@@ -4241,10 +5319,103 @@ document.addEventListener('click', function (e) {
       if (LIVE && !DEMO) { toast('В живом режиме используйте «Остановить»'); return; }
       state.run.on = false; clearInterval(state.run.timer); toast('Прогон поставлен на паузу'); return;
     case 'run-stop':
-      if (LIVE && !DEMO) { state.modal = null; A.refreshAllStop(); return; }
+      // Полоса сверху показывает и автообновление, и ручной сбор выбранных, и полный
+      // прогон. Раньше кнопка всегда слала стоп полного прогона — для остальных
+      // сервер отвечал «не запущен», и ничего не останавливалось.
+      if (LIVE && !DEMO) {
+        state.modal = null;
+        const stop = state.run.source === 'refresh_all' ? A.refreshAllStop() : A.autoStop();
+        Promise.resolve(stop).then(function () { setTimeout(pollRun, 1500); });
+        return;
+      }
       state.run.on = false; state.modal = null; clearInterval(state.run.timer); toast('Прогон остановлен'); return;
     case 'save':      state.modal = null; toast(v); return;
     case 'toast':     toast(v); return;
+    case 'ai-topic': state.ai.topic = v; state.page = 1; break;
+    case 'ai-plat': {
+      if (!v) state.ai.plats = [];
+      else {
+        const i = state.ai.plats.indexOf(v);
+        if (i >= 0) state.ai.plats.splice(i, 1); else state.ai.plats.push(v);
+      }
+      break;
+    }
+    case 'ai-pick-open': aiPickOpen(); return;
+    case 'ai-refresh': {
+      // Только то, что на экране: выбранный стенд, площадки и поиск.
+      const ids = aiVisible().map(function (a) { return a.id; });
+      if (!ids.length) { toast('Нечего обновлять: на экране нет аккаунтов'); return; }
+      if (state.run.on) { toast('Сейчас уже идёт обновление — дождитесь конца или остановите его'); return; }
+      const t = state.ai.topic === 'all' ? null : aiTopic(state.ai.topic);
+      const n = ids.length;
+      askConfirm({
+        title: 'Обновить статистику', ok: 'Обновить',
+        text: 'Собрать свежие цифры по ' + n + ' ' + plural(n, ['аккаунту', 'аккаунтам', 'аккаунтам']) +
+          (t ? ' ' + aiW().inOne.toLowerCase() + ' «' + esc(t.name) + '»' : ' ' + aiW().inAll.toLowerCase()) +
+          '. Сбор идёт в фоне, ход виден в полосе сверху, там же его можно остановить.',
+        note: 'Это настоящий сбор с площадок. Аккаунты, обновлённые совсем недавно, пропускаются.',
+        run: function () { Promise.resolve(A.bulkRefresh(ids)).then(function () { setTimeout(pollRun, 1500); }); },
+      });
+      return;
+    }
+    case 'ait-emoji-open': {
+      const k = v === 'new' ? 'new' : +v;
+      state.ai.emojiFor = state.ai.emojiFor === k ? null : k;
+      const ni = document.getElementById('ait-new-name'); if (ni) state.ai.newName = ni.value;
+      paintBody(); return;
+    }
+    case 'ait-emoji-pick': {
+      const i = String(v).indexOf('|');
+      aiSetEmoji(String(v).slice(0, i), String(v).slice(i + 1)); return;
+    }
+    case 'ait-color': {
+      const parts = String(v).split('|');
+      aiTopicPatch(+parts[0], { color: parts[1] }); return;
+    }
+    case 'ait-add': aiTopicCreate(); return;
+    case 'ait-del': {
+      const t = aiTopic(v); if (!t) return;
+      const n = t.account_ids.length;
+      askConfirm({
+        title: 'Удалить ' + aiW().acc + ' «' + esc(t.name) + '»?',
+        text: n ? aiW().inOne + ' ' + n + ' ' + plural(n, ['аккаунт', 'аккаунта', 'аккаунтов']) + '. Сами аккаунты не удалятся: они останутся в своих доменах и ' + aiW().others + '.'
+                : aiW().empty,
+        ok: 'Удалить', danger: true,
+        run: function () {
+          apiSend('/api/accounts/topics/' + t.id + '/', undefined, 'DELETE')
+            .then(function () {
+              state.ai.topics = aiTopics().filter(function (x) { return x.id !== t.id; });
+              if (String(state.ai.topic) === String(t.id)) state.ai.topic = 'all';
+              toast(aiW().title + ' «' + t.name + '» ' + aiW().removed);
+            })
+            .catch(function (err) { toast('Не получилось: ' + (err.message || err)); })
+            .finally(function () { paintBody(); });
+        },
+      });
+      return;
+    }
+    case 'ai-pick-topic': if (state.ai.pick) state.ai.pick.topicId = +v; paintOverlay(); return;
+    case 'ai-pick-toggle': {
+      const p = state.ai.pick; if (!p) return;
+      const id = +v, t = aiTopic(p.topicId); if (!t) return;
+      if (p.busy[id] || aiTopicsOf(id).length) return;
+      const row = (p.rows || []).filter(function (r) { return r.id === id; })[0];
+      p.busy[id] = true; paintOverlay();
+      aiToggle(t.id, id, 'add')
+        .then(function () { toast('@' + (row ? row.username : id) + ' добавлен ' + aiW().prep + ' «' + t.name + '»'); })
+        .catch(function (err) { toast('Не получилось: ' + (err.message || err)); })
+        .finally(function () { if (state.ai.pick) delete state.ai.pick.busy[id]; paintOverlay(); paintBody(); });
+      return;
+    }
+    case 'ai-remove': {
+      const parts = String(v).split('|'), t = aiTopic(parts[0]), id = +parts[1];
+      const a = ACCOUNTS.filter(function (x) { return x.id === id; })[0];
+      aiToggle(+parts[0], id, 'remove')
+        .then(function () { toast('@' + (a ? a.username : id) + ' убран ' + aiW().from + ' ' + aiW().gen + ' «' + (t ? t.name : '') + '»'); })
+        .catch(function (err) { toast('Не получилось: ' + (err.message || err)); })
+        .finally(function () { paintBody(); });
+      return;
+    }
     case 'f-reset':
       state.q = '';
       FILTERS.forEach(function (c) { state.f[c.k] = []; });
@@ -4263,19 +5434,49 @@ document.addEventListener('click', function (e) {
 
 /* Действия, которым хватает верхнего слоя (модалки, меню, панель выделения) */
 const OVERLAY_ACTS = new Set([
-  'menu', 'modal', 'close', 'scrim', 'run-tab', 'start-all', 'palette',
+  'menu', 'modal', 'close', 'scrim', 'run-tab', 'start-all', 'palette', 'add-mode',
   'sched-bool', 'sched-int', 'sched-skip', 'sched-mode', 'sched-time',
   'cat-new', 'cat-edit', 'cat-del', 'cat-color', 'catalog-cancel',
-  'edit-open',
+  'edit-open', 'addres-retry',
 ]);
 /* Действия, меняющие список и рельс, но не шапку */
 const MAIN_ACTS = new Set([
-  'sel', 'sel-page', 'page', 'sort', 'dense', 'col', 'cols-reset',
+  'sel', 'sel-page', 'page', 'sort', 'dense', 'col', 'cols-reset', 'ai-topic', 'ai-plat',
   'fpick', 'f-clear', 'f-reset', 'cat', 'tab', 'post-view',
 ]);
 
+/* Темы AI: название сохраняем при уходе из поля или по Enter. Сверяем с
+   сохранённым названием, а не полагаемся на change: после перерисовки поле
+   создаётся заново с черновиком, и браузер «изменения» уже не видит. */
+function aiSaveTopicName(el) {
+  const t = aiTopic(el.dataset.topicName), name = el.value.trim();
+  if (!t) return;
+  if (name === t.name) { delete state.ai.drafts[t.id]; return; }
+  if (!name) { toast('Название не может быть пустым'); delete state.ai.drafts[t.id]; el.value = t.name; return; }
+  aiTopicPatch(t.id, { name: name }, aiW().renamed);
+}
+document.addEventListener('focusout', function (e) {
+  const el = e.target;
+  if (el && el.isConnected && el.dataset && el.dataset.topicName) aiSaveTopicName(el);
+});
+document.addEventListener('change', function (e) {
+  const el = e.target;
+  if (!el || !el.dataset) return;
+  if (el.dataset.emoFor) {
+    const emo = el.value.trim();
+    if (emo) aiSetEmoji(el.dataset.emoFor, emo);
+  }
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key !== 'Enter' || !e.target) return;
+  if (e.target.id === 'ait-new-name') { e.preventDefault(); aiTopicCreate(); return; }
+  if (e.target.dataset && e.target.dataset.topicName) { e.preventDefault(); aiSaveTopicName(e.target); return; }
+  if (e.target.dataset && e.target.dataset.emoFor) { e.preventDefault(); e.target.blur(); }
+});
 let qTimer = null;
 document.addEventListener('input', function (e) {
+  if (e.target.id === 'ait-new-name') { state.ai.newName = e.target.value; return; }
+  if (e.target.dataset && e.target.dataset.topicName) { state.ai.drafts[e.target.dataset.topicName] = e.target.value; return; }
   if (e.target.id === 'q') {
     // Перерисовка списка на каждое нажатие ощущается как залипание,
     // поэтому ждём паузу в наборе. Само поле — живой DOM, оно не мигает.
@@ -4284,7 +5485,18 @@ document.addEventListener('input', function (e) {
     qTimer = setTimeout(function () { render(); }, 160);
     return;
   }
-  if (e.target.id === 'addlist') { state.add.text = e.target.value; return; }
+  if (e.target.id === 'aipq') {
+    if (state.ai.pick) state.ai.pick.q = e.target.value;
+    clearTimeout(qTimer);
+    qTimer = setTimeout(function () { paintOverlay(); }, 140);
+    return;
+  }
+  if (e.target.id === 'addlist') {
+    state.add.text = e.target.value;
+    clearTimeout(addPrevTimer);
+    addPrevTimer = setTimeout(paintAddPreview, 180);
+    return;
+  }
   if (e.target.id === 'catname') {
     if (state.catalog) state.catalog.name = e.target.value;
     return;
@@ -4293,10 +5505,14 @@ document.addEventListener('input', function (e) {
   if (e.target.id === 'pal')  { state.paletteQ = e.target.value; state.paletteI = 0; render(); }
 });
 
-/* Меню закрывается при прокрутке и ресайзе: оно позиционировано
-   по координатам кнопки, снятым в момент открытия. */
-window.addEventListener('scroll', function () {
-  if (state.menu) { state.menu = null; render(); }
+/* Меню закрывается при прокрутке страницы и ресайзе: оно позиционировано
+   по координатам кнопки. Скролл внутри самого .menu не трогаем — иначе
+   длинный список «Действий» закрывался бы при попытке долистать. */
+window.addEventListener('scroll', function (e) {
+  if (!state.menu || menuPaintLock) return;
+  const t = e.target;
+  if (t && t.nodeType === 1 && t.closest && t.closest('.menu')) return;
+  state.menu = null; render();
 }, true);
 
 document.addEventListener('keydown', function (e) {
@@ -4354,7 +5570,7 @@ document.addEventListener('keydown', function (e) {
       const it = PALETTE_ITEMS[state.paletteI];
       if (it) {
         if (it.kind === 'a') it.d.go();
-        else { state.route = 'detail'; state.detailId = it.d.id; state.detailTab = 'overview'; state.modal = null; }
+        else { state.route = 'detail'; state.detailId = it.d.id; state.detailTab = 'posts'; state.modal = null; }
         render();
       }
     }
@@ -4539,13 +5755,19 @@ function mapPost(p) {
     viewDelta: p.view_delta || 0,
     daysAgo: p.posted_at ? Math.round(minutesSince(p.posted_at) / 1440) : 0,
     hue: ((p.id || 0) * 47) % 360,
-    thumb: p.thumbnail_url || '', url: p.post_url || '',
+    thumb: p.thumbnail_url || '',
+    thumbMissing: !!p.thumbnail_missing,
+    url: p.post_url || '',
   };
 }
 
 const deltaLoaded = { 1: false, 7: false, 30: false };
+/* Запрос уже в пути: без этого флага быстрые щелчки по периоду в шапке шлют
+   второй такой же запрос, пока первый не вернулся. */
+const deltaPending = { 1: false, 7: false, 30: false };
 async function ensureDeltas(period) {
-  if (!LIVE || deltaLoaded[period]) return;
+  if (!LIVE || deltaLoaded[period] || deltaPending[period]) return;
+  deltaPending[period] = true;
   try {
     const rows = await api('/api/accounts/?' + ACC_QS + '&delta_period_days=' + period);
     const by = {}; rows.forEach(function (r) { by[r.id] = r; });
@@ -4553,6 +5775,7 @@ async function ensureDeltas(period) {
     deltaLoaded[period] = true;
     render();
   } catch (e) { deltaLoaded[period] = false; }
+  finally { deltaPending[period] = false; }
 }
 
 async function loadPosts(a) {
@@ -4647,6 +5870,8 @@ async function pollRun() {
     state.run.done  = s.processed_accounts || 0;
     state.run.cur   = s.current_account ? '@' + s.current_account : '—';
     state.run.failed = s.failed_accounts || 0;
+    state.run.source = s.active_pipeline === 'refresh_all' ? 'refresh_all' : (s.source || '');
+    state.run.hasReport = !!s.has_csv_report;
     // Начало последнего прогона нужно, чтобы отличить «обновился в нём»
     // от «не обновлялся»: отменённые от успешных иначе не отличить.
     const st = s.started_at ? Date.parse(s.started_at) : NaN;
@@ -4746,6 +5971,8 @@ function applyViewsAnchorsPayload(a) {
   });
   if (!Object.keys(m).length) { state.vc = null; return; }
   state.vc = {
+    // Прирост по аккаунтам за окно: по нему считается точный рост любого среза.
+    ag: (a.account_growth && Object.keys(a.account_growth).length) ? a.account_growth : null,
     start: start,
     end: end,
     // Новые якоря — в следующие 10:00; после 20:00 просто стоим на финише.
@@ -4789,14 +6016,64 @@ function vcTotal(key) {
   if (k >= ticks) return p.prev + p.growth;  // после 20:00 — заморозка
   return p.prev + p.cum[k];
 }
+/* Своя цифра, растущая в темпе домена. Якоря приходят по домену целиком, и на
+   срезе (фильтры рельса) или на приросте за период абсолют из них брать
+   нельзя — зато можно взять долю набега: домен за окно набрал (n − prev), и
+   набору достаётся эта величина пропорционально его весу abs/prev.
+     base — что показываем сейчас по базе (абсолют или прирост за период),
+     abs  — абсолют того же показателя по набору, нужен только ради веса.
+   Это разнесённый общий прирост, а не измеренный прирост набора: точные
+   цифры даёт перечитывание списка, барабан лишь держит их живыми. */
+/* Доля окна, уже пройденная: 0 в 10:00, 1 к 20:00. Берём из ряда просмотров —
+   именно он задаёт темп всему табло. */
+function vcProgress() {
+  const v = state.vc;
+  if (!v) return null;
+  const p = v.m.views;
+  if (!p || !p.growth) return null;
+  const n = vcTotal('views');
+  if (n === null) return null;
+  const d = (n - p.prev) / p.growth;
+  return d < 0 ? 0 : (d > 1 ? 1 : d);
+}
+/* Точный прирост набора за окно: складываем измеренный прирост ровно тех
+   аккаунтов, что сейчас на экране. Работает при любом сочетании фильтров —
+   по суммам домена или площадки сочетание не собрать, а по аккаунтам да.
+   null, пока у опорных точек нет разбивки: тогда остаётся vcApportion. */
+function vcSetGrowth(list) {
+  const ag = state.vc && state.vc.ag;
+  if (!ag) return null;
+  let sum = 0;
+  for (let i = 0; i < list.length; i++) sum += +ag[String(list[i].id)] || 0;
+  return sum;
+}
+function vcApportion(base, abs, key) {
+  const v = state.vc;
+  if (!v) return null;
+  const p = v.m[key || 'views'];
+  if (!p || !p.prev) return null;
+  const n = vcTotal(key);
+  return n === null ? null : Math.round(base + (n - p.prev) * (abs / p.prev));
+}
 /* Обновляем только сами цифры, не пересобирая слой. */
 function vcPaint() {
   if (!state.vc || state.route !== 'tv') return;
   const els = document.querySelectorAll('[data-vc]');
   for (let i = 0; i < els.length; i++) {
-    const n = vcTotal(els[i].dataset.vc);
+    const ds = els[i].dataset;
+    // data-vc-growth — измеренный прирост набора: ведём базу к нему по ходу окна.
+    // data-vc-base без него — срез или период без разбивки: разносим прирост домена.
+    let n;
+    if (ds.vcGrowth !== undefined) {
+      const pr = vcProgress();
+      n = pr === null ? null : Math.round(+ds.vcBase + (+ds.vcGrowth) * pr);
+    } else if (ds.vcBase !== undefined) {
+      n = vcApportion(+ds.vcBase, +ds.vcAbs, ds.vc);
+    } else {
+      n = vcTotal(ds.vc);
+    }
     if (n === null) continue;
-    vcSet(els[i], els[i].dataset.vcFmt === 'comp' ? comp(n) : fmt(n));
+    vcSet(els[i], ds.vcFmt === 'comp' ? comp(n) : fmt(n));
   }
 }
 
@@ -5076,12 +6353,26 @@ async function run(fn, okMsg, opts) {
 
 const A = {
   refreshOne: function (id) {
-    return run(function () { return apiSend('/api/accounts/' + id + '/refresh/'); },
-      'Аккаунт отправлен на обновление');
+    if (state.refreshing && state.refreshing[id]) return Promise.resolve(null);
+    setRefreshing(id, true);
+    render();
+    return run(
+      function () { return apiSend('/api/accounts/' + id + '/refresh/'); },
+      'Аккаунт обновлён'
+    ).finally(function () {
+      setRefreshing(id, false);
+      render();
+    });
   },
   bulkRefresh: function (ids) {
+    setRefreshing(ids, true);
+    render();
     return run(function () { return apiSend('/api/accounts/bulk-refresh/', { ids: ids }); },
-      ids.length + ' ' + plural(ids.length, ['аккаунт отправлен', 'аккаунта отправлены', 'аккаунтов отправлено']) + ' на обновление');
+      ids.length + ' ' + plural(ids.length, ['аккаунт отправлен', 'аккаунта отправлены', 'аккаунтов отправлено']) + ' на обновление'
+    ).finally(function () {
+      setRefreshing(ids, false);
+      render();
+    });
   },
   bulkUpdate: function (ids, fields, msg) {
     const body = Object.assign({ ids: ids }, fields);
@@ -5104,6 +6395,28 @@ const A = {
       const n = r.updated != null ? r.updated : ids.length;
       return 'Перенесено в ' + where + ': ' + n +
         (DOMAIN && DOMAIN !== DOMAIN_AGGREGATE && d && d.slug !== DOMAIN ? ' — здесь их больше нет' : '');
+    });
+  },
+  setCatalogField: function (ids, catalogKey, valueId) {
+    const meta = catalogOf(catalogKey);
+    if (!meta) { toast('Неизвестный каталог'); return Promise.resolve(null); }
+    const apiField = ({
+      profile: 'profile_id',
+      owner: 'owner_id',
+      group: 'group_id',
+      country: 'country_id',
+    })[catalogKey];
+    if (!apiField) { toast('Неизвестное поле'); return Promise.resolve(null); }
+    if (!valueId) { toast('Нужно выбрать значение'); return Promise.resolve(null); }
+    const row = catalogFind(catalogKey, valueId);
+    const where = row ? '«' + row.name + '»' : (meta.empty || 'значение').toLowerCase();
+    const body = { ids: ids };
+    body[apiField] = valueId;
+    return run(function () {
+      return apiSend('/api/accounts/bulk-update/', body);
+    }, function (r) {
+      const n = r.updated != null ? r.updated : ids.length;
+      return 'Назначено ' + where + ': ' + n;
     });
   },
   refreshAll: function () {
@@ -5133,11 +6446,68 @@ const A = {
       return r;
     }, 'Расписание сохранено', { reload: false });
   },
+  /* Завести с нуля и поставить на стенд. Домен и метки уже существующих
+     аккаунтов сервер не трогает. */
+  removeFromBoard: function (lines, fallbackPlatform) {
+    const items = parseAccountLines(lines, fallbackPlatform);
+    if (!items.length) { toast('Не разобрал ни одной строки'); return null; }
+    return run(async function () {
+      const r = await apiSend('/api/accounts/topics/remove-accounts/', { items: items });
+      await loadAiTopics();
+      return r;
+    }, function (r) {
+      const parts = [];
+      if (r.removed) parts.push('убрано ' + r.removed + (r.archived ? ' (в архив ' + r.archived + ')' : ''));
+      if (r.not_here.length) parts.push('не стояли ' + r.not_here.length + ' (' + r.not_here[0] + (r.not_here.length > 1 ? '…' : '') + ')');
+      if (r.not_found.length) parts.push('не нашлись ' + r.not_found.length + ' (' + r.not_found[0] + (r.not_found.length > 1 ? '…' : '') + ')');
+      const head = parts.join(', ') || 'готово';
+      return head.charAt(0).toUpperCase() + head.slice(1);
+    });
+  },
+  addToStand: function (lines, extra, fallbackPlatform, standId) {
+    const p = parseAccountInput(lines, fallbackPlatform);
+    const items = p.items;
+    if (!items.length) {
+      toast(showAddResult({ head: 'Ни одной строки не прочитано — ничего не добавлено', bad: p.bad, errors: [], elsewhere: [] }));
+      return null;
+    }
+    const stand = aiTopic(standId);
+    return run(async function () {
+      const r = await apiSend('/api/accounts/topics/' + standId + '/new-accounts/', Object.assign({
+        items: items.map(function (it) { return { username: it.username, platform: it.platform }; }),
+      }, extra || {}));
+      await loadAiTopics();
+      return r;
+    }, function (r) {
+      const parts = [];
+      if (r.created) parts.push('заведено ' + r.created);
+      if (r.placed) parts.push('поставлено ' + r.placed);
+      if (r.already) parts.push('уже ' + (stand ? 'на «' + stand.name + '»' : 'здесь') + ' ' + r.already);
+      if (r.elsewhere.length) parts.push('на другом стенде ' + r.elsewhere.length);
+      if (r.errors.length) parts.push('не добавилось ' + r.errors.length);
+      if (p.bad.length) parts.push('не прочитано ' + p.bad.length);
+      const head = parts.join(', ') || 'готово';
+      return showAddResult({
+        head: head.charAt(0).toUpperCase() + head.slice(1),
+        bad: p.bad,
+        errors: (r.errors || []).map(function (e) { return addServerRow(e, items, ': '); }),
+        elsewhere: (r.elsewhere || []).map(function (e) {
+          const row = addServerRow(e, items, ' — ');
+          row.w = 'стоит на «' + row.w + '»';
+          return row;
+        }),
+      });
+    });
+  },
   addAccounts: function (lines, extra, fallbackPlatform) {
     // Площадка из формы — запасной вариант для строк без ссылки. Раньше её
     // сюда не передавали, и всё без ссылки уходило в TikTok, что бы ни выбрали.
-    const items = parseAccountLines(lines, fallbackPlatform);
-    if (!items.length) { toast('Не разобрал ни одной строки'); return null; }
+    const p = parseAccountInput(lines, fallbackPlatform);
+    const items = p.items;
+    if (!items.length) {
+      toast(showAddResult({ head: 'Ни одной строки не прочитано — ничего не добавлено', bad: p.bad, errors: [], elsewhere: [] }));
+      return null;
+    }
     return run(async function () {
       let created = 0, updated = 0, same = 0, restored = 0;
       const errs = [];
@@ -5152,7 +6522,7 @@ const A = {
           else if (act === 'unchanged') same++;
           else if (act === 'unarchived' || act === 'unbanned' || act === 'restored') restored++;
           else created++; // старый ответ без import_action
-        } catch (e) { errs.push(it.username + ': ' + e.message); }
+        } catch (e) { errs.push({ n: plabel(it.platform), t: it.src || it.username, w: e.message }); }
       }
       return { created: created, updated: updated, same: same, restored: restored, errs: errs };
     }, function (r) {
@@ -5160,12 +6530,14 @@ const A = {
       if (r.created) parts.push('добавлено ' + r.created);
       if (r.updated) parts.push('обновлено ' + r.updated);
       if (r.restored) parts.push('возвращено ' + r.restored);
-      if (r.same && !r.created && !r.updated && !r.restored) parts.push('без изменений ' + r.same);
-      else if (r.same) parts.push('без изменений ' + r.same);
+      if (r.same) parts.push('без изменений ' + r.same);
+      if (r.errs.length) parts.push('не добавилось ' + r.errs.length);
+      if (p.bad.length) parts.push('не прочитано ' + p.bad.length);
       const head = parts.length ? parts.join(', ') : 'готово';
-      return r.errs.length
-        ? head + '; с ошибкой ' + r.errs.length + ' (' + r.errs[0] + ')'
-        : head.charAt(0).toUpperCase() + head.slice(1);
+      return showAddResult({
+        head: head.charAt(0).toUpperCase() + head.slice(1),
+        bad: p.bad, errors: r.errs, elsewhere: [],
+      });
     });
   },
   /* Сброс сессии площадки. Необратимо: куки удаляются, и без повторного
@@ -5214,7 +6586,7 @@ const A = {
       });
       lines.push(row.join(';'));
     });
-    downloadText('accounts-' + period + 'd.csv', '\uFEFF' + lines.join('\n'));
+    downloadText('accounts-' + (period === 0 ? 'all' : period + 'd') + '.csv', '\uFEFF' + lines.join('\n'));
     toast('Выгружено ' + list.length + ' аккаунтов');
   },
   exportSnapshot: function () {
@@ -5244,10 +6616,10 @@ const A = {
   reloadCatalogs: async function () {
     if (DEMO || !LIVE) return;
     const [profiles, owners, groups, countries] = await Promise.all([
-      api('/api/accounts/profiles/?include_hidden_profiles=1'),
-      api('/api/accounts/owners/'),
-      api('/api/accounts/groups/'),
-      api('/api/accounts/countries/'),
+      api('/api/accounts/profiles/?include_hidden_profiles=1', { allDomains: aiCreates() }),
+      api('/api/accounts/owners/', { allDomains: aiCreates() }),
+      api('/api/accounts/groups/', { allDomains: aiCreates() }),
+      api('/api/accounts/countries/', { allDomains: aiCreates() }),
     ]);
     applyCatalogRows(profiles, owners, groups, countries);
     // Кэш охвата расписания устарел — при следующем открытии подтянем заново.
@@ -5301,10 +6673,10 @@ const A = {
     const body = {
       ids: [edit.id],
       domain_id: edit.domainId || null,
-      profile_id: edit.profileId || null,
-      owner_id: edit.ownerId || null,
-      group_id: edit.groupId || null,
-      country_id: edit.countryId || null,
+      profile_id: edit.profileId,
+      owner_id: edit.ownerId,
+      group_id: edit.groupId,
+      country_id: edit.countryId,
     };
     return run(function () {
       return apiSend('/api/accounts/bulk-update/', body);
@@ -5356,43 +6728,106 @@ const HOST_PLATFORM = [
   ['facebook.com', 'facebook'], ['fb.com', 'facebook'], ['rumble.com', 'rumble'],
   ['reddit.com', 'reddit'],
 ];
+/* Старый интерфейс разбора — только прочитанные аккаунты. */
 function parseAccountLines(text, fallbackPlatform) {
-  const out = [];
-  String(text || '').split(/[\n,;]+/).forEach(function (raw) {
-    const line = raw.trim();
-    if (!line) return;
-    let platform = fallbackPlatform || 'tiktok';
-    let username = line;
-    // http(s) необязателен: в буфер часто попадает www.youtube.com/@имя
-    const m = line.match(/^(?:https?:\/\/)?([^/\s]+)(\/[^?\s#]*)?/i);
-    if (m && /[./]/.test(m[1])) {
-      const host = m[1].toLowerCase().replace(/^www\./, '');
-      const hit = HOST_PLATFORM.filter(function (h) {
-        return host === h[0] || host.endsWith('.' + h[0]);
-      })[0];
-      if (hit) platform = hit[1];
-      const path = m[2] || '';
-      const parts = path.split('/').filter(Boolean).map(function (p) {
-        try { return decodeURIComponent(p); } catch (e) { return p; }
+  return parseAccountInput(text, fallbackPlatform).items.map(function (it) {
+    return { username: it.username, platform: it.platform };
+  });
+}
+/* Похоже на ссылку: со схемой или «домен/путь». «@lotte.de.vries80» — не ссылка. */
+function isAccountUrl(c) {
+  return /^https?:\/\/\S/i.test(c) || /^(?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S*/i.test(c);
+}
+/* Разбор поля целиком. Строка может быть строкой таблицы: «@ник ссылка @ник
+   ссылка … Имя Фамилия ссылка БАН» — тогда берём КАЖДУЮ ссылку, а слова рядом
+   пропускаем. Раньше бралась только первая ссылка строки: из семи площадок
+   доходил один TikTok, остальные молча терялись. Всё, что прочитать нельзя,
+   возвращаем с номером строки и причиной, а не выбрасываем. */
+function parseAccountInput(text, fallbackPlatform) {
+  const items = [], bad = [], seen = {};
+  let dup = 0;
+  String(text || '').split(/\r?\n/).forEach(function (rawLine, li) {
+    const n = 'стр. ' + (li + 1);
+    rawLine.split(/[,;]+/).forEach(function (chunk) {
+      const line = chunk.trim();
+      if (!line) return;
+      const tokens = line.split(/\s+/).filter(Boolean);
+      const urls = tokens.filter(isAccountUrl);
+      let pieces;
+      if (urls.length) pieces = urls;
+      else if (tokens.length === 1 || tokens.every(function (t) { return t.charAt(0) === '@'; })) pieces = tokens;
+      else {
+        bad.push({ n: n, t: line, w: 'нет ссылки, а слов несколько — непонятно, какое из них имя. Нужна ссылка или одно @имя' });
+        return;
+      }
+      pieces.forEach(function (piece) {
+        const r = parseAccountPiece(piece, fallbackPlatform);
+        if (r.why) { bad.push({ n: n, t: piece, w: r.why }); return; }
+        const key = r.platform + ':' + r.username.toLowerCase();
+        if (seen[key]) { dup++; return; }
+        seen[key] = true;
+        items.push({ username: r.username, platform: r.platform, src: piece, n: n });
       });
-      if (platform === 'youtube') {
-        username = youtubeUsernameFromParts(parts, host);
-      } else if (platform === 'facebook') {
+    });
+  });
+  return { items: items, bad: bad, dup: dup };
+}
+/* Одна ссылка или одно имя → {username, platform} или {why}. */
+function parseAccountPiece(line, fallbackPlatform) {
+  let platform = fallbackPlatform || 'tiktok';
+  let username = line;
+  // http(s) необязателен: в буфер часто попадает www.youtube.com/@имя
+  const m = line.match(/^(?:https?:\/\/)?([^/\s]+)(\/[^?\s#]*)?/i);
+  if (m && /[./]/.test(m[1])) {
+    const host = m[1].toLowerCase().replace(/^(?:www|m|mobile)\./, '');
+    const hit = HOST_PLATFORM.filter(function (h) {
+      return host === h[0] || host.endsWith('.' + h[0]);
+    })[0];
+    if (hit) platform = hit[1];
+    else if (isAccountUrl(line)) return { why: 'сайт ' + host + ' не поддерживается' };
+    const parts = (m[2] || '').split('/').filter(Boolean).map(function (p) {
+      try { return decodeURIComponent(p); } catch (e) { return p; }
+    });
+    const p0 = (parts[0] || '').toLowerCase();
+    if (hit && !parts.length && !/[?&]id=\d/i.test(line)) return { why: 'в ссылке нет имени аккаунта' };
+    if (platform === 'youtube') {
+      if (host === 'youtu.be' || ['watch', 'shorts', 'live', 'playlist', 'embed'].indexOf(p0) >= 0) {
+        return { why: 'это ссылка на видео — нужна ссылка на канал (youtube.com/@имя)' };
+      }
+      username = youtubeUsernameFromParts(parts, host);
+    } else if (platform === 'facebook') {
+      if (p0 === 'share') {
+        return { why: 'ссылка «Поделиться» не показывает, чей профиль: откройте её и скопируйте адрес страницы из браузера' };
+      }
+      if (p0 === 'people' && /^\d{6,24}$/.test(parts[2] || '')) username = parts[2];
+      else if (['groups', 'watch', 'reel', 'videos', 'photo', 'photo.php', 'story.php', 'permalink.php', 'events', 'posts'].indexOf(p0) >= 0) {
+        return { why: 'это ссылка на пост или группу, а не на профиль' };
+      } else {
         // regex выше отрезает ?id=… — иначе username стал бы «profile.php»
         // и upsert не находил уже существующий числовой id в БД.
         username = facebookUsernameFromLine(line, parts);
-      } else if (parts.length) {
-        username = parts[parts.length - 1];
-        if (parts[0].charAt(0) === '@') username = parts[0];
-        if (parts[0].toLowerCase() === 'r' && parts[1]) username = parts[1];
-      } else {
-        username = host;
+        if (!username) return { why: 'в ссылке нет id профиля' };
       }
+    } else if (platform === 'tiktok' && (/^v[mt]\./.test(host) || p0 === 't')) {
+      return { why: 'короткая ссылка — откройте её и скопируйте адрес профиля' };
+    } else if (platform === 'instagram' && ['p', 'reel', 'reels', 'tv', 'explore'].indexOf(p0) >= 0) {
+      return { why: 'это ссылка на публикацию, а не на профиль' };
+    } else if (platform === 'x' && ['i', 'intent', 'home', 'search', 'hashtag'].indexOf(p0) >= 0) {
+      return { why: 'в ссылке нет имени аккаунта' };
+    } else if (parts.length) {
+      // Имя — первый сегмент: x.com/имя/status/…, t.me/имя/123, tiktok.com/@имя/video/….
+      // Служебные префиксы пропускаем: rumble.com/user/имя, reddit.com/r/имя.
+      username = parts[0];
+      const skip = { rumble: ['user', 'c'], reddit: ['r', 'u', 'user'], telegram: ['s'], instagram: ['stories'] }[platform] || [];
+      if (skip.indexOf(p0) >= 0 && parts[1]) username = parts[1];
+    } else {
+      username = host;
     }
-    username = String(username || '').replace(/^@/, '').replace(/[?#].*$/, '').trim();
-    if (username) out.push({ username: username, platform: platform });
-  });
-  return out;
+  }
+  username = String(username || '').replace(/^@/, '').replace(/[?#].*$/, '').trim();
+  if (!username) return { why: 'не нашёл имя аккаунта' };
+  if (/\s/.test(username) || username.length > 100) return { why: 'не похоже на имя аккаунта' };
+  return { username: username, platform: platform };
 }
 /* /@handle, /@handle/videos, /channel/UC…, /c/name, /user/name — не брать
    последний сегмент вслепую (иначе videos/about затирают кириллический @). */
@@ -5487,10 +6922,11 @@ async function bootLive() {
   }
   try {
     const settled = await Promise.all([
-      api('/api/accounts/profiles/?include_hidden_profiles=1'),
-      api('/api/accounts/owners/'),
-      api('/api/accounts/groups/'),
-      api('/api/accounts/countries/'),
+      // У «Стендов» своих справочников нет: для формы берём общие.
+      api('/api/accounts/profiles/?include_hidden_profiles=1', { allDomains: aiCreates() }),
+      api('/api/accounts/owners/', { allDomains: aiCreates() }),
+      api('/api/accounts/groups/', { allDomains: aiCreates() }),
+      api('/api/accounts/countries/', { allDomains: aiCreates() }),
       api('/api/accounts/?' + ACC_QS + '&delta_period_days=' + state.period),
       api('/api/accounts/domains/').catch(function () { return null; }),
       api('/api/accounts/views-anchors/').catch(function () { return null; }),
@@ -5501,6 +6937,7 @@ async function bootLive() {
     ACCOUNTS.length = 0;  rows.forEach(function (r) { ACCOUNTS.push(mapAccount(r)); });
     applyDomainsPayload(domainsPayload);
     applyViewsAnchorsPayload(anchorsPayload);
+    if (isAi()) await loadAiTopics();
 
     deltaLoaded[state.period] = true;
     LIVE = true;

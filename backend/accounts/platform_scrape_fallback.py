@@ -48,7 +48,7 @@ def platforms_with_generic_fallback() -> frozenset[str]:
 
 
 def is_generic_platform_fallback_trigger_error(exc: BaseException) -> bool:
-    """Недоступный профиль — немедленный fallback; иначе порог ошибок в batch."""
+    """Недоступный профиль — точечный повтор через Apify по этому аккаунту."""
     return is_profile_unavailable_error(str(exc))
 
 
@@ -69,8 +69,12 @@ class PlatformBatchFallback:
     Один прогон bulk / refresh_all / автообновление.
 
     Основной способ — ScrapeBackendConfig.<platform>_backend.
-    При fallback и primary Playwright: после недоступного профиля или
-    GENERIC_ERROR_THRESHOLD новых ошибок остальные аккаунты платформы идут через Apify.
+
+    При fallback и primary Playwright переключение всей платформы на Apify до
+    конца прогона делается только по признаку поломки самого Playwright —
+    GENERIC_ERROR_THRESHOLD новых ошибок подряд. Недоступный профиль на это не
+    влияет: он про один аккаунт, и повтор через Apify идёт точечно, по нему
+    одному (should_retry_via_apify), остальные продолжают через Playwright.
     """
 
     def __init__(
@@ -177,7 +181,15 @@ class PlatformBatchFallback:
         if account.platform != self.platform:
             return False
         if is_profile_unavailable_error(str(exc)):
-            return self._try_activate(str(exc), shutdown_playwright=True)
+            # «Профиль недоступен» — состояние одного аккаунта (удалён, закрыт,
+            # переименован), а не поломка Playwright. Раньше одна такая ошибка
+            # переводила на Apify всю платформу до конца прогона и гасила
+            # worker: 29.09 после первого же недоступного профиля остаток
+            # Instagram ушёл в Apify и упёрся в его лимит (26 ошибок из 28).
+            # Теперь повтор идёт только по этому аккаунту — см.
+            # should_retry_via_apify, — а остальные продолжают через Playwright.
+            # В счётчик обычных ошибок это тоже не идёт: платформа-то жива.
+            return False
         if account.pk and account.pk not in self._prior_error_ids:
             with self._lock:
                 if self._switch_consumed:
@@ -228,12 +240,15 @@ def retry_platform_via_apify_after_playwright_failure(
         return None
     if batch_ctx is None or parent_batch_id is None:
         return None
-    from accounts.scrape_backend import (
-        refresh_account_via_apify_sync,
-        should_use_apify_for_account,
-    )
+    from accounts.scrape_backend import refresh_account_via_apify_sync
 
-    if not should_use_apify_for_account(account, batch_ctx=batch_ctx):
+    # Раньше здесь спрашивали batch_ctx.use_apify(account) — «каким способом
+    # брать этот аккаунт». Пока недоступный профиль переключал всю платформу,
+    # ответ был «Apify», и повтор проходил. Теперь платформа не переключается,
+    # и тот же вопрос вернул бы «Playwright», заблокировав сам повтор. Здесь он
+    # и не к месту: решение «повторять» уже принято в should_retry_via_apify,
+    # остаётся проверить, что Apify вообще доступен.
+    if not apify_enabled():
         return None
 
     return refresh_account_via_apify_sync(

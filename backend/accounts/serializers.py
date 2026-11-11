@@ -224,6 +224,26 @@ class AccountSerializer(serializers.ModelSerializer):
             from platforms.youtube.profile_url import canonical_youtube_username_for_storage
 
             attrs["username"] = canonical_youtube_username_for_storage(str(username))
+
+        # Профиль / владелец / группа / страна обязательны при создании
+        # и при явной передаче в PATCH/PUT.
+        required_fks = (
+            ("profile", "профиль"),
+            ("owner", "владелец"),
+            ("group", "группа"),
+            ("country", "страна"),
+        )
+        errors = {}
+        if self.instance is None:
+            for field, label in required_fks:
+                if attrs.get(field) is None:
+                    errors[f"{field}_id"] = f"Укажите {label}"
+        else:
+            for field, label in required_fks:
+                if field in attrs and attrs.get(field) is None:
+                    errors[f"{field}_id"] = f"Поле «{label}» обязательно"
+        if errors:
+            raise serializers.ValidationError(errors)
         return attrs
 
     def _baseline_snap(self, obj):
@@ -231,6 +251,8 @@ class AccountSerializer(serializers.ModelSerializer):
         if snaps is not None:
             return snaps[0] if snaps else None
         period = int(self.context.get("account_delta_period_days", 1) or 1)
+        if period == 0:
+            return obj.snapshots.order_by("date").first()
         if period not in (1, 7, 30):
             period = 1
         today = timezone.localdate()
@@ -374,6 +396,8 @@ class PostSerializer(serializers.ModelSerializer):
         if snaps is not None:
             return snaps[0] if snaps else None
         period = int(self.context.get("account_delta_period_days", 1) or 1)
+        if period == 0:
+            return obj.snapshots.order_by("date").first()
         if period not in (1, 7, 30):
             period = 1
         today = timezone.localdate()

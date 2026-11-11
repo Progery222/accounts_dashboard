@@ -249,6 +249,11 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:5180",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    # Coolify / RDP: UI на localhost:9082 (docker-compose.coolify.yml)
+    "http://localhost:9082",
+    "http://127.0.0.1:9082",
+    "http://localhost:9080",
+    "http://127.0.0.1:9080",
     # Прод SPA (same-origin через nginx тоже шлёт Origin)
     "https://dashboard-new.atom-farm.com",
 ] + _extra_origins
@@ -284,6 +289,10 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:5180",
     "http://localhost:3000",
     "http://localhost:8000",
+    "http://localhost:9082",
+    "http://127.0.0.1:9082",
+    "http://localhost:9080",
+    "http://127.0.0.1:9080",
 ] + _csrf_extra
 if "https://*.trycloudflare.com" not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append("https://*.trycloudflare.com")
