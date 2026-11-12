@@ -798,6 +798,55 @@ body.ai-dragging, body.ai-dragging * { cursor: grabbing !important; }
 .ai-chip.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 .ai-chip .n { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--ink-3); }
 .ai-chip.on .n { color: var(--accent); }
+/* Стенды: поиск, площадки и кнопки — одной строкой; у площадки фирменный значок и число */
+.filters.one { flex-wrap: nowrap; }
+.filters.one > * { flex-shrink: 0; }
+.filters.one > .field { flex: 0 1 190px; min-width: 120px; }
+/* Узко (таблица добавляет сортировку и колонки): у «Убрать» и «Перенести» — только значок */
+@media (max-width: 1400px) { .filters.one .btn .t { display: none; } .filters.one .btn:has(.t) { width: 32px; padding: 0; justify-content: center; } }
+.filters.one .ai-plats { flex-wrap: nowrap; }
+@media (max-width: 1100px) { .filters.one, .filters.one .ai-plats { flex-wrap: wrap; } }
+.ai-chip.pl { padding: 0 10px 0 6px; }
+.ai-chip.pl .n { color: var(--ink-2); }
+.ai-chip.pl.on .n { color: var(--accent); }
+.bico { display: inline-flex; width: 20px; height: 20px; flex-shrink: 0; }
+.bico svg { width: 100%; height: 100%; display: block; }
+/* Карточки сводки открывают график */
+.kpi[data-act] { cursor: pointer; transition: border-color .12s, box-shadow .12s; }
+.kpi[data-act]:hover { border-color: var(--tone); box-shadow: var(--shadow-sm); }
+.kpi[data-act]:focus-visible { outline: 2px solid var(--tone); outline-offset: 2px; }
+.kpi .more { margin-left: auto; display: flex; color: var(--ink-3); opacity: 0; transition: opacity .12s; }
+.kpi[data-act]:hover .more, .kpi[data-act]:focus-visible .more { opacity: 1; color: var(--tone); }
+@media (hover: none) { .kpi .more { opacity: 1; } }
+.kc-top { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.kc-val { font-family: 'IBM Plex Mono', monospace; font-size: 28px; font-weight: 500; letter-spacing: -.03em; line-height: 1; }
+.kc-sub { font-size: 12px; color: var(--ink-3); margin-top: 6px; }
+.kc-plot { position: relative; height: 260px; margin: 18px 0 26px 58px; }
+.kc-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; overflow: visible; }
+.kc-y { position: absolute; left: -58px; width: 50px; text-align: right; transform: translateY(-50%);
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--ink-3); }
+.kc-x { position: absolute; top: 100%; margin-top: 8px; transform: translateX(-50%); white-space: nowrap;
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--ink-3); }
+.kc-x.first { transform: none; } .kc-x.last { transform: translateX(-100%); }
+.kc-cross { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line-2); display: none; pointer-events: none; }
+.kc-dot { position: absolute; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; border-radius: 50%; background: var(--tone);
+  box-shadow: 0 0 0 2px var(--surface); display: none; pointer-events: none; }
+.kc-tip { position: absolute; top: -8px; transform: translate(-50%, -100%); pointer-events: none; display: none; z-index: 2;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow-md);
+  padding: 6px 9px; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.kc-tip b { display: block; font-family: 'IBM Plex Mono', monospace; font-size: 13px; font-weight: 500; color: var(--ink); }
+.kc-empty { height: 260px; margin: 18px 0 8px; display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center;
+  color: var(--ink-3); font-size: 13px; text-align: center; }
+.kc-note { font-size: 11px; color: var(--ink-3); }
+/* «Убрать»: выбор аккаунтов стенда списком */
+.rm-row { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 8px; cursor: pointer; }
+.rm-row:hover { background: var(--chip); }
+.rm-row.on { background: var(--accent-row); }
+.rm-row .grow { min-width: 0; }
+.rm-row .u { font-size: 13px; font-weight: 500; }
+.rm-row .d { font-size: 11px; color: var(--ink-3); }
+.rm-or { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; }
+.rm-or::before, .rm-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .ai-chip:focus-visible, .ai-card:focus-visible, .ai-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ai-topics-m { display: none; gap: 6px; overflow-x: auto; margin-bottom: 12px; padding-bottom: 2px; }
 @media (max-width: 1080px) { .ai-topics-m { display: flex; } }
@@ -1479,6 +1528,30 @@ function applyBgPattern() {
   try { document.documentElement.style.setProperty('--bgfx', buildBgPattern()); } catch (e) {}
 }
 
+/* Фирменные значки площадок (плитка 24×24 в цветах самой площадки) — для
+   чипов-фильтров, где вместо названия стоит значок и число. */
+const TT_NOTE = 'M12.53.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z';
+const BRAND_ICONS = {
+  instagram: '<defs><radialGradient id="bico-ig" cx="28%" cy="108%" r="140%"><stop offset="0" stop-color="#FFD776"/><stop offset=".12" stop-color="#FFD776"/>' +
+    '<stop offset=".45" stop-color="#F3573F"/><stop offset=".72" stop-color="#D02A86"/><stop offset="1" stop-color="#7A3BD8"/></radialGradient></defs>' +
+    '<rect width="24" height="24" rx="6" fill="url(#bico-ig)"/>' +
+    '<rect x="5" y="5" width="14" height="14" rx="4.2" fill="none" stroke="#fff" stroke-width="1.8"/>' +
+    '<circle cx="12" cy="12" r="3.3" fill="none" stroke="#fff" stroke-width="1.8"/><circle cx="16.4" cy="7.6" r="1.05" fill="#fff"/>',
+  tiktok: '<rect width="24" height="24" rx="6" fill="#000"/>' +
+    '<g transform="translate(4.3 4.1) scale(.64)"><path d="' + TT_NOTE + '" fill="#25F4EE" transform="translate(-.9 -.9)"/>' +
+    '<path d="' + TT_NOTE + '" fill="#FE2C55" transform="translate(.9 .9)"/><path d="' + TT_NOTE + '" fill="#fff"/></g>',
+  youtube: '<rect width="24" height="24" rx="6" fill="#FF0000"/><path d="M9.6 7.9v8.2l6.9-4.1z" fill="#fff"/>',
+  facebook: '<rect width="24" height="24" rx="6" fill="#1877F2"/>' +
+    '<path d="M16.1 24v-8.8h2.9l.45-3.4H16.1V9.6c0-1 .28-1.66 1.7-1.66h1.8V4.9c-.31-.04-1.38-.13-2.62-.13-2.6 0-4.37 1.58-4.37 4.49v2.53H9.7v3.4h2.92V24z" fill="#fff"/>',
+  threads: '<rect width="24" height="24" rx="6" fill="#000"/><g transform="translate(4.4 4.2) scale(.64)"><path fill="#fff" d="' +
+    'M12.186 24h-.007c-3.581-.024-6.334-1.205-8.184-3.509C2.35 18.44 1.5 15.586 1.472 12.01v-.017c.03-3.579.879-6.43 2.525-8.482C5.845 1.205 8.6.024 12.18 0h.014c2.746.02 5.043.725 6.826 2.098 1.677 1.29 2.858 3.13 3.509 5.467l-2.04.569c-1.104-3.96-3.898-5.984-8.304-6.015-2.91.022-5.11.936-6.54 2.717C4.307 6.504 3.616 8.914 3.589 12c.027 3.086.718 5.496 2.057 7.164 1.43 1.783 3.631 2.698 6.54 2.717 2.623-.02 4.358-.631 5.8-2.045 1.647-1.613 1.618-3.593 1.09-4.798-.31-.71-.873-1.3-1.634-1.75-.192 1.352-.622 2.446-1.284 3.272-.886 1.102-2.14 1.704-3.73 1.79-1.202.065-2.361-.218-3.259-.801-1.063-.689-1.685-1.74-1.752-2.964-.065-1.19.408-2.285 1.33-3.082.88-.76 2.119-1.207 3.583-1.291a13.853 13.853 0 0 1 3.02.142c-.126-.742-.375-1.332-.75-1.757-.513-.586-1.308-.883-2.359-.89h-.029c-.844 0-1.992.232-2.721 1.32L7.734 7.847c.98-1.454 2.568-2.256 4.478-2.256h.044c3.194.02 5.097 1.975 5.287 5.388.108.046.216.094.321.142 1.49.7 2.58 1.761 3.154 3.07.797 1.82.871 4.79-1.548 7.158-1.85 1.81-4.094 2.628-7.277 2.65Zm1.003-11.69c-.242 0-.487.007-.739.021-1.836.103-2.98.946-2.916 2.143.067 1.256 1.452 1.839 2.784 1.767 1.224-.065 2.818-.543 3.086-3.71a10.5 10.5 0 0 0-2.215-.221z' +
+    '"/></g>',
+};
+function brandIcon(pv) {
+  const g = BRAND_ICONS[pv];
+  if (!g) return pmark(pv);
+  return '<span class="bico" aria-hidden="true"><svg viewBox="0 0 24 24">' + g + '</svg></span>';
+}
 function platGlyph(pv) {
   const logo = PLATFORM_LOGOS[pv];
   if (logo) return '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">' + logo + '</svg>';
@@ -1825,7 +1898,7 @@ function rail() {
 /* ============================================================
    7. ЭКРАН «АККАУНТЫ»
    ============================================================ */
-function kpiCard(label, value, d, series, compact, total, tone, icon) {
+function kpiCard(label, value, d, series, compact, total, tone, icon, metric) {
   const n = tone || 1;
   const style = '--tone:var(--m' + n + ');--tone-soft:var(--m' + n + 's)';
   if (state.booting) {
@@ -1835,9 +1908,14 @@ function kpiCard(label, value, d, series, compact, total, tone, icon) {
   }
   // Та же логика, что у колонок таблицы: All = итог, иначе прирост; без зелёной строки.
   const main = metricMain(total != null ? total : value, d, compact);
-  return '<div class="card kpi" style="' + style + '">' +
+  // С metric карточка открывает поп-ап с графиком этого показателя.
+  const act = metric
+    ? ' data-act="kpi-chart" data-v="' + metric + '" tabindex="0" role="button" aria-haspopup="dialog" aria-label="' + label + ': открыть график"'
+    : '';
+  return '<div class="card kpi" style="' + style + '"' + act + '>' +
     '<div class="hd"><span class="ico">' + ic(icon || 'users', 13) + '</span>' +
-      '<span class="lbl">' + label + '</span></div>' +
+      '<span class="lbl">' + label + '</span>' +
+      (metric ? '<span class="more" title="Открыть график">' + ic('chart', 13) + '</span>' : '') + '</div>' +
     '<div class="val">' + main + '</div>' +
     '<div class="ft">' +
       (series ? spark(series, d == null || d >= 0, 'var(--tone)') : '') +
@@ -2202,6 +2280,10 @@ function menuDef(key) {
       return { v: String(row.id), l: row.name, dot: row.color };
     });
     if (createLabel) items.push({ v: '__new__', l: createLabel, create: true });
+    // В «Перенести» метки необязательны: пусто — оставить у аккаунта как было.
+    if (state.modal === 'add' && state.add && state.add.mode === 'move') {
+      return { title: title, cur: cur || '0', items: [{ v: '0', l: 'Не менять' }].concat(items) };
+    }
     return { title: title, cur: cur, placeholder: 'Выберите…', items: items };
   }
   if (kind === 'add-stand') return {
@@ -3080,6 +3162,13 @@ function screenDetail() {
 /* ============================================================
    10. ЭКРАН «АНАЛИТИКА»
    ============================================================ */
+/* На стендах в заголовке «Аналитики» видно, чей срез открыт. */
+function anScopeTag() {
+  if (!isAi()) return '';
+  const t = state.ai.topic === 'all' ? null : aiTopic(state.ai.topic);
+  return '<span class="count" style="display:inline-flex;align-items:center;gap:6px">' +
+    (t ? '<span class="dot" style="background:' + esc(t.color) + '"></span>' + esc(t.name) : esc(aiW().all)) + '</span>';
+}
 function screenAnalytics() {
   if (state.booting) {
     return '<div class="main"><div class="page-hd"><h1>Аналитика</h1></div>' + analyticsSkeleton() + '</div>';
@@ -3088,7 +3177,7 @@ function screenAnalytics() {
   const waiting = LIVE && (state.an.loading || state.an.items === null);
   if (waiting) {
     return '<div class="main">' +
-      '<div class="page-hd"><h1>Аналитика</h1><div class="grow"></div>' +
+      '<div class="page-hd"><h1>Аналитика</h1>' + anScopeTag() + '<div class="grow"></div>' +
         dd('an-platform', state.an.platform !== 'all') +
         dd('an-sort') +
         '<div class="seg">' + AN_PERIOD_OPTS.map(function (p) {
@@ -3096,7 +3185,7 @@ function screenAnalytics() {
         }).join('') + '</div>' +
       '</div>' + analyticsSkeleton() + '</div>';
   }
-  const acc = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
+  const acc = isAi() ? aiInTopicAll() : ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
   const ins = state.an.insights;
 
   /* Топ постов: с живым API — из analytics/top-posts, иначе из демо-данных */
@@ -3179,7 +3268,7 @@ function screenAnalytics() {
   const noData = '<div style="font-size:12px;color:var(--ink-3);padding:8px 0">API не вернул данных за этот период</div>';
 
   return '<div class="main">' +
-    '<div class="page-hd"><h1>Аналитика</h1><div class="grow"></div>' +
+    '<div class="page-hd"><h1>Аналитика</h1>' + anScopeTag() + '<div class="grow"></div>' +
       dd('an-platform', state.an.platform !== 'all') +
       dd('an-sort') +
       '<div class="seg">' + AN_PERIOD_OPTS.map(function (p) {
@@ -3824,7 +3913,8 @@ function missingRequiredLabels(obj) {
 }
 function modalAdd() {
   const a = state.add;
-  if (aiCreates() && a.mode === 'remove') return modalAddRemove(a);
+  if (aiCreates() && a.mode === 'remove') return modalStandRemove(a);
+  if (aiCreates() && a.mode === 'move') return modalStandMove(a);
   // Раньше здесь были три вкладки и четыре подписи, не подключённые ни к чему:
   // «Списком/По одному/Импорт CSV» были кнопками без действия, а «Платформа»,
   // «Профиль» и «Владелец» — вообще <span> с жёстко вписанным первым элементом
@@ -3853,30 +3943,76 @@ function modalAdd() {
         : 'Уже существующий аккаунт не задваивается: у него обновятся эти поля, а архив или бан снимутся.</div>');
   const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
     '<button class="btn pri" data-act="add-save">Добавить</button>';
-  return modalShell(aiCreates() ? 'Аккаунты по ссылкам' : 'Добавить аккаунты', (aiCreates() ? addModeTabs(a) : '') + body, ft);
+  return modalShell(aiCreates() ? 'Новые аккаунты' : 'Добавить аккаунты', body, ft);
 }
 
-/* На стендах форма в два режима: завести/поставить и убрать по тем же ссылкам. */
-function addModeTabs(a) {
-  return '<div class="tabs" style="margin:-4px 0 4px">' +
-    [['add', 'Добавить'], ['remove', 'Убрать']].map(function (x) {
-      const on = (a.mode || 'add') === x[0];
-      return '<button class="' + (on ? 'on' : '') + '" data-act="add-mode" data-v="' + x[0] + '" aria-pressed="' + on + '">' + x[1] + '</button>';
-    }).join('') + '</div>';
+/* Поле «ссылки или @имена» — общее у «Новых аккаунтов», «Убрать» и «Перенести». */
+function addListField(a, label, ph) {
+  return '<div><div class="lbl" style="margin-bottom:8px">' + label + '</div>' +
+    '<textarea id="addlist" rows="5" placeholder="' + ph + '" ' +
+    'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none">' +
+    esc(a.text) + '</textarea><div id="addprev">' + addPreviewHtml() + '</div></div>';
 }
-function modalAddRemove(a) {
-  const body = addModeTabs(a) +
-    '<div><div class="lbl" style="margin-bottom:8px">Ссылки или @имена, по одному в строке</div>' +
-      '<textarea id="addlist" rows="7" placeholder="https://www.tiktok.com/@kuhnya_doma&#10;@atomic.media" ' +
-      'style="width:100%;padding:12px;border:1px solid var(--line-2);border-radius:8px;background:var(--surface);color:var(--ink);font-family:\'IBM Plex Mono\',monospace;font-size:12px;resize:vertical;outline:none">' +
-      esc(a.text) + '</textarea></div>' +
+/* Аккаунты стенда, на странице которого открыли «Убрать» (на «Всех стендах» — всей ветки). */
+function standAccounts(topicId) {
+  const t = topicId ? aiTopic(topicId) : null;
+  const inBoard = {};
+  (t ? [t] : aiTopics()).forEach(function (x) { x.account_ids.forEach(function (id) { inBoard[id] = true; }); });
+  return ACCOUNTS.filter(function (a) { return inBoard[a.id]; })
+    .sort(function (x, y) { return x.username.localeCompare(y.username); });
+}
+/* «Убрать»: ссылками (как в «Новых аккаунтах») и/или отметками в списке. */
+function modalStandRemove(a) {
+  const t = a.topicId ? aiTopic(a.topicId) : null;
+  const where = t ? '«' + esc(t.name) + '»' : aiW().forms[2];
+  const pick = a.pick || {};
+  const all = standAccounts(a.topicId);
+  const q = (a.pickQ || '').trim().toLowerCase().replace(/^@/, '');
+  const rows = all.filter(function (x) {
+    return !q || x.username.toLowerCase().indexOf(q) >= 0 || String(x.display || '').toLowerCase().indexOf(q) >= 0;
+  });
+  const shown = rows.slice(0, 200);
+  const nPick = Object.keys(pick).length;
+  const list = !all.length
+    ? '<div style="padding:16px;color:var(--ink-3);font-size:12px">' + aiW().empty + '</div>'
+    : (!rows.length ? '<div style="padding:16px;color:var(--ink-3);font-size:12px">Ничего не нашлось</div>'
+      : shown.map(function (x) {
+          const on = !!pick[x.id];
+          return '<div class="rm-row' + (on ? ' on' : '') + '" data-act="rm-pick" data-v="' + x.id + '" role="checkbox" tabindex="0" aria-checked="' + on + '">' +
+            '<span class="cbx' + (on ? ' on' : '') + '">' + (on ? ic('check', 11) : '') + '</span>' +
+            avatarEl(x, 28, 14) +
+            '<div class="grow"><div class="u trunc">@' + esc(x.username) + '</div>' +
+            '<div class="d trunc">' + esc(plabel(x.platform)) + ' · ' + comp(x.followers || 0) + ' подп. · ' + comp(x.views || 0) + ' просм.</div></div>' +
+            brandIcon(x.platform) + '</div>';
+        }).join('') +
+        (rows.length > shown.length ? '<div style="padding:8px;color:var(--ink-3);font-size:11px">Показаны первые ' + shown.length + ' из ' + rows.length + ' — уточните поиск</div>' : ''));
+  const body =
+    addListField(a, 'Ссылки или @имена, по одному в строке', 'https://www.tiktok.com/@kuhnya_doma&#10;@atomic.media') +
+    '<div class="rm-or">или выберите в списке</div>' +
+    '<div><div class="field">' + ic('search', 14) +
+      '<input id="rmq" placeholder="Ник аккаунта ' + (t ? aiW().prep + ' ' + where : aiW().prep + ' ' + aiW().forms[2]) + '" aria-label="Поиск аккаунта" value="' + esc(a.pickQ || '') + '" autocomplete="off"></div>' +
+      '<div class="ai-pick-list" style="max-height:34vh">' + list + '</div></div>' +
+    '<div style="font-size:12px;color:var(--ink-3)">Аккаунты уберутся ' + aiW().from + ' ' + where + '. ' +
+      'Если аккаунт больше ни ' + aiW().prep + ' одном ' + aiW().low + 'е не стоит и заведён здесь же, он уйдёт в архив и перестанет обновляться — его можно вернуть. Насовсем ничего не удаляется.</div>';
+  const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
+    '<button class="btn dgr" data-act="add-remove">Убрать' + (nPick ? ' · отмечено ' + nPick : '') + '</button>';
+  return modalShell('Убрать ' + aiW().from + ' ' + where, body, ft);
+}
+/* «Перенести»: как «Новые аккаунты» — куда, площадка, профиль и владелец, группа и страна. */
+function modalStandMove(a) {
+  const body =
+    addListField(a, 'Ссылки или @имена, по одному в строке', '@mobilefarm.ru&#10;https://www.tiktok.com/@kuhnya_doma&#10;@atomic.media') +
+    '<div class="frow"><span class="lb">Куда перенести</span>' + dd('add-stand') + '</div>' +
     '<div class="frow"><span class="lb">Площадка</span>' + dd('add-platform') +
       '<span style="font-size:12px;color:var(--ink-3)">по ссылке определяется сама</span></div>' +
-    '<div style="font-size:12px;color:var(--ink-3)">Аккаунты уберутся со всех ' + aiW().forms[2] + '. Заведённые здесь же уйдут в архив и перестанут обновляться — ' +
-      'их можно вернуть. Аккаунты из других веток останутся там, где были. Насовсем ничего не удаляется.</div>';
+    '<div class="frow"><span class="lb">Профиль и владелец</span>' + dd('add-profile') + dd('add-owner') + '</div>' +
+    '<div class="frow"><span class="lb">Группа и страна</span>' + dd('add-group') + dd('add-country') + '</div>' +
+    '<div style="font-size:12px;color:var(--ink-3)">Аккаунты снимутся с других ' + aiW().forms[2] + ' и встанут ' + aiW().prep + ' выбранный. ' +
+      'Профиль, владелец, группа и страна поменяются на выбранные, «Не менять» оставит как было. ' +
+      'Переносятся уже заведённые аккаунты — новые добавляйте через «Новый аккаунт».</div>';
   const ft = '<div class="grow"></div><button class="btn" data-act="close">Отмена</button>' +
-    '<button class="btn dgr" data-act="add-remove">Убрать</button>';
-  return modalShell('Аккаунты по ссылкам', body, ft);
+    '<button class="btn pri" data-act="add-move">Перенести</button>';
+  return modalShell('Перенести аккаунты', body, ft);
 }
 /* Строки «что не так»: стр./площадка · фрагмент · причина. */
 function addRowsHtml(rows) {
@@ -4210,6 +4346,14 @@ async function loadAiTopics() {
   catch (e) { state.ai.topics = []; toast('Не загрузился список: ' + (e.message || e)); }
   state.ai.order = await ord;
 }
+/* Аккаунты выбранной темы без поиска и площадок — для «Аналитики». */
+function aiInTopicAll() {
+  const list = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
+  if (state.ai.topic === 'all') return list;
+  const t = aiTopic(state.ai.topic);
+  const ids = t ? t.account_ids : [];
+  return list.filter(function (a) { return ids.indexOf(a.id) >= 0; });
+}
 /* Аккаунты темы без фильтра площадок — для счётчиков на чипах. */
 function aiInTopic() {
   let list = ACCOUNTS.filter(function (a) { return !a.archived && !a.banned; });
@@ -4305,10 +4449,12 @@ function screenAi() {
   const plats = '<div class="ai-plats" role="group" aria-label="Площадки">' +
     '<button class="ai-chip' + (state.ai.plats.length ? '' : ' on') + '" data-act="ai-plat" data-v="" aria-pressed="' + !state.ai.plats.length + '">Все<span class="n">' + base.length + '</span></button>' +
     AI_BOARDS[DOMAIN].plats.map(function (pv) {
+      // Значок площадки и число вместо названия — фильтры помещаются в одну строку.
       const on = state.ai.plats.indexOf(pv) >= 0;
       const n = base.filter(function (a) { return a.platform === pv; }).length;
-      return '<button class="ai-chip' + (on ? ' on' : '') + '" data-act="ai-plat" data-v="' + pv + '" aria-pressed="' + on + '">' +
-        pmark(pv) + esc(plabel(pv)) + '<span class="n">' + n + '</span></button>';
+      return '<button class="ai-chip pl' + (on ? ' on' : '') + '" data-act="ai-plat" data-v="' + pv + '" aria-pressed="' + on + '" ' +
+        'title="' + esc(plabel(pv)) + ': ' + n + '" aria-label="' + esc(plabel(pv)) + ', ' + n + '">' +
+        brandIcon(pv) + '<span class="n">' + n + '</span></button>';
     }).join('') + '</div>';
   let body;
   if (state.booting || state.ai.topics === null) {
@@ -4319,7 +4465,9 @@ function screenAi() {
   } else if (!list.length) {
     body = '<div class="card ai-empty"><b>' + (base.length ? 'Нет аккаунтов на выбранных площадках' : (t ? aiW().inOne + ' «' + esc(t.name) + '» пока пусто' : aiW().inAll + ' пока нет аккаунтов')) + '</b>' +
       (base.length ? 'Снимите фильтр площадок или выберите другие.' : 'Добавьте аккаунты — они останутся и в своих доменах.') +
-      (base.length ? '' : '<div style="margin-top:14px"><button class="btn pri" data-act="ai-pick-open">' + ic('plus', 13) + 'Добавить ' + aiW().prep + ' ' + aiW().acc + '</button></div>') +
+      (base.length ? '' : '<div style="margin-top:14px">' + (aiCreates()
+        ? '<button class="btn pri" data-act="modal" data-v="add">' + ic('plus', 13) + 'Новый аккаунт</button>'
+        : '<button class="btn pri" data-act="ai-pick-open">' + ic('plus', 13) + 'Добавить ' + aiW().prep + ' ' + aiW().acc + '</button>') + '</div>') +
       '</div>';
   } else if (effView() === 'table') {
     // Таблица — как на «Аккаунтах»: сортировка по колонкам, страницы, выделение.
@@ -4334,15 +4482,15 @@ function screenAi() {
   return '<div class="main" style="--page-max:1720px">' +
     '<div class="kpis k4">' +
       // Суммы по аккаунтам ветки AI с учётом темы, площадок и поиска.
-      kpiCard('Подписчики', fmt(k.f), k.fd, null, false, k.f, 1, 'users') +
-      kpiCard('Просмотры', fmt(k.v), k.vd, null, true, k.v, 2, 'eye') +
-      kpiCard('Лайки', fmt(k.l), k.ld, null, true, k.l, 3, 'heart') +
-      kpiCard('Посты', fmt(k.p), k.pd, null, false, k.p, 4, 'rows') +
+      kpiCard('Подписчики', fmt(k.f), k.fd, null, false, k.f, 1, 'users', 'followers') +
+      kpiCard('Просмотры', fmt(k.v), k.vd, null, true, k.v, 2, 'eye', 'views') +
+      kpiCard('Лайки', fmt(k.l), k.ld, null, true, k.l, 3, 'heart', 'likes') +
+      kpiCard('Посты', fmt(k.p), k.pd, null, false, k.p, 4, 'rows', 'posts') +
     '</div>' +
     '<div class="ai-topics-m" role="group" aria-label="' + aiW().many + '">' + aiTopicBtn('all', 'chip') +
       aiTopics().map(function (x) { return aiTopicBtn(x, 'chip'); }).join('') + '</div>' +
-    '<div class="filters">' +
-      '<div class="field" style="width:190px">' + ic('search', 14) +
+    '<div class="filters one">' +
+      '<div class="field">' + ic('search', 14) +
         '<input id="q" placeholder="Фильтр по имени" aria-label="Фильтр по имени" value="' + esc(state.q) + '">' +
       '</div>' + plats +
       '<div class="grow"></div>' +
@@ -4352,9 +4500,13 @@ function screenAi() {
             ic(state.dense ? 'rows' : 'sort', 14) + '</button>' +
           '<button class="btn ico ghost" data-act="modal" data-v="cols" title="Колонки" aria-label="Настроить колонки">' + ic('cols', 14) + '</button>'
         : '') +
-      (aiRefreshes() ? '<button class="btn" data-act="ai-refresh" title="Собрать свежую статистику по аккаунтам на экране">' + ic('refresh', 13) + 'Обновить</button>' : '') +
-      (aiCreates() ? '<button class="btn" data-act="modal" data-v="add">' + ic('plus', 13) + 'Новый аккаунт</button>' : '') +
-      '<button class="btn pri" data-act="ai-pick-open">' + ic('plus', 13) + 'Добавить ' + aiW().prep + ' ' + aiW().acc + '</button>' +
+      (aiCreates()
+        ? '<button class="btn" data-act="stand-tool" data-v="remove" title="Убрать аккаунты ' + aiW().from + ' ' + (t ? '«' + esc(t.name) + '»' : aiW().forms[1]) + '" aria-label="Убрать">' + ic('close', 13) + '<span class="t">Убрать</span></button>' +
+          '<button class="btn" data-act="stand-tool" data-v="move" title="Перенести аккаунты на другой ' + aiW().low + '" aria-label="Перенести">' + ic('cright', 13) + '<span class="t">Перенести</span></button>'
+        : '') +
+      (aiRefreshes() ? '<button class="btn ico pri" data-act="ai-refresh" title="Обновить статистику аккаунтов на экране" aria-label="Обновить статистику">' + ic('refresh', 15) + '</button>' : '') +
+      (aiCreates() ? '<button class="btn" data-act="modal" data-v="add">' + ic('plus', 13) + 'Новый аккаунт</button>'
+        : '<button class="btn pri" data-act="ai-pick-open">' + ic('plus', 13) + 'Добавить ' + aiW().prep + ' ' + aiW().acc + '</button>') +
     '</div>' + body +
   '</div>';
 }
@@ -4684,8 +4836,154 @@ function screen() {
    только свой: клик в модалке не касается таблицы, тост — вообще ничего,
    кроме себя.
    ============================================================ */
+/* ---- Поп-ап графика по карточке сводки ----
+   Те же аккаунты, что дали цифру на карточке: стенд, площадки, поиск. */
+const KC_METRICS = {
+  followers: { l: 'Подписчики', tone: 1, icon: 'users' },
+  views:     { l: 'Просмотры',  tone: 2, icon: 'eye' },
+  likes:     { l: 'Лайки',      tone: 3, icon: 'heart' },
+  posts:     { l: 'Посты',      tone: 4, icon: 'rows' },
+};
+const KC_PERIODS = [['1d', 'День', 'день'], ['7d', 'Неделя', 'неделю'], ['30d', 'Месяц', 'месяц'], ['90d', '3 месяца', '3 месяца'], ['all', 'Всё время', 'всё время']];
+let kcSeq = 0;
+function kcOpen(metric) {
+  const t = state.ai.topic === 'all' ? null : aiTopic(state.ai.topic);
+  const plats = state.ai.plats.map(plabel);
+  state.kc = {
+    metric: metric, period: (state.kc && state.kc.period) || '7d',
+    ids: aiVisible().map(function (a) { return a.id; }),
+    where: t ? t.name : aiW().all,
+    scope: [plats.length ? plats.join(', ') : '', state.q.trim() ? 'поиск «' + state.q.trim() + '»' : ''].filter(Boolean).join(' · '),
+    data: null, error: null,
+  };
+  state.modal = 'kpiChart';
+  kcLoad();
+}
+async function kcLoad() {
+  const kc = state.kc;
+  if (!kc) return;
+  const seq = ++kcSeq;
+  kc.data = null; kc.error = null;
+  paintOverlay();
+  if (!LIVE || DEMO) { kc.error = 'В демо-режиме истории нет'; paintOverlay(); return; }
+  try {
+    const r = await apiSend('/api/accounts/analytics/series/', { account_ids: kc.ids, metric: kc.metric, period: kc.period });
+    if (seq !== kcSeq || state.kc !== kc) return;
+    kc.data = r;
+  } catch (e) {
+    if (seq !== kcSeq || state.kc !== kc) return;
+    kc.error = 'Не загрузилось: ' + (e.message || e);
+  }
+  if (state.modal === 'kpiChart') paintOverlay();
+}
+function kcWhen(iso, gran) {
+  const d = new Date(iso);
+  if (isNaN(d)) return String(iso);
+  const dd2 = String(d.getDate()).padStart(2, '0') + '.' + String(d.getMonth() + 1).padStart(2, '0');
+  if (gran === 'point' || /T/.test(iso) && iso.length > 10) {
+    return dd2 + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  return dd2 + (state.kc && state.kc.period === 'all' ? '.' + String(d.getFullYear()).slice(2) : '');
+}
+function kcPlot(pts, gran) {
+  const vals = pts.map(function (p) { return p.v; });
+  let min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+  if (min === max) { min -= Math.max(1, Math.abs(min) * .05); max += Math.max(1, Math.abs(max) * .05); }
+  const padv = (max - min) * .08; min -= padv; max += padv;
+  if (Math.min.apply(null, vals) >= 0 && min < 0) min = 0;
+  const W = 1000, H = 260, n = pts.length;
+  const x = function (i) { return n === 1 ? W / 2 : i / (n - 1) * W; };
+  const y = function (v) { return H - (v - min) / (max - min) * H; };
+  const line = pts.map(function (p, i) { return (i ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(p.v).toFixed(1); }).join(' ');
+  const area = line + ' L' + x(n - 1).toFixed(1) + ',' + H + ' L' + x(0).toFixed(1) + ',' + H + ' Z';
+  const ticks = [0, .5, 1].map(function (f) { return min + (max - min) * f; });
+  const xl = n > 1 ? [0, Math.round((n - 1) / 2), n - 1] : [0];
+  return '<div class="kc-plot" id="kcplot">' +
+    '<svg viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
+      ticks.map(function (v) {
+        const yy = y(v).toFixed(1);
+        return '<line x1="0" x2="' + W + '" y1="' + yy + '" y2="' + yy + '" stroke="var(--line-soft)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+      }).join('') +
+      '<path d="' + area + '" fill="var(--tone)" opacity=".10"/>' +
+      '<path d="' + line + '" fill="none" stroke="var(--tone)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>' +
+    '</svg>' +
+    ticks.map(function (v) { return '<span class="kc-y" style="top:' + (y(v) / H * 100).toFixed(2) + '%">' + comp(Math.round(v)) + '</span>'; }).join('') +
+    xl.map(function (i, k) {
+      return '<span class="kc-x' + (k === 0 && xl.length > 1 ? ' first' : (k === xl.length - 1 && xl.length > 1 ? ' last' : '')) + '" style="left:' + (x(i) / W * 100).toFixed(2) + '%">' +
+        esc(i === n - 1 && n > 1 ? 'сейчас' : kcWhen(pts[i].t, gran)) + '</span>';
+    }).join('') +
+    '<span class="kc-cross" id="kccross"></span><span class="kc-dot" id="kcdot"></span><div class="kc-tip" id="kctip"></div>' +
+  '</div>';
+}
+function modalKpiChart() {
+  const kc = state.kc;
+  if (!kc) return '';
+  const m = KC_METRICS[kc.metric] || KC_METRICS.views;
+  const per = KC_PERIODS.filter(function (x) { return x[0] === kc.period; })[0];
+  const seg = '<div class="seg" role="group" aria-label="Период">' + KC_PERIODS.map(function (x) {
+    const on = kc.period === x[0];
+    return '<button class="' + (on ? 'on' : '') + '" data-act="kc-period" data-v="' + x[0] + '" aria-pressed="' + on + '">' + x[1] + '</button>';
+  }).join('') + '</div>';
+  let top = '', chart;
+  if (kc.error) {
+    chart = '<div class="kc-empty">' + ic('alert', 22) + '<div>' + esc(kc.error) + '</div></div>';
+  } else if (!kc.data) {
+    chart = '<div class="kc-empty" aria-busy="true"><span class="sk" style="width:100%;height:100%;border-radius:10px"></span></div>';
+  } else if (!kc.ids.length || kc.data.points.length < 2) {
+    chart = '<div class="kc-empty">' + ic('chart', 22) + '<div>' + (kc.ids.length ? 'За этот период данных пока нет' : 'На экране нет аккаунтов') + '</div></div>';
+  } else {
+    const d = kc.data.delta || 0;
+    top = '<div class="kc-top"><div><div class="kc-val">' + fmt(kc.data.last) + '</div>' +
+      '<div class="kc-sub">' + deltaElPlain(d) + ' за ' + (per ? per[2] : '') + ' · было ' + fmt(kc.data.first) + '</div></div></div>';
+    chart = kcPlot(kc.data.points, kc.data.granularity);
+  }
+  const head = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px">' +
+    '<div style="font-size:12px;color:var(--ink-3)">' + esc(kc.where) + (kc.scope ? ' · ' + esc(kc.scope) : '') + ' · ' +
+      kc.ids.length + ' ' + plural(kc.ids.length, ['аккаунт', 'аккаунта', 'аккаунтов']) + '</div>' +
+    '<div class="grow"></div>' + seg + '</div>';
+  const note = '<div class="kc-note">' + (kc.data && kc.data.granularity === 'point'
+    ? 'По каждому прогону автообновления за последние сутки.'
+    : 'По дням: значение на конец дня, последняя точка — текущие цифры.') + '</div>';
+  return '<div class="kc-wrap" style="--tone:var(--m' + m.tone + ');--tone-soft:var(--m' + m.tone + 's)">' +
+    modalShell('<span style="display:inline-flex;align-items:center;gap:8px"><span class="kpi-ico" style="display:flex;color:var(--tone)">' + ic(m.icon, 15) + '</span>' + m.l + '</span>',
+      head + top + chart + note, '', true) + '</div>';
+}
+/* Дельта без зависимости от загрузки дельт таблицы (deltaEl ждёт их). */
+function deltaElPlain(n) {
+  const cls = n > 0 ? 'up' : (n < 0 ? 'dn' : 'ze');
+  return '<span class="delta ' + cls + '">' + (n === 0 ? '' : tri(n > 0)) + (n === 0 ? '0' : fmt(Math.abs(n))) + '</span>';
+}
+function kcHover(e) {
+  const plot = document.getElementById('kcplot');
+  const kc = state.kc;
+  if (!plot || !kc || !kc.data) return;
+  const pts = kc.data.points, n = pts.length;
+  const r = plot.getBoundingClientRect();
+  const show = e && e.clientX >= r.left - 6 && e.clientX <= r.right + 6 && e.clientY >= r.top - 10 && e.clientY <= r.bottom + 10;
+  const cross = document.getElementById('kccross'), dot = document.getElementById('kcdot'), tip = document.getElementById('kctip');
+  if (!show) { [cross, dot, tip].forEach(function (el) { if (el) el.style.display = 'none'; }); return; }
+  const i = Math.max(0, Math.min(n - 1, Math.round((e.clientX - r.left) / r.width * (n - 1))));
+  const vals = pts.map(function (p) { return p.v; });
+  // Та же шкала, что в kcPlot: координаты точки считаем по ней.
+  let min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+  if (min === max) { min -= Math.max(1, Math.abs(min) * .05); max += Math.max(1, Math.abs(max) * .05); }
+  const padv = (max - min) * .08; min -= padv; max += padv;
+  if (Math.min.apply(null, vals) >= 0 && min < 0) min = 0;
+  const left = (n === 1 ? .5 : i / (n - 1)) * 100;
+  const top = (1 - (pts[i].v - min) / (max - min)) * 100;
+  cross.style.display = dot.style.display = tip.style.display = 'block';
+  cross.style.left = left + '%';
+  dot.style.left = left + '%'; dot.style.top = top + '%';
+  tip.style.left = Math.max(8, Math.min(92, left)) + '%';
+  const prev = i > 0 ? pts[i].v - pts[i - 1].v : null;
+  tip.innerHTML = '<b>' + fmt(pts[i].v) + '</b>' + esc(i === n - 1 ? 'сейчас' : kcWhen(pts[i].t, kc.data.granularity)) +
+    (prev ? ' · ' + (prev > 0 ? '+' : '−') + fmt(Math.abs(prev)) : '');
+}
+document.addEventListener('mousemove', function (e) { if (state.modal === 'kpiChart') kcHover(e); });
+
 function modalsHtml() {
   return (state.modal === 'refreshAll' ? modalRefreshAll() : '') +
+    (state.modal === 'kpiChart' ? modalKpiChart() : '') +
     (state.modal === 'add'      ? modalAdd()      : '') +
     (state.modal === 'addResult' ? modalAddResult() : '') +
     (state.modal === 'edit'     ? modalEdit()     : '') +
@@ -5052,9 +5350,24 @@ document.addEventListener('click', function (e) {
     case 'add-remove': {
       const el = document.getElementById('addlist');
       if (el) state.add.text = el.value;
-      if (!(state.add.text || '').trim()) { toast('Вставьте хотя бы одну ссылку или @имя'); return; }
-      A.removeFromBoard(state.add.text, state.add.platform);
+      const picked = Object.keys(state.add.pick || {}).map(Number);
+      if (!(state.add.text || '').trim() && !picked.length) { toast('Вставьте ссылки или отметьте аккаунты в списке'); return; }
       state.modal = null;
+      A.removeFromBoard(state.add.text, state.add.platform, state.add.topicId, picked);
+      break;
+    }
+    case 'add-move': {
+      const el = document.getElementById('addlist');
+      if (el) state.add.text = el.value;
+      if (!(state.add.text || '').trim()) { toast('Вставьте хотя бы одну ссылку или @имя'); return; }
+      if (!state.add.standId) { toast('Выберите, куда перенести'); return; }
+      const extra = {};
+      [['profileId', 'profile_id'], ['ownerId', 'owner_id'], ['groupId', 'group_id'], ['countryId', 'country_id']].forEach(function (k) {
+        if (state.add[k[0]]) extra[k[1]] = state.add[k[0]];
+      });
+      state.modal = null;
+      state.addResult = null;
+      A.moveToStand(state.add.text, extra, state.add.platform, state.add.standId);
       break;
     }
     case 'add-save': {
@@ -5331,7 +5644,40 @@ document.addEventListener('click', function (e) {
       state.run.on = false; state.modal = null; clearInterval(state.run.timer); toast('Прогон остановлен'); return;
     case 'save':      state.modal = null; toast(v); return;
     case 'toast':     toast(v); return;
-    case 'ai-topic': state.ai.topic = v; state.page = 1; break;
+    case 'ai-topic':
+      state.ai.topic = v; state.page = 1;
+      // На «Аналитике» стенд — это срез данных: перечитываем топ постов по нему.
+      if (state.route === 'analytics') {
+        state.an.items = null; state.an.insights = null;
+        if (LIVE) loadAnalytics();
+      }
+      break;
+    case 'kpi-chart': kcOpen(v); return;
+    case 'kc-period':
+      if (state.kc && state.kc.period !== v) { state.kc.period = v; kcLoad(); }
+      return;
+    case 'stand-tool': {
+      // «Убрать» и «Перенести» — та же форма, что «Новые аккаунты», в своём режиме.
+      const cur = state.ai.topic !== 'all' ? +state.ai.topic : 0;
+      state.add = { text: '', platform: '', domainId: addDefaultDomainId(),
+                    profileId: 0, ownerId: 0, groupId: 0, countryId: 0, mode: v,
+                    topicId: cur, pick: {}, pickQ: '' };
+      if (v === 'move') {
+        const other = aiTopics().filter(function (t) { return t.id !== cur; })[0];
+        state.add.standId = other ? other.id : (cur || 0);
+      }
+      state.modal = 'add';
+      paintOverlay();
+      return;
+    }
+    case 'rm-pick': {
+      const id = +v, pk = state.add.pick || (state.add.pick = {});
+      const el = document.getElementById('addlist');
+      if (el) state.add.text = el.value;
+      if (pk[id]) delete pk[id]; else pk[id] = true;
+      paintOverlay();
+      return;
+    }
     case 'ai-plat': {
       if (!v) state.ai.plats = [];
       else {
@@ -5437,7 +5783,7 @@ const OVERLAY_ACTS = new Set([
   'menu', 'modal', 'close', 'scrim', 'run-tab', 'start-all', 'palette', 'add-mode',
   'sched-bool', 'sched-int', 'sched-skip', 'sched-mode', 'sched-time',
   'cat-new', 'cat-edit', 'cat-del', 'cat-color', 'catalog-cancel',
-  'edit-open', 'addres-retry',
+  'edit-open', 'addres-retry', 'add-move',
 ]);
 /* Действия, меняющие список и рельс, но не шапку */
 const MAIN_ACTS = new Set([
@@ -5485,6 +5831,12 @@ document.addEventListener('input', function (e) {
     qTimer = setTimeout(function () { render(); }, 160);
     return;
   }
+  if (e.target.id === 'rmq') {
+    if (state.add) state.add.pickQ = e.target.value;
+    clearTimeout(qTimer);
+    qTimer = setTimeout(function () { paintOverlay(); }, 140);
+    return;
+  }
   if (e.target.id === 'aipq') {
     if (state.ai.pick) state.ai.pick.q = e.target.value;
     clearTimeout(qTimer);
@@ -5518,7 +5870,7 @@ window.addEventListener('scroll', function (e) {
 document.addEventListener('keydown', function (e) {
   const act = document.activeElement;
   /* Строки и карточки — это div-ы: Enter и пробел им нужно раздать вручную */
-  if ((e.key === 'Enter' || e.key === ' ') && act && act.matches && act.matches('[data-act="open"]')) {
+  if ((e.key === 'Enter' || e.key === ' ') && act && act.matches && act.matches('[data-act="open"], [data-act="kpi-chart"], [data-act="rm-pick"]')) {
     e.preventDefault(); act.click(); return;
   }
   const typing = !!(act && (act.tagName === 'INPUT' || act.tagName === 'TEXTAREA' || act.isContentEditable));
@@ -5744,9 +6096,19 @@ function mapAccount(r) {
     unavailable: !!r.profile_unavailable, archived: !!r.is_archived, banned: !!r.is_banned,
   };
 }
+/* «night&#39;s» → «night's». Сервер уже раскодирует, это страховка для старых
+   записей: textarea разбирает только сущности, теги в ней не создаются. */
+const ENTITY_RE = /&(?:#\d{1,7}|#x[0-9a-f]{1,6}|[a-z][a-z0-9]{1,31});/i;
+function decodeEntities(s) {
+  s = String(s || '');
+  if (!ENTITY_RE.test(s)) return s;
+  const ta = document.createElement('textarea');
+  ta.innerHTML = s;
+  return ta.value;
+}
 function mapPost(p) {
   const tags = Array.isArray(p.hashtags) ? p.hashtags : [];
-  const txt = String(p.description || '').trim();
+  const txt = decodeEntities(p.description).trim();
   return {
     id: p.id,
     title: txt ? txt.split('\n')[0].slice(0, 90) : 'Пост ' + (p.external_id || p.id),
@@ -6281,7 +6643,9 @@ async function loadAnalytics() {
   state.an.loading = true;
   state.an.error = null;
   if (state.route === 'analytics') paintBody();
-  const q = '&platform=' + (state.an.platform === 'all' ? '' : state.an.platform);
+  const q = '&platform=' + (state.an.platform === 'all' ? '' : state.an.platform) +
+    // Стенды/темы: срез по выбранному в меню слева (на «Всех» — вся ветка через X-Domain).
+    (isAi() && state.ai.topic !== 'all' ? '&topic=' + encodeURIComponent(state.ai.topic) : '');
   try {
     const [top, ins] = await Promise.all([
       api('/api/accounts/analytics/top-posts/?period=' + state.an.period +
@@ -6448,11 +6812,13 @@ const A = {
   },
   /* Завести с нуля и поставить на стенд. Домен и метки уже существующих
      аккаунтов сервер не трогает. */
-  removeFromBoard: function (lines, fallbackPlatform) {
-    const items = parseAccountLines(lines, fallbackPlatform);
-    if (!items.length) { toast('Не разобрал ни одной строки'); return null; }
+  removeFromBoard: function (lines, fallbackPlatform, topicId, ids) {
+    const p = parseAccountInput(lines || '', fallbackPlatform);
+    const items = standItems(p, fallbackPlatform);
+    ids = ids || [];
+    if (!items.length && !ids.length) { toast('Не разобрал ни одной строки'); return null; }
     return run(async function () {
-      const r = await apiSend('/api/accounts/topics/remove-accounts/', { items: items });
+      const r = await apiSend('/api/accounts/topics/remove-accounts/', { items: items, account_ids: ids, topic_id: topicId || null });
       await loadAiTopics();
       return r;
     }, function (r) {
@@ -6462,6 +6828,40 @@ const A = {
       if (r.not_found.length) parts.push('не нашлись ' + r.not_found.length + ' (' + r.not_found[0] + (r.not_found.length > 1 ? '…' : '') + ')');
       const head = parts.join(', ') || 'готово';
       return head.charAt(0).toUpperCase() + head.slice(1);
+    });
+  },
+  /* Перенос уже заведённых аккаунтов на стенд: с других стендов ветки снимаются. */
+  moveToStand: function (lines, extra, fallbackPlatform, standId) {
+    const p = parseAccountInput(lines, fallbackPlatform);
+    const items = standItems(p, fallbackPlatform);
+    if (!items.length) {
+      toast(showAddResult({ head: 'Ни одной строки не прочитано — ничего не перенесено', bad: p.bad, errors: [], elsewhere: [] }));
+      return null;
+    }
+    const stand = aiTopic(standId);
+    return run(async function () {
+      const r = await apiSend('/api/accounts/topics/' + standId + '/move-accounts/', Object.assign({ items: items }, extra || {}));
+      await loadAiTopics();
+      return r;
+    }, function (r) {
+      const parts = [];
+      if (r.moved) parts.push('перенесено ' + aiW().prep + ' «' + (stand ? stand.name : '') + '» ' + r.moved);
+      const from = Object.keys(r.from || {});
+      if (from.length) parts.push('сняты с ' + from.map(function (k) { return '«' + k + '»'; }).join(', '));
+      if (r.already) parts.push('уже там ' + r.already);
+      if (r.not_found.length) parts.push('нет на дашборде ' + r.not_found.length);
+      if (p.bad.length) parts.push('не прочитано ' + p.bad.length);
+      const head = parts.join(', ') || 'готово';
+      return showAddResult({
+        head: head.charAt(0).toUpperCase() + head.slice(1),
+        bad: p.bad,
+        errors: (r.not_found || []).map(function (e) {
+          const row = addServerRow(e, p.items, ': ');
+          row.w = 'нет на дашборде — добавьте через «Новый аккаунт»';
+          return row;
+        }),
+        elsewhere: [],
+      });
     });
   },
   addToStand: function (lines, extra, fallbackPlatform, standId) {
@@ -6743,6 +7143,14 @@ function isAccountUrl(c) {
    пропускаем. Раньше бралась только первая ссылка строки: из семи площадок
    доходил один TikTok, остальные молча терялись. Всё, что прочитать нельзя,
    возвращаем с номером строки и причиной, а не выбрасываем. */
+/* Для «Убрать» и «Перенести»: голое @имя без ссылки и без выбранной площадки
+   ищем на всех площадках, а не только в TikTok (так подставляет разбор). */
+function standItems(p, fallbackPlatform) {
+  return p.items.map(function (it) {
+    const bare = !fallbackPlatform && !/[./]/.test(String(it.src || '').replace(/^@/, '').split(/[/?#]/)[0]) && !isAccountUrl(it.src || '');
+    return { username: it.username, platform: bare ? '' : it.platform };
+  });
+}
 function parseAccountInput(text, fallbackPlatform) {
   const items = [], bad = [], seen = {};
   let dup = 0;

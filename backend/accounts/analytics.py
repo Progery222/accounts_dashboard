@@ -13,7 +13,8 @@ from django.db.models import (
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import Platform, Post, PostSnapshot
+from . import domains
+from .models import Account, AccountSnapshot, AutoRefreshPoint, Platform, Post, PostSnapshot, Topic
 
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -62,6 +63,26 @@ def _normalize_scrape_filter(raw: str | None) -> str:
     return "active"
 
 
+def _scope_ids(request):
+    """Аккаунты, которыми ограничена аналитика.
+
+    Домен из X-Domain сужает выборку как и везде (на «Стендах» — аккаунты
+    всех стендов ветки). Параметр ``topic`` — один стенд/тема этой ветки.
+    Вернёт ``(scope, ids)``: ids — None, если по стенду не сужаем.
+    """
+    scope = domains.resolve(request)
+    raw = (request.query_params.get("topic") or "").strip()
+    if not raw or raw == "all" or not domains.is_topics(scope):
+        return scope, None
+    try:
+        topic = Topic.objects.filter(pk=int(raw), board=scope.domain.slug).first()
+    except (TypeError, ValueError):
+        topic = None
+    if topic is None:
+        return scope, []
+    return scope, list(topic.accounts.values_list("id", flat=True))
+
+
 def _annotated_qs(
     account_id=None,
     platform=None,
@@ -70,10 +91,14 @@ def _annotated_qs(
     period="1d",
     min_views=MIN_VIEWS_DEFAULT,
     scrape_filter: str = "active",
+    scope=None,
+    account_ids=None,
 ):
     today = timezone.now().date()
     scrape_filter = _normalize_scrape_filter(scrape_filter)
-    qs = Post.objects.select_related("account")
+    qs = domains.narrow(Post.objects.select_related("account"), scope, field="account__domain")
+    if account_ids is not None:
+        qs = qs.filter(account_id__in=account_ids)
     if scrape_filter == "missing":
         qs = qs.filter(missing_from_scrape_at__isnull=False)
     elif scrape_filter == "active":
@@ -198,6 +223,7 @@ def top_posts(request):
     page_size = min(100, max(1, int(request.query_params.get("page_size", 20))))
 
     scrape_filter = _normalize_scrape_filter(request.query_params.get("scrape_filter"))
+    scope, topic_ids = _scope_ids(request)
     qs = _annotated_qs(
         account_id=account_id,
         platform=platform,
@@ -206,6 +232,8 @@ def top_posts(request):
         period=period,
         min_views=min_views,
         scrape_filter=scrape_filter,
+        scope=scope,
+        account_ids=topic_ids,
     )
     if hashtag:
         qs = qs.filter(hashtags__contains=[hashtag])
@@ -238,6 +266,7 @@ def insights(request):
     min_views  = int(request.query_params.get("min_views", MIN_VIEWS_DEFAULT))
 
     scrape_filter = _normalize_scrape_filter(request.query_params.get("scrape_filter"))
+    scope, topic_ids = _scope_ids(request)
     qs = _annotated_qs(
         account_id=account_id,
         platform=platform,
@@ -246,6 +275,8 @@ def insights(request):
         period=period,
         min_views=min_views,
         scrape_filter=scrape_filter,
+        scope=scope,
+        account_ids=topic_ids,
     )
 
     # Fetch all posts needed for Python-level aggregation
@@ -366,4 +397,138 @@ def insights(request):
         "top_hashtags":        top_hashtags,
         "best_hours":          best_hours,
         "best_weekdays":       best_weekdays,
+    })
+
+
+# ── Ряд показателя по набору аккаунтов (поп-ап карточек сводки) ─────────────
+
+SERIES_METRICS = {
+    "followers": "follower_count",
+    "views": "view_count",
+    "likes": "like_count",
+    "posts": "post_count",
+}
+SERIES_PERIOD_DAYS = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "all": None}
+SERIES_MAX_IDS = 5000
+
+
+def _series_daily(ids: list[int], field: str, days, today) -> list[dict]:
+    """Сумма показателя по дням из суточных снимков, сегодня — текущие цифры.
+
+    Снимок за день D держит последнее значение дня D. Если у аккаунта за день
+    снимка нет, берём предыдущий известный; до первого снимка — первый
+    известный: аккаунт существовал и раньше, просто мы его ещё не считали.
+    Без этого добавление аккаунта на стенд рисовало бы ступеньку роста.
+    """
+    current = dict(Account.objects.filter(id__in=ids).values_list("id", field))
+    snaps = AccountSnapshot.objects.filter(account_id__in=ids, date__lt=today)
+    if days is None:
+        first = snaps.order_by("date").values_list("date", flat=True).first()
+        start = first or today
+    else:
+        start = today - datetime.timedelta(days=days)
+    rows = snaps.filter(date__gte=start).values_list("account_id", "date", field)
+    by_acc: dict[int, dict] = defaultdict(dict)
+    for acc_id, d, v in rows:
+        by_acc[acc_id][d] = int(v or 0)
+    # Последний снимок до начала окна — стартовое значение.
+    base = dict(
+        Account.objects.filter(id__in=ids).annotate(
+            b=Subquery(
+                AccountSnapshot.objects.filter(account_id=OuterRef("pk"), date__lt=start)
+                .order_by("-date").values(field)[:1]
+            )
+        ).values_list("id", "b")
+    )
+    dates = [start + datetime.timedelta(days=i) for i in range((today - start).days)]
+    totals = [0] * len(dates)
+    for acc_id in ids:
+        if acc_id not in current:
+            continue
+        own = by_acc.get(acc_id, {})
+        first_known = base.get(acc_id)
+        if first_known is None:
+            first_known = own[min(own)] if own else int(current[acc_id] or 0)
+        last = first_known
+        for i, d in enumerate(dates):
+            if d in own:
+                last = own[d]
+            totals[i] += last
+    points = [{"t": d.isoformat(), "v": v} for d, v in zip(dates, totals)]
+    points.append({"t": timezone.now().isoformat(), "v": sum(int(current[i] or 0) for i in ids if i in current)})
+    return points
+
+
+def _series_views_24h(ids: list[int], now) -> list[dict]:
+    """Просмотры за последние сутки по точкам автообновления (разбивка до аккаунта)."""
+    since = now - datetime.timedelta(hours=24)
+    current = dict(Account.objects.filter(id__in=ids).values_list("id", "view_count"))
+    yesterday = timezone.localdate() - datetime.timedelta(days=1)
+    known = dict(
+        AccountSnapshot.objects.filter(account_id__in=ids, date=yesterday).values_list("account_id", "view_count")
+    )
+    pts = list(
+        AutoRefreshPoint.objects.filter(measured_at__gte=since, measured_at__lte=now)
+        .exclude(account_totals={}).order_by("measured_at").values_list("measured_at", "account_totals")
+    )
+    if not pts:
+        return []
+    keys = [str(i) for i in ids if i in current]
+    last = {k: int(known.get(int(k), current[int(k)]) or 0) for k in keys}
+    out = [{"t": since.isoformat(), "v": sum(last.values())}]
+    for ts, totals in pts:
+        totals = totals or {}
+        for k in keys:
+            if k in totals:
+                last[k] = int(totals[k] or 0)
+        out.append({"t": ts.isoformat(), "v": sum(last.values())})
+    out.append({"t": now.isoformat(), "v": sum(int(current[int(k)] or 0) for k in keys)})
+    return out
+
+
+@api_view(["POST"])
+def series(request):
+    """Как менялся показатель у набора аккаунтов: {"account_ids", "metric", "period"}.
+
+    metric — followers / views / likes / posts; period — 1d / 7d / 30d / 90d / all.
+    Ответ: {"points": [{"t", "v"}...], "first", "last", "delta"} — сумма по
+    аккаунтам. Аккаунты передаёт фронт: те же, что дали цифру на карточке
+    (стенд, площадки и поиск), поэтому график сходится с карточкой.
+    """
+    metric = str(request.data.get("metric") or "views")
+    period = str(request.data.get("period") or "7d")
+    if metric not in SERIES_METRICS:
+        return Response({"detail": "metric: followers, views, likes или posts"}, status=400)
+    if period not in SERIES_PERIOD_DAYS:
+        return Response({"detail": "period: 1d, 7d, 30d, 90d или all"}, status=400)
+    raw = request.data.get("account_ids")
+    if not isinstance(raw, list):
+        return Response({"detail": "account_ids должен быть списком"}, status=400)
+    if len(raw) > SERIES_MAX_IDS:
+        return Response({"detail": "Слишком много аккаунтов"}, status=400)
+    try:
+        ids = sorted({int(x) for x in raw})
+    except (TypeError, ValueError):
+        return Response({"detail": "account_ids: только числа"}, status=400)
+    field = SERIES_METRICS[metric]
+    now = timezone.now()
+    today = timezone.localdate()
+    points: list[dict] = []
+    granularity = "day"
+    if ids:
+        if period == "1d" and metric == "views":
+            points = _series_views_24h(ids, now)
+            granularity = "point"
+        if not points:
+            points = _series_daily(ids, field, SERIES_PERIOD_DAYS[period], today)
+    first = points[0]["v"] if points else 0
+    last = points[-1]["v"] if points else 0
+    return Response({
+        "metric": metric,
+        "period": period,
+        "granularity": granularity,
+        "points": points,
+        "first": first,
+        "last": last,
+        "delta": last - first,
     })

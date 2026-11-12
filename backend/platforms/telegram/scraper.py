@@ -1,4 +1,5 @@
 import asyncio
+import html as html_lib
 import re
 import sys
 from pathlib import Path
@@ -344,7 +345,11 @@ def _fetch_telegram_stream(username: str, client: HttpClient) -> tuple[int, list
             r'<div[^>]+class="[^"]*tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
             block, re.DOTALL,
         )
-        description = re.sub(r"<[^>]+>", "", text_m.group(1)).strip() if text_m else ""
+        description = ""
+        if text_m:
+            # <br/> — перенос строки; теги долой; &#39; и прочие сущности — в символы.
+            description = re.sub(r"<br\s*/?>", "\n", text_m.group(1), flags=re.I)
+            description = html_lib.unescape(re.sub(r"<[^>]+>", "", description)).strip()
         date_m = re.search(r'<time[^>]+datetime="([^"]+)"', block)
         views_m = re.search(r'<span[^>]+class="[^"]*tgme_widget_message_views[^"]*"[^>]*>([^<]+)<', block)
         thumb_m = re.search(r"background-image:url\('([^']+)'\)", block)

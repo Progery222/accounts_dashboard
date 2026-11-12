@@ -157,6 +157,10 @@ class AccountSerializer(serializers.ModelSerializer):
 
     def validate_username(self, value):
         value = str(value).strip().lstrip("@")
+        # «ник<Tab>ссылка» целиком в имени ломал обновление: площадка получала
+        # адрес с табуляцией («Invalid non-printable ASCII character in URL»).
+        if re.search(r"\s", value):
+            raise serializers.ValidationError("В имени аккаунта не должно быть пробелов и табуляции")
         return value
 
     def create(self, validated_data):

@@ -13,8 +13,9 @@ from .views import (
     refresh_all_status, refresh_all_stop, refresh_all_report_download,
     global_visibility,
     topic_list, topic_accounts, topic_detail, topic_board_order, topic_new_accounts, topic_remove_accounts,
+    topic_move_accounts,
 )
-from .analytics import top_posts, insights
+from .analytics import top_posts, insights, series as analytics_series
 
 accounts_router = DefaultRouter()
 accounts_router.register("", AccountViewSet, basename="account")
@@ -46,6 +47,7 @@ urlpatterns = [
     path("topics/remove-accounts/", topic_remove_accounts),
     path("topics/<int:pk>/accounts/", topic_accounts),
     path("topics/<int:pk>/new-accounts/", topic_new_accounts),
+    path("topics/<int:pk>/move-accounts/", topic_move_accounts),
     path("topics/<int:pk>/", topic_detail),
     path("auto-refresh-run-now/", auto_refresh_run_now),
     path("auto-refresh-stop/", auto_refresh_stop),
@@ -58,6 +60,7 @@ urlpatterns = [
     path("refresh-all-report/", refresh_all_report_download),
     path("analytics/top-posts/", top_posts),
     path("analytics/insights/", insights),
+    path("analytics/series/", analytics_series),
     path("profiles/", include(profiles_router.urls)),
     path("owners/", include(owners_router.urls)),
     path("groups/", include(groups_router.urls)),

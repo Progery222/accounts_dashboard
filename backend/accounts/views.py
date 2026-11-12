@@ -107,6 +107,22 @@ def _account_refresh_mutex(account_id: int) -> threading.Lock:
         return lock
 
 
+_HTML_ENTITY_RE = re.compile(r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+
+
+def _plain_text(text):
+    """Текст поста без HTML-сущностей: «night&#39;s» → «night's».
+
+    Скраперы, которые режут HTML регулярками (Telegram t.me/s), отдавали
+    сущности как есть: в названиях постов светилось «&#39;», а из «&#39;»
+    ещё и вытаскивался хештег «#39».
+    """
+    if not isinstance(text, str) or "&" not in text or not _HTML_ENTITY_RE.search(text):
+        return text
+    import html
+    return html.unescape(text)
+
+
 def _extract_hashtags(text: str) -> list[str]:
     """Return a sorted, deduplicated list of lowercase hashtags found in text."""
     return sorted(set(tag.lower() for tag in re.findall(r"#([\w\u0400-\u04FF]+)", text)))
@@ -284,7 +300,7 @@ def _sync_posts(
             if field in pd and pd[field] is not None:
                 if field == "thumbnail_url" and isinstance(pd[field], str) and not pd[field].strip():
                     continue
-                setattr(post, field, pd[field])
+                setattr(post, field, _plain_text(pd[field]) if field == "description" else pd[field])
         # Update numeric fields with resilient coercion + fallback aliases
         parsed_views = _to_int(pd.get("view_count", pd.get("play_count", 0)))
         # Threads / Instagram: 0 со скрапа часто «нет в DOM / не успели», а не реальные 0 просмотров.
@@ -5022,45 +5038,99 @@ def topic_new_accounts(request, pk):
     return Response(out)
 
 
+def _find_board_account(item):
+    """Аккаунт по {"username", "platform"} из формы: регистр не важен, «@» тоже."""
+    item = item if isinstance(item, dict) else {}
+    name = str(item.get("username") or "").strip().lstrip("@")
+    platform = str(item.get("platform") or "").strip().lower()
+    if not name:
+        return "", None
+    cands = Account.objects.filter(platform=platform) if platform else Account.objects.all()
+    account = (cands.filter(username=name).first()
+               or cands.filter(username__iexact=name).first()
+               or cands.filter(username__iexact="@" + name).first())
+    return name, account
+
+
+def _items_or_ids(request):
+    """Список из формы: ссылки/имена ("items") и/или отмеченные в списке ("account_ids").
+
+    Вернёт (items, ids, ошибка-Response или None).
+    """
+    items = request.data.get("items") or []
+    raw_ids = request.data.get("account_ids") or []
+    if not isinstance(items, list) or not isinstance(raw_ids, list):
+        return [], [], Response({"detail": "items и account_ids — списки"}, status=status.HTTP_400_BAD_REQUEST)
+    if not items and not raw_ids:
+        return [], [], Response({"detail": "Нет аккаунтов"}, status=status.HTTP_400_BAD_REQUEST)
+    if len(items) + len(raw_ids) > 500:
+        return [], [], Response({"detail": "Не больше 500 за раз"}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        ids = [int(x) for x in raw_ids]
+    except (TypeError, ValueError):
+        return [], [], Response({"detail": "account_ids: только числа"}, status=status.HTTP_400_BAD_REQUEST)
+    return items, ids, None
+
+
 @api_view(["POST"])
 def topic_remove_accounts(request):
-    """Убрать аккаунты со всех тем ветки по списку ссылок/имён.
+    """Убрать аккаунты со стенда (темы) — по ссылкам/именам и/или выбором из списка.
 
-    Тело: {"items": [{"username", "platform"}...]}. Ветка — из X-Domain.
-    Аккаунт снимается со всех её тем (стендов). Если он и заведён был здесь
-    (домен = эта ветка), то уходит в архив: иначе так и висел бы в домене,
-    невидимый на экране, и продолжал бы собираться. Аккаунты других веток
-    только снимаются со стендов. Ничего не удаляется насовсем.
+    Тело: {"items": [{"username", "platform"}...], "account_ids": [...],
+    "topic_id"?}. Ветка — из X-Domain. С ``topic_id`` аккаунт снимается
+    только с этого стенда, без него — со всех стендов ветки.
+
+    Если после этого аккаунт не стоит ни на одном стенде ветки и заведён был
+    здесь же (домен = ветка), он уходит в архив: иначе так и висел бы в
+    домене, невидимый на экране, и продолжал бы собираться. Аккаунты других
+    веток только снимаются со стендов. Ничего не удаляется насовсем.
     """
     from .models import Topic, TopicBoard
     board = _topic_board(request)
-    items = request.data.get("items")
-    if not isinstance(items, list) or not items:
-        return Response({"detail": "Нет аккаунтов"}, status=status.HTTP_400_BAD_REQUEST)
-    if len(items) > 500:
-        return Response({"detail": "Не больше 500 за раз"}, status=status.HTTP_400_BAD_REQUEST)
+    items, ids, err = _items_or_ids(request)
+    if err:
+        return err
+    topic = None
+    if request.data.get("topic_id") not in (None, "", "all"):
+        try:
+            topic = Topic.objects.filter(pk=int(request.data.get("topic_id")), board=board).first()
+        except (TypeError, ValueError):
+            topic = None
+        if topic is None:
+            return Response({"detail": "Стенд не найден"}, status=status.HTTP_404_NOT_FOUND)
     through = Topic.accounts.through
     out = {"removed": 0, "archived": 0, "not_found": [], "not_here": []}
-    gone = set()
+    targets = []   # (как назвать в ответе, аккаунт)
     for item in items:
-        item = item if isinstance(item, dict) else {}
-        name = str(item.get("username") or "").strip().lstrip("@")
-        platform = str(item.get("platform") or "").strip().lower()
+        name, account = _find_board_account(item)
         if not name:
             continue
-        cands = Account.objects.filter(platform=platform) if platform else Account.objects.all()
-        account = (cands.filter(username__iexact=name).first()
-                   or cands.filter(username__iexact="@" + name).first())
         if account is None:
             out["not_found"].append(name)
+        else:
+            targets.append((name, account))
+    by_id = {a.id: a for a in Account.objects.filter(id__in=ids)}
+    for i in ids:
+        if i in by_id:
+            targets.append((by_id[i].username, by_id[i]))
+        else:
+            out["not_found"].append(str(i))
+    gone, seen = set(), set()
+    for name, account in targets:
+        if account.id in seen:
             continue
+        seen.add(account.id)
         links = through.objects.filter(topic__board=board, account_id=account.id)
+        if topic is not None:
+            links = links.filter(topic=topic)
         if not links.exists():
             out["not_here"].append(name)
             continue
         links.delete()
-        gone.add(account.id)
         out["removed"] += 1
+        if through.objects.filter(topic__board=board, account_id=account.id).exists():
+            continue   # стоит на другом стенде ветки — там и остаётся
+        gone.add(account.id)
         if account.domain_id and account.domain.slug == board and not account.is_archived:
             account.is_archived = True
             account.save(update_fields=["is_archived"])
@@ -5070,4 +5140,76 @@ def topic_remove_accounts(request):
         if tb and tb.account_ids:
             tb.account_ids = [i for i in tb.account_ids if i not in gone]
             tb.save(update_fields=["account_ids", "updated_at"])
+    return Response(out)
+
+
+@api_view(["POST"])
+def topic_move_accounts(request, pk):
+    """Перенести аккаунты на стенд ``pk``: снять со всех других стендов ветки и поставить сюда.
+
+    Тело: {"items": [{"username", "platform"}...], "account_ids"?: [...],
+    "profile_id"?, "owner_id"?, "group_id"?, "country_id"?}. Метки из формы
+    перезаписывают метки аккаунта; не переданные (пустые) — не трогаем.
+    Перенос ищет уже заведённые аккаунты: кого нет на дашборде — в not_found,
+    заводить новых — это «Новый аккаунт». Архив и бан при переносе снимаются.
+    """
+    from .models import Topic, TopicBoard
+    topic = get_object_or_404(Topic, pk=pk)
+    items, ids, err = _items_or_ids(request)
+    if err:
+        return err
+    labels = {}
+    for key in ("profile_id", "owner_id", "group_id", "country_id"):
+        val = request.data.get(key)
+        if val in (None, "", 0, "0"):
+            continue
+        try:
+            labels[key] = int(val)
+        except (TypeError, ValueError):
+            return Response({"detail": f"{key}: число"}, status=status.HTTP_400_BAD_REQUEST)
+    catalogs = {"profile_id": Profile, "owner_id": Owner, "group_id": AccountGroup, "country_id": Country}
+    for key, val in labels.items():
+        if not catalogs[key].objects.filter(pk=val).exists():
+            return Response({"detail": f"{key}: нет такой записи"}, status=status.HTTP_400_BAD_REQUEST)
+    through = Topic.accounts.through
+    out = {"moved": 0, "already": 0, "not_found": [], "from": {}, "account_ids": []}
+    targets = []
+    for item in items:
+        name, account = _find_board_account(item)
+        if not name:
+            continue
+        if account is None:
+            out["not_found"].append(name)
+        else:
+            targets.append(account)
+    by_id = {a.id: a for a in Account.objects.filter(id__in=ids)}
+    targets += [by_id[i] for i in ids if i in by_id]
+    out["not_found"] += [str(i) for i in ids if i not in by_id]
+    seen = set()
+    with transaction.atomic():
+        for account in targets:
+            if account.id in seen:
+                continue
+            seen.add(account.id)
+            others = through.objects.filter(topic__board=topic.board, account_id=account.id).exclude(topic=topic)
+            for name in others.values_list("topic__name", flat=True):
+                out["from"][name] = out["from"].get(name, 0) + 1
+            others.delete()
+            if topic.accounts.filter(pk=account.pk).exists():
+                out["already"] += 1
+            else:
+                topic.accounts.add(account)
+                out["moved"] += 1
+            changed = [k for k, v in labels.items() if getattr(account, k) != v]
+            for k in changed:
+                setattr(account, k, labels[k])
+            if account.is_archived:
+                account.is_archived = False
+                changed.append("is_archived")
+            if account.is_banned:
+                account.is_banned = False
+                changed.append("is_banned")
+            if changed:
+                account.save(update_fields=changed)
+            out["account_ids"].append(account.id)
     return Response(out)
