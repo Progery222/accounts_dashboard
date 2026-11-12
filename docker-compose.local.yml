@@ -1,0 +1,55 @@
+# Локальный стенд для разработки и проверки: Postgres + Django + nginx с frontend/.
+#   docker compose -f docker-compose.local.yml up -d --build
+#   UI: http://localhost:9090/stands   (API тот же origin, /api → backend)
+# frontend/ смонтирован — правки index.html видны после перезагрузки страницы.
+# Код backend/ смонтирован — после правок: docker compose -f docker-compose.local.yml restart backend
+name: dashboard-local
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dashboard
+      POSTGRES_PASSWORD: dashboard
+      POSTGRES_DB: dashboard
+    volumes:
+      - local_pg:/var/lib/postgresql/data
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard"]
+      interval: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DEBUG: "True"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: dashboard
+      DB_USER: dashboard
+      DB_PASSWORD: dashboard
+      RUN_SCHEDULER: "false"
+      BROWSER_HEADLESS: "true"
+      ALLOWED_HOSTS: "*"
+      CORS_EXTRA_ORIGINS: "http://localhost:9090,http://127.0.0.1:9090"
+    command: ["sh", "-c", "python manage.py migrate --noinput && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 1 --threads 4 --timeout 600 --reload"]
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: nginx:1.27-alpine
+    ports:
+      - "9090:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./deploy/local/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+
+volumes:
+  local_pg:
